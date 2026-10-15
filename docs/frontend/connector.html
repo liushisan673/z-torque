@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Z-Torque 极矩 · Connector</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-secondary: #64748b;
+      --text-muted: #94a3b8;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-soft: #eff6ff;
+      --success: #16a34a;
+      --success-soft: #f0fdf4;
+      --warning: #d97706;
+      --warning-soft: #fffbeb;
+      --danger: #dc2626;
+      --danger-soft: #fef2f2;
+      --radius: 10px;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .topbar {
+      height: 52px; background: var(--surface); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; padding: 0 20px;
+    }
+    .topbar-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+    .topbar-brand .logo {
+      width: 28px; height: 28px; background: var(--primary); border-radius: 7px;
+      display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 700;
+    }
+    .topbar-nav { display: flex; gap: 4px; }
+    .topbar-nav a {
+      padding: 6px 12px; border-radius: 6px; color: var(--text-secondary);
+      text-decoration: none; font-size: 13px; font-weight: 500;
+    }
+    .topbar-nav a:hover { background: var(--bg); color: var(--text); }
+    .topbar-nav a.active { background: var(--primary-soft); color: var(--primary); }
+    .topbar-user { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-secondary); }
+    .topbar-user .avatar {
+      width: 28px; height: 28px; border-radius: 50%; background: var(--primary-soft); color: var(--primary);
+      display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;
+    }
+    .btn-text {
+      background: none; border: none; color: var(--text-secondary); cursor: pointer;
+      font-size: 13px; padding: 4px 8px; border-radius: 4px;
+    }
+    .btn-text:hover { color: var(--danger); background: var(--danger-soft); }
+
+    .main { display: flex; height: calc(100vh - 52px); }
+
+    .list-pane {
+      width: 360px; background: var(--surface); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; flex-shrink: 0;
+    }
+    .list-header { padding: 16px 16px 12px; border-bottom: 1px solid var(--border); }
+    .list-header h1 { font-size: 18px; font-weight: 700; margin-bottom: 12px; }
+    .list-actions { display: flex; gap: 8px; margin-bottom: 12px; }
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px;
+      border: none; border-radius: 8px; background: var(--primary); color: #fff;
+      font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-secondary {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+      border: 1px solid var(--border); border-radius: 8px; background: #fff;
+      color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-secondary:hover { background: var(--bg); color: var(--text); }
+    .btn-danger-outline {
+      height: 34px; padding: 0 12px; border: 1px solid #fecaca; border-radius: 8px;
+      background: #fff; color: var(--danger); font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-danger-outline:hover { background: var(--danger-soft); }
+
+    .search-box {
+      width: 100%; height: 34px; border: 1px solid var(--border); border-radius: 8px;
+      padding: 0 12px 0 34px; font-size: 13px; outline: none;
+      background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='M21 21l-4.35-4.35'/%3E%3C/svg%3E") no-repeat 10px center;
+    }
+    .search-box:focus {
+      border-color: var(--primary); background-color: #fff;
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+    }
+    .filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+    .filter-tab {
+      padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500;
+      color: var(--text-secondary); background: transparent; border: none; cursor: pointer;
+    }
+    .filter-tab:hover { background: var(--bg); }
+    .filter-tab.active { background: var(--primary-soft); color: var(--primary); }
+
+    .conn-list { flex: 1; overflow-y: auto; padding: 8px; }
+    .conn-card {
+      padding: 12px 14px; border-radius: 10px; cursor: pointer;
+      border: 1px solid transparent; margin-bottom: 4px;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .conn-card:hover { background: var(--bg); }
+    .conn-card.active { background: var(--primary-soft); border-color: #bfdbfe; }
+    .conn-card .row1 {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px;
+    }
+    .conn-card .name {
+      font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .conn-card.active .name { color: var(--primary); }
+    .conn-card .desc {
+      font-size: 12px; color: var(--text-secondary);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; margin-bottom: 8px;
+    }
+    .conn-card .meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+    .tag {
+      display: inline-flex; align-items: center; padding: 1px 7px;
+      border-radius: 4px; font-size: 11px; font-weight: 500;
+    }
+    .tag-rest { background: #e0f2fe; color: #0369a1; }
+    .tag-db { background: #fef3c7; color: #b45309; }
+    .tag-mcp { background: #f3e8ff; color: #7e22ce; }
+    .tag-ok { background: var(--success-soft); color: var(--success); }
+    .tag-warn { background: var(--warning-soft); color: var(--warning); }
+    .tag-err { background: var(--danger-soft); color: var(--danger); }
+    .tag-off { background: var(--bg); color: var(--text-muted); }
+    .tag-secret { background: #f5f3ff; color: #6d28d9; }
+    .detail-tags .tag { font-size: 12px; padding: 3px 10px; }
+
+    .detail-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+    .detail-header {
+      padding: 20px 28px 16px; background: var(--surface);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .detail-header .breadcrumb { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .detail-header .title-row {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    }
+    .detail-header h2 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+    .detail-header .subtitle { font-size: 13px; color: var(--text-secondary); max-width: 520px; }
+    .detail-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+    .detail-tags { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+    .tabs {
+      display: flex; padding: 0 28px; background: var(--surface);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .tab {
+      padding: 12px 16px; font-size: 13px; font-weight: 500; color: var(--text-secondary);
+      background: none; border: none; border-bottom: 2px solid transparent;
+      cursor: pointer; margin-bottom: -1px;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+    .detail-body { flex: 1; overflow-y: auto; padding: 24px 28px 40px; }
+
+    .section {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow);
+    }
+    .section h3 {
+      font-size: 14px; font-weight: 600; margin-bottom: 16px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .section h3 .hint { font-size: 12px; font-weight: 400; color: var(--text-muted); }
+
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .form-grid .full { grid-column: 1 / -1; }
+    .field label {
+      display: block; font-size: 12px; font-weight: 500;
+      color: var(--text-secondary); margin-bottom: 6px;
+    }
+    .field input, .field select, .field textarea {
+      width: 100%; border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 12px; font-size: 13px; color: var(--text);
+      outline: none; background: #fff; font-family: inherit;
+    }
+    .field input:disabled, .field select:disabled, .field textarea:disabled {
+      background: var(--bg); color: var(--text-secondary); cursor: not-allowed;
+    }
+    .field .help { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+    .secret-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px; background: var(--bg); border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .secret-row .secret-status {
+      flex: 1; font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .secret-row code {
+      font-size: 12px; background: #fff; padding: 2px 8px; border-radius: 4px;
+      border: 1px solid var(--border); color: var(--text-secondary);
+    }
+
+    .op-table, .cap-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .op-table th, .cap-table th {
+      text-align: left; font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.03em; padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .op-table td, .cap-table td {
+      padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle;
+    }
+    .op-table tr:last-child td, .cap-table tr:last-child td { border-bottom: none; }
+
+    .test-result {
+      margin-top: 12px; padding: 14px 16px; border-radius: 8px; font-size: 13px;
+    }
+    .test-result.ok { background: var(--success-soft); border: 1px solid #bbf7d0; color: #166534; }
+    .test-result.fail { background: var(--danger-soft); border: 1px solid #fecaca; color: #991b1b; }
+    .test-result .meta { font-size: 12px; margin-top: 6px; opacity: 0.85; }
+    .test-result .trace {
+      font-size: 11px; font-family: ui-monospace, monospace; margin-top: 4px; color: var(--text-muted);
+    }
+
+    .alert {
+      padding: 12px 14px; border-radius: 8px; font-size: 13px;
+      margin-bottom: 16px; display: flex; gap: 10px; align-items: flex-start;
+    }
+    .alert-info { background: var(--primary-soft); color: #1e40af; border: 1px solid #bfdbfe; }
+    .alert-warn { background: var(--warning-soft); color: #92400e; border: 1px solid #fde68a; }
+
+    .health-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    }
+    .health-card {
+      padding: 14px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border);
+    }
+    .health-card .label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+    .health-card .value { font-size: 15px; font-weight: 600; }
+
+    .type-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 6px;
+    }
+
+    @media (max-width: 900px) {
+      .list-pane { width: 100%; }
+      .detail-pane { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="logo">Z</div>
+      <span>Z-Torque</span>
+    </div>
+    <nav class="topbar-nav">
+      <a href="chat.html">Chat</a>
+      <a href="agent.html">Agent</a>
+      <a href="skill.html">Skill</a>
+      <a href="model.html">Model</a>
+      <a href="#" class="active">Connector</a>
+      <a href="#">Audit</a>
+    </nav>
+    <div class="topbar-user">
+      <div class="avatar">管</div>
+      <span>admin</span>
+      <button class="btn-text" type="button">退出</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <aside class="list-pane">
+      <div class="list-header">
+        <h1>Connector</h1>
+        <div class="list-actions">
+          <button class="btn-primary" type="button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+            新建连接
+          </button>
+        </div>
+        <input class="search-box" type="search" placeholder="搜索名称或目标…" id="searchInput" />
+        <div class="filter-tabs">
+          <button class="filter-tab active" data-filter="all" type="button">全部</button>
+          <button class="filter-tab" data-filter="rest" type="button">REST</button>
+          <button class="filter-tab" data-filter="db" type="button">数据库（只读）</button>
+          <button class="filter-tab" data-filter="mcp" type="button">MCP</button>
+        </div>
+      </div>
+
+      <div class="conn-list" id="connList">
+        <div class="conn-card active" data-id="crm-api" data-type="rest" data-status="ok">
+          <div class="row1">
+            <span class="name">CRM 开放 API</span>
+            <span class="tag tag-ok">健康</span>
+          </div>
+          <div class="desc">客户与订单查询 REST 接口，Bearer 认证。</div>
+          <div class="meta">
+            <span class="tag tag-rest">REST</span>
+            <span class="tag tag-secret">凭证已配置</span>
+          </div>
+        </div>
+        <div class="conn-card" data-id="sales-ro" data-type="db" data-status="ok">
+          <div class="row1">
+            <span class="name">销售数据库（只读）</span>
+            <span class="tag tag-ok">健康</span>
+          </div>
+          <div class="desc">PostgreSQL 只读副本，仅允许指定表查询。</div>
+          <div class="meta">
+            <span class="tag tag-db">数据库（只读）</span>
+            <span class="tag tag-secret">凭证已配置</span>
+          </div>
+        </div>
+        <div class="conn-card" data-id="mcp-fs" data-type="mcp" data-status="warn">
+          <div class="row1">
+            <span class="name">文档 MCP 服务</span>
+            <span class="tag tag-warn">降级</span>
+          </div>
+          <div class="desc">HTTP 传输 MCP，tools/list 部分工具不可用。</div>
+          <div class="meta">
+            <span class="tag tag-mcp">MCP</span>
+            <span class="tag tag-off">HTTP</span>
+          </div>
+        </div>
+        <div class="conn-card" data-id="legacy-erp" data-type="rest" data-status="off">
+          <div class="row1">
+            <span class="name">旧 ERP 接口</span>
+            <span class="tag tag-off">已停用</span>
+          </div>
+          <div class="desc">历史系统，已停用，不可被 Skill 调用。</div>
+          <div class="meta">
+            <span class="tag tag-rest">REST</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <section class="detail-pane">
+      <div class="detail-header">
+        <div class="breadcrumb">Connector / REST</div>
+        <div class="title-row">
+          <div>
+            <h2 id="detailTitle">CRM 开放 API</h2>
+            <p class="subtitle" id="detailDesc">客户与订单查询 REST 接口，Bearer 认证。</p>
+            <div class="detail-tags" id="detailTags">
+              <span class="tag tag-rest">REST</span>
+              <span class="tag tag-ok">健康</span>
+              <span class="tag tag-secret">凭证已配置</span>
+            </div>
+          </div>
+          <div class="detail-actions" id="detailActions">
+            <button class="btn-primary" type="button" id="btnTest">测试连接</button>
+            <button class="btn-secondary" type="button">编辑</button>
+            <button class="btn-danger-outline" type="button">停用</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="overview" type="button">概览</button>
+        <button class="tab" data-tab="config" type="button">连接配置</button>
+        <button class="tab" data-tab="auth" type="button">认证与密钥</button>
+        <button class="tab" data-tab="ops" type="button">操作 / 能力</button>
+        <button class="tab" data-tab="test" type="button">健康检查</button>
+      </div>
+
+      <div class="detail-body">
+        <div class="tab-panel" id="panel-overview">
+          <div class="alert alert-info">
+            <span>ℹ</span>
+            <span>连接由管理员配置。前端不得绕过 Connector 与 SkillGateway 直连目标系统。数据库连接必须为<strong>只读</strong>并限制表与查询。敏感项只引用 Secret URI。</span>
+          </div>
+
+          <div class="section">
+            <h3>基本信息</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>名称</label>
+                <input type="text" value="CRM 开放 API" id="fName" />
+              </div>
+              <div class="field">
+                <label>类型</label>
+                <input type="text" value="REST API" id="fType" disabled />
+              </div>
+              <div class="field full">
+                <label>描述</label>
+                <textarea id="fDesc" rows="2">客户与订单查询 REST 接口，Bearer 认证。</textarea>
+              </div>
+              <div class="field">
+                <label>状态</label>
+                <select id="fStatus">
+                  <option selected>启用</option>
+                  <option>停用</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>最近检查</label>
+                <input type="text" value="今天 14:30 · 健康" disabled />
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>健康摘要</h3>
+            <div class="health-grid">
+              <div class="health-card">
+                <div class="label">连通性</div>
+                <div class="value" style="color:var(--success)">正常</div>
+              </div>
+              <div class="health-card">
+                <div class="label">延迟</div>
+                <div class="value">86 ms</div>
+              </div>
+              <div class="health-card">
+                <div class="label">可用操作</div>
+                <div class="value">3</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-config" style="display:none">
+          <!-- REST 配置（默认展示） -->
+          <div class="section" id="configRest">
+            <h3>REST 目标 <span class="hint">须通过后端策略校验</span></h3>
+            <div class="form-grid">
+              <div class="field full">
+                <label>Base URL</label>
+                <input type="text" value="https://crm.example.com/api/v2" />
+              </div>
+              <div class="field">
+                <label>超时（秒）</label>
+                <input type="number" value="30" />
+              </div>
+              <div class="field">
+                <label>TLS 校验</label>
+                <select>
+                  <option selected>强制校验</option>
+                  <option>仅开发环境可关闭</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- DB 配置（切换时显示） -->
+          <div class="section" id="configDb" style="display:none">
+            <h3>只读数据库 <span class="hint">必须只读 · 限制表与查询</span></h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>驱动</label>
+                <input type="text" value="PostgreSQL" disabled />
+              </div>
+              <div class="field">
+                <label>主机 / 端口</label>
+                <input type="text" value="db-ro.internal:5432" />
+              </div>
+              <div class="field">
+                <label>数据库名</label>
+                <input type="text" value="sales" />
+              </div>
+              <div class="field">
+                <label>允许的表</label>
+                <input type="text" value="orders, order_items, regions" />
+              </div>
+              <div class="field full">
+                <label>查询限制</label>
+                <input type="text" value="仅 SELECT · 最大 1000 行 · 禁止多语句" />
+              </div>
+            </div>
+            <div class="alert alert-warn" style="margin-top:12px;margin-bottom:0">
+              <span>⚠</span>
+              <span>生产默认拒绝写入账号与无表限制配置。凭证走 Secret URI。</span>
+            </div>
+          </div>
+
+          <!-- MCP 配置 -->
+          <div class="section" id="configMcp" style="display:none">
+            <h3>MCP 传输 <span class="hint">JSON-RPC 2.0 · tools/list · tools/call</span></h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>传输方式</label>
+                <select>
+                  <option selected>HTTP</option>
+                  <option>stdio</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>端点 / 命令</label>
+                <input type="text" value="https://mcp.example.com/rpc" />
+              </div>
+              <div class="field">
+                <label>超时（秒）</label>
+                <input type="number" value="60" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-auth" style="display:none">
+          <div class="alert alert-warn">
+            <span>⚠</span>
+            <span>支持 API Key / Bearer、Basic，以及管理员明确允许的匿名连接。凭证只存 Secret 引用，页面不展示明文。</span>
+          </div>
+          <div class="section">
+            <h3>认证模式</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>模式</label>
+                <select id="authMode">
+                  <option selected>Bearer Token</option>
+                  <option>API Key Header</option>
+                  <option>Basic Auth</option>
+                  <option>匿名（需管理员允许）</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Header 名（如适用）</label>
+                <input type="text" value="Authorization" />
+              </div>
+            </div>
+            <div style="margin-top:16px">
+              <label style="font-size:12px;font-weight:500;color:var(--text-secondary);display:block;margin-bottom:8px">凭证</label>
+              <div class="secret-row">
+                <div class="secret-status">
+                  <span class="tag tag-secret">已配置</span>
+                  <code>secret://conn_••••••••3c1b</code>
+                </div>
+                <button class="btn-secondary" type="button">更换凭证</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-ops" style="display:none">
+          <div class="section">
+            <h3>已注册操作 / 能力 <span class="hint">可登记为 Tool 供 Skill 使用</span></h3>
+            <table class="op-table" id="opsTable">
+              <thead>
+                <tr>
+                  <th>操作</th>
+                  <th>方法 / 类型</th>
+                  <th>说明</th>
+                  <th>Tool</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="font-weight:500">list_customers</td>
+                  <td>GET /customers</td>
+                  <td>分页查询客户</td>
+                  <td><span class="tag tag-ok">已注册</span></td>
+                </tr>
+                <tr>
+                  <td style="font-weight:500">get_order</td>
+                  <td>GET /orders/{id}</td>
+                  <td>订单详情</td>
+                  <td><span class="tag tag-ok">已注册</span></td>
+                </tr>
+                <tr>
+                  <td style="font-weight:500">search_orders</td>
+                  <td>GET /orders</td>
+                  <td>按条件搜索订单</td>
+                  <td><span class="tag tag-off">未注册</span></td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="field help" style="margin-top:12px">
+              发现能力 ≠ 已授权。注册与启停由后端与权限控制；前端不能直接调用目标系统。
+            </p>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-test" style="display:none">
+          <div class="section">
+            <h3>健康检查 / 测试连接</h3>
+            <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px">
+              由后端按连接类型探测（HTTP 探活、只读 SELECT 1、MCP tools/list 等），结果写入状态与审计。
+            </p>
+            <button class="btn-primary" type="button" id="btnRunTest" style="width:auto">运行检查</button>
+            <div class="test-result ok" id="testResult">
+              <strong>连接健康</strong>
+              <div class="meta">REST · HTTP 200 · 耗时 86 ms · 3 个操作可访问</div>
+              <div class="trace">trace_id: tr_01h8conn9m3n4p5q6</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const connectors = {
+      "crm-api": {
+        title: "CRM 开放 API",
+        desc: "客户与订单查询 REST 接口，Bearer 认证。",
+        type: "REST",
+        typeClass: "tag-rest",
+        status: "健康",
+        statusClass: "tag-ok",
+        secret: true,
+        config: "rest",
+      },
+      "sales-ro": {
+        title: "销售数据库（只读）",
+        desc: "PostgreSQL 只读副本，仅允许指定表查询。",
+        type: "数据库（只读）",
+        typeClass: "tag-db",
+        status: "健康",
+        statusClass: "tag-ok",
+        secret: true,
+        config: "db",
+      },
+      "mcp-fs": {
+        title: "文档 MCP 服务",
+        desc: "HTTP 传输 MCP，tools/list 部分工具不可用。",
+        type: "MCP",
+        typeClass: "tag-mcp",
+        status: "降级",
+        statusClass: "tag-warn",
+        secret: false,
+        config: "mcp",
+      },
+      "legacy-erp": {
+        title: "旧 ERP 接口",
+        desc: "历史系统，已停用，不可被 Skill 调用。",
+        type: "REST",
+        typeClass: "tag-rest",
+        status: "已停用",
+        statusClass: "tag-off",
+        secret: false,
+        config: "rest",
+      },
+    };
+
+    function showConfig(kind) {
+      document.getElementById("configRest").style.display = kind === "rest" ? "block" : "none";
+      document.getElementById("configDb").style.display = kind === "db" ? "block" : "none";
+      document.getElementById("configMcp").style.display = kind === "mcp" ? "block" : "none";
+    }
+
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+        tab.classList.add("active");
+        document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+        document.getElementById("panel-" + tab.dataset.tab).style.display = "block";
+      });
+    });
+
+    document.querySelectorAll(".filter-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".filter-tab").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const f = btn.dataset.filter;
+        document.querySelectorAll(".conn-card").forEach((card) => {
+          card.style.display = f === "all" || card.dataset.type === f ? "" : "none";
+        });
+      });
+    });
+
+    document.getElementById("searchInput").addEventListener("input", (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      document.querySelectorAll(".conn-card").forEach((card) => {
+        card.style.display = !q || card.textContent.toLowerCase().includes(q) ? "" : "none";
+      });
+    });
+
+    document.querySelectorAll(".conn-card").forEach((card) => {
+      card.addEventListener("click", () => {
+        document.querySelectorAll(".conn-card").forEach((c) => c.classList.remove("active"));
+        card.classList.add("active");
+        const c = connectors[card.dataset.id];
+        if (!c) return;
+        document.getElementById("detailTitle").textContent = c.title;
+        document.getElementById("detailDesc").textContent = c.desc;
+        document.querySelector(".breadcrumb").textContent = "Connector / " + c.type;
+        document.getElementById("fName").value = c.title;
+        document.getElementById("fType").value = c.type;
+        document.getElementById("fDesc").value = c.desc;
+        document.getElementById("detailTags").innerHTML = `
+          <span class="tag ${c.typeClass}">${c.type}</span>
+          <span class="tag ${c.statusClass}">${c.status}</span>
+          ${c.secret ? '<span class="tag tag-secret">凭证已配置</span>' : '<span class="tag tag-off">无凭证 / 匿名</span>'}`;
+        showConfig(c.config);
+
+        const actions = document.getElementById("detailActions");
+        if (c.status === "已停用") {
+          actions.innerHTML = `
+            <button class="btn-primary" type="button">启用</button>
+            <button class="btn-secondary" type="button">编辑</button>`;
+        } else {
+          actions.innerHTML = `
+            <button class="btn-primary" type="button" id="btnTest">测试连接</button>
+            <button class="btn-secondary" type="button">编辑</button>
+            <button class="btn-danger-outline" type="button">停用</button>`;
+          document.getElementById("btnTest")?.addEventListener("click", goTest);
+        }
+      });
+    });
+
+    function goTest() {
+      document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+      document.querySelector('.tab[data-tab="test"]').classList.add("active");
+      document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+      document.getElementById("panel-test").style.display = "block";
+    }
+    document.getElementById("btnTest").addEventListener("click", goTest);
+    document.getElementById("btnRunTest").addEventListener("click", () => {
+      const el = document.getElementById("testResult");
+      el.className = "test-result ok";
+      el.innerHTML = `
+        <strong>连接健康</strong>
+        <div class="meta">探测完成 · 耗时 ${50 + Math.floor(Math.random() * 100)} ms</div>
+        <div class="trace">trace_id: tr_${Date.now().toString(36)}</div>`;
+    });
+
+    showConfig("rest");
+  </script>
+</body>
+</html>

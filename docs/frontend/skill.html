@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Z-Torque 极矩 · Skill（含 MD-Skill）</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-secondary: #64748b;
+      --text-muted: #94a3b8;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-soft: #eff6ff;
+      --success: #16a34a;
+      --success-soft: #f0fdf4;
+      --warning: #d97706;
+      --warning-soft: #fffbeb;
+      --danger: #dc2626;
+      --danger-soft: #fef2f2;
+      --cyan-soft: #ecfeff;
+      --cyan: #0e7490;
+      --amber-soft: #fef3c7;
+      --amber: #b45309;
+      --violet-soft: #f5f3ff;
+      --violet: #6d28d9;
+      --radius: 10px;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .topbar {
+      height: 52px; background: var(--surface); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; padding: 0 20px;
+    }
+    .topbar-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+    .topbar-brand .logo {
+      width: 28px; height: 28px; background: var(--primary); border-radius: 7px;
+      display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 700;
+    }
+    .topbar-nav { display: flex; gap: 4px; flex-wrap: wrap; }
+    .topbar-nav a {
+      padding: 6px 12px; border-radius: 6px; color: var(--text-secondary);
+      text-decoration: none; font-size: 13px; font-weight: 500;
+    }
+    .topbar-nav a:hover { background: var(--bg); color: var(--text); }
+    .topbar-nav a.active { background: var(--primary-soft); color: var(--primary); }
+    .topbar-user { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-secondary); }
+    .topbar-user .avatar {
+      width: 28px; height: 28px; border-radius: 50%; background: var(--primary-soft); color: var(--primary);
+      display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;
+    }
+    .btn-text {
+      background: none; border: none; color: var(--text-secondary); cursor: pointer;
+      font-size: 13px; padding: 4px 8px; border-radius: 4px;
+    }
+    .btn-text:hover { color: var(--danger); background: var(--danger-soft); }
+    .main { display: flex; height: calc(100vh - 52px); }
+    .list-pane {
+      width: 400px; background: var(--surface); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; flex-shrink: 0;
+    }
+    .list-header { padding: 16px 16px 12px; border-bottom: 1px solid var(--border); }
+    .list-header h1 { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+    .list-header .sub {
+      font-size: 12px; color: var(--text-muted); margin-bottom: 12px; line-height: 1.45;
+    }
+    .list-actions { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px;
+      border: none; border-radius: 8px; background: var(--primary); color: #fff;
+      font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-secondary {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+      border: 1px solid var(--border); border-radius: 8px; background: #fff;
+      color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-secondary:hover { background: var(--bg); color: var(--text); }
+    .btn-danger-outline {
+      height: 34px; padding: 0 12px; border: 1px solid #fecaca; border-radius: 8px;
+      background: #fff; color: var(--danger); font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-danger-outline:hover { background: var(--danger-soft); }
+    .btn-success {
+      height: 34px; padding: 0 12px; border: none; border-radius: 8px;
+      background: var(--success); color: #fff; font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-success:hover { background: #15803d; }
+    .search-box {
+      width: 100%; height: 34px; border: 1px solid var(--border); border-radius: 8px;
+      padding: 0 12px 0 34px; font-size: 13px; outline: none;
+      background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='M21 21l-4.35-4.35'/%3E%3C/svg%3E") no-repeat 10px center;
+    }
+    .search-box:focus {
+      border-color: var(--primary); background-color: #fff;
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+    }
+    .filter-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+    .filter-tab {
+      padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500;
+      color: var(--text-secondary); background: transparent; border: none; cursor: pointer;
+    }
+    .filter-tab:hover { background: var(--bg); }
+    .filter-tab.active { background: var(--primary-soft); color: var(--primary); }
+    .skill-list { flex: 1; overflow-y: auto; padding: 8px; }
+    .skill-card {
+      padding: 12px 14px; border-radius: 10px; cursor: pointer;
+      border: 1px solid transparent; margin-bottom: 4px;
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .skill-card:hover { background: var(--bg); }
+    .skill-card.active { background: var(--primary-soft); border-color: #bfdbfe; }
+    .skill-card .row1 {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px;
+    }
+    .skill-card .name {
+      font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .skill-card.active .name { color: var(--primary); }
+    .skill-card .desc {
+      font-size: 12px; color: var(--text-secondary);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; margin-bottom: 8px;
+    }
+    .skill-card .meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .skill-card .path {
+      font-size: 11px; color: var(--text-muted); margin-top: 6px;
+      font-family: ui-monospace, monospace;
+    }
+    .tag {
+      display: inline-flex; align-items: center; padding: 1px 7px;
+      border-radius: 4px; font-size: 11px; font-weight: 500;
+    }
+    .tag-md { background: var(--violet-soft); color: var(--violet); }
+    .tag-official { background: #f0f9ff; color: #0369a1; }
+    .tag-mine { background: #fce7f3; color: #9d174d; }
+    .tag-published { background: var(--success-soft); color: var(--success); }
+    .tag-draft { background: var(--warning-soft); color: var(--warning); }
+    .tag-pending { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
+    .tag-instruction { background: var(--cyan-soft); color: var(--cyan); }
+    .tag-script { background: var(--amber-soft); color: var(--amber); }
+    .tag-confirm { background: #fef2f2; color: #b91c1c; }
+    .ver { font-size: 11px; color: var(--text-muted); }
+    .detail-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+    .detail-header {
+      padding: 20px 28px 16px; background: var(--surface);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .detail-header .breadcrumb { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .detail-header .title-row {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    }
+    .detail-header h2 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+    .detail-header .subtitle { font-size: 13px; color: var(--text-secondary); max-width: 560px; }
+    .detail-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+    .detail-tags { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    .detail-tags .tag { font-size: 12px; padding: 3px 10px; }
+    .tabs {
+      display: flex; flex-wrap: wrap; gap: 0; padding: 0 28px;
+      background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .tab {
+      padding: 12px 14px; font-size: 13px; font-weight: 500;
+      color: var(--text-secondary); background: none; border: none;
+      border-bottom: 2px solid transparent; cursor: pointer; margin-bottom: -1px;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+    .detail-body { flex: 1; overflow-y: auto; padding: 24px 28px 40px; }
+    .section {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow);
+    }
+    .section h3 {
+      font-size: 14px; font-weight: 600; margin-bottom: 16px;
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+    }
+    .section h3 .hint { font-size: 12px; font-weight: 400; color: var(--text-muted); }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .form-grid .full { grid-column: 1 / -1; }
+    .field label {
+      display: block; font-size: 12px; font-weight: 500;
+      color: var(--text-secondary); margin-bottom: 6px;
+    }
+    .field input {
+      width: 100%; border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 12px; font-size: 13px; color: var(--text);
+      outline: none; background: var(--bg); font-family: inherit;
+    }
+    .field input:disabled { color: var(--text-secondary); cursor: not-allowed; }
+    .field .help { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+    .md-preview {
+      border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px;
+      background: #fafbfc; font-size: 13px; line-height: 1.65;
+      max-height: 320px; overflow-y: auto;
+    }
+    .md-preview h4 { font-size: 13px; font-weight: 600; margin: 12px 0 6px; color: var(--text); }
+    .md-preview h4:first-child { margin-top: 0; }
+    .md-preview ul { padding-left: 18px; color: var(--text-secondary); }
+    .md-preview li { margin-bottom: 4px; }
+    .md-preview p { color: var(--text-secondary); margin-bottom: 8px; }
+    .schema-box {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+      background: #0f172a; color: #e2e8f0; border-radius: 8px;
+      padding: 14px 16px; overflow-x: auto; line-height: 1.5; white-space: pre;
+    }
+    .file-list { display: flex; flex-direction: column; gap: 8px; }
+    .file-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px; background: var(--bg); border-radius: 8px;
+      border: 1px solid var(--border); font-size: 13px;
+    }
+    .file-item .icon {
+      width: 32px; height: 32px; border-radius: 6px;
+      background: var(--amber-soft); color: var(--amber);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 10px; font-weight: 700; flex-shrink: 0;
+    }
+    .file-item .name { font-weight: 500; }
+    .file-item .path { font-size: 11px; color: var(--text-muted); font-family: ui-monospace, monospace; }
+    .flag-grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px;
+    }
+    .flag-card {
+      padding: 12px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border);
+    }
+    .flag-card .label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+    .flag-card .value { font-size: 14px; font-weight: 600; }
+    .version-item {
+      display: flex; gap: 14px; padding: 12px 0; border-bottom: 1px solid var(--border);
+    }
+    .version-item:last-child { border-bottom: none; }
+    .version-item .v-badge {
+      width: 42px; height: 42px; border-radius: 10px; background: var(--bg);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 700; color: var(--text-secondary); flex-shrink: 0;
+    }
+    .version-item.current .v-badge { background: var(--primary-soft); color: var(--primary); }
+    .version-item .v-body { flex: 1; min-width: 0; }
+    .version-item .v-title {
+      font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    }
+    .version-item .v-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+    .alert {
+      padding: 12px 14px; border-radius: 8px; font-size: 13px;
+      margin-bottom: 16px; display: flex; gap: 10px; align-items: flex-start;
+    }
+    .alert-info { background: var(--primary-soft); color: #1e40af; border: 1px solid #bfdbfe; }
+    .alert-warn { background: var(--warning-soft); color: #92400e; border: 1px solid #fde68a; }
+    .alert-violet { background: var(--violet-soft); color: #5b21b6; border: 1px solid #ddd6fe; }
+    .tag-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag-chip {
+      font-size: 12px; padding: 3px 10px; border-radius: 6px;
+      background: var(--bg); color: var(--text-secondary); border: 1px solid var(--border);
+    }
+    .load-steps {
+      font-size: 12px; color: var(--text-secondary); line-height: 1.6;
+      padding: 12px; background: var(--bg); border-radius: 8px; border: 1px dashed var(--border);
+    }
+    .load-steps ol { padding-left: 18px; margin-top: 6px; }
+    .load-steps li { margin-bottom: 4px; }
+    code { font-size: 12px; background: rgba(0,0,0,0.05); padding: 1px 5px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="logo">Z</div>
+      <span>Z-Torque</span>
+    </div>
+    <nav class="topbar-nav">
+      <a href="chat.html">Chat</a>
+      <a href="agent.html">Agent</a>
+      <a href="#" class="active">Skill</a>
+      <a href="model.html">Model</a>
+      <a href="connector.html">Connector</a>
+      <a href="audit.html">Audit</a>
+      <a href="users.html">用户</a>
+    </nav>
+    <div class="topbar-user">
+      <div class="avatar">管</div>
+      <span>admin</span>
+      <button class="btn-text" type="button">退出</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <aside class="list-pane">
+      <div class="list-header">
+        <h1>Skill</h1>
+        <p class="sub">
+          MD-Skill 来自目录 <code>md-skills/&lt;name&gt;/</code>，扫描入库后在此展示。
+          <strong>无单独 MD-Skill 导航页。</strong>
+        </p>
+        <div class="list-actions">
+          <button class="btn-secondary" type="button" title="触发后端重新扫描 md-skills/">同步 md-skills</button>
+          <button class="btn-primary" type="button">创建 Skill</button>
+        </div>
+        <input class="search-box" type="search" placeholder="搜索 name / 描述 / tags…" id="searchInput" />
+        <div class="filter-tabs">
+          <button class="filter-tab active" data-filter="all" type="button">全部</button>
+          <button class="filter-tab" data-filter="md" type="button">MD-Skill</button>
+          <button class="filter-tab" data-filter="instruction" type="button">纯指令</button>
+          <button class="filter-tab" data-filter="script" type="button">脚本</button>
+          <button class="filter-tab" data-filter="pending" type="button">待确认启用</button>
+        </div>
+      </div>
+
+      <div class="skill-list" id="skillList">
+        <div class="skill-card" data-id="contract-review" data-kind="md" data-mode="instruction" data-status="pending">
+          <div class="row1">
+            <span class="name">contract-review</span>
+            <span class="tag tag-pending">待确认启用</span>
+          </div>
+          <div class="desc">审查合同风险条款</div>
+          <div class="meta">
+            <span class="tag tag-md">MD-Skill</span>
+            <span class="tag tag-instruction">纯指令</span>
+            <span class="tag tag-confirm">可配确认</span>
+            <span class="ver">扫描草稿</span>
+          </div>
+          <div class="path">md-skills/contract-review/</div>
+        </div>
+
+        <div class="skill-card active" data-id="data-analysis" data-kind="md" data-mode="script" data-status="published">
+          <div class="row1">
+            <span class="name">data-analysis</span>
+            <span class="tag tag-published">已发布</span>
+          </div>
+          <div class="desc">分析结构化数据并生成摘要，支持区域汇总与异常检测。</div>
+          <div class="meta">
+            <span class="tag tag-md">MD-Skill</span>
+            <span class="tag tag-script">脚本</span>
+            <span class="tag tag-official">平台</span>
+            <span class="ver">v2</span>
+          </div>
+          <div class="path">md-skills/data-analysis/</div>
+        </div>
+
+        <div class="skill-card" data-id="text-summary" data-kind="md" data-mode="instruction" data-status="published">
+          <div class="row1">
+            <span class="name">text-summary</span>
+            <span class="tag tag-published">已发布</span>
+          </div>
+          <div class="desc">对长文本提取要点与结论，纯指令模式。</div>
+          <div class="meta">
+            <span class="tag tag-md">MD-Skill</span>
+            <span class="tag tag-instruction">纯指令</span>
+            <span class="ver">v1</span>
+          </div>
+          <div class="path">md-skills/text-summary/</div>
+        </div>
+
+        <div class="skill-card" data-id="my-reply" data-kind="custom" data-mode="instruction" data-status="draft">
+          <div class="row1">
+            <span class="name">客户回复模板</span>
+            <span class="tag tag-draft">草稿</span>
+          </div>
+          <div class="desc">个人维护的回复结构，非 md-skills 目录来源。</div>
+          <div class="meta">
+            <span class="tag tag-mine">我的</span>
+            <span class="tag tag-instruction">纯指令</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <section class="detail-pane">
+      <div class="detail-header">
+        <div class="breadcrumb" id="breadcrumb">Skill / MD-Skill / md-skills/data-analysis/</div>
+        <div class="title-row">
+          <div>
+            <h2 id="detailTitle">data-analysis</h2>
+            <p class="subtitle" id="detailDesc">分析结构化数据并生成摘要，支持区域汇总与异常检测。</p>
+            <div class="detail-tags" id="detailTags">
+              <span class="tag tag-md">MD-Skill</span>
+              <span class="tag tag-script">allow_scripts: true</span>
+              <span class="tag tag-published">ENABLED · 已发布 v2</span>
+              <span class="tag" style="background:#f1f5f9;color:#475569">timeout 60s</span>
+            </div>
+          </div>
+          <div class="detail-actions" id="detailActions">
+            <button class="btn-secondary" type="button">复制到我的</button>
+            <button class="btn-secondary" type="button">查看快照</button>
+            <button class="btn-primary" type="button">发布新版本</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="overview" type="button">概览 · front-matter</button>
+        <button class="tab" data-tab="body" type="button">正文（操作手册）</button>
+        <button class="tab" data-tab="scripts" type="button">scripts / examples</button>
+        <button class="tab" data-tab="load" type="button">加载与生效</button>
+        <button class="tab" data-tab="versions" type="button">版本</button>
+      </div>
+
+      <div class="detail-body">
+        <div class="tab-panel" id="panel-overview">
+          <div class="alert alert-violet">
+            <span>◈</span>
+            <span>
+              <strong>MD-Skill 规范（社区版）</strong>：
+              目录 <code>md-skills/&lt;name&gt;/SKILL.md</code> → 解析 YAML front-matter + 正文 →
+              写入 <code>zr_skill(skill_type=MD_SKILL)</code> + <code>zr_skill_version</code>。
+              前端不读磁盘，只展示已入库记录。执行走 SkillGateway，无浏览器跑脚本。
+            </span>
+          </div>
+
+          <div class="section">
+            <h3>SKILL.md front-matter 字段</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>name（唯一 ^[a-z0-9-]{1,64}$）</label>
+                <input type="text" id="fName" value="data-analysis" disabled />
+              </div>
+              <div class="field">
+                <label>description</label>
+                <input type="text" id="fDesc" value="分析结构化数据并生成摘要" disabled />
+              </div>
+              <div class="field">
+                <label>allow_scripts</label>
+                <input type="text" id="fAllowScripts" value="true（允许 scripts/）" disabled />
+              </div>
+              <div class="field">
+                <label>requires_confirmation</label>
+                <input type="text" id="fConfirm" value="false" disabled />
+              </div>
+              <div class="field">
+                <label>timeout_seconds</label>
+                <input type="text" id="fTimeout" value="60" disabled />
+              </div>
+              <div class="field">
+                <label>来源目录</label>
+                <input type="text" id="fPath" value="md-skills/data-analysis/" disabled />
+              </div>
+              <div class="field full">
+                <label>tags</label>
+                <div class="tag-chips" id="fTags">
+                  <span class="tag-chip">data</span>
+                  <span class="tag-chip">analysis</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>params（JSON Schema · 工具入参）</h3>
+            <div class="schema-box" id="fParams">{
+  "type": "object",
+  "properties": {
+    "question": { "type": "string", "description": "分析问题" },
+    "file_path": { "type": "string", "description": "数据文件路径" }
+  },
+  "required": ["question"]
+}</div>
+            <p class="field help" style="margin-top:10px">执行前按 schema 校验入参；注册制路径下作为工具入参描述。</p>
+          </div>
+
+          <div class="section">
+            <h3>运行标志</h3>
+            <div class="flag-grid" id="fFlags">
+              <div class="flag-card">
+                <div class="label">skill_type</div>
+                <div class="value">MD_SKILL</div>
+              </div>
+              <div class="flag-card">
+                <div class="label">默认状态</div>
+                <div class="value" style="color:var(--success)">ENABLED</div>
+              </div>
+              <div class="flag-card">
+                <div class="label">首次启用</div>
+                <div class="value" style="font-size:13px">管理员已确认</div>
+              </div>
+              <div class="flag-card">
+                <div class="label">执行路径</div>
+                <div class="value" style="font-size:13px">脚本 · 受控子进程</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-body" style="display:none">
+          <div class="section">
+            <h3>正文 · 给模型看的操作手册 <span class="hint">不可信输入，不能覆盖系统策略 / PEP</span></h3>
+            <div class="md-preview" id="fBody">
+              <h4>适用场景</h4>
+              <ul>
+                <li>分析用户提供的结构化数据（表格、CSV 等）</li>
+                <li>提炼关键变化、区域对比与异常点</li>
+              </ul>
+              <h4>执行步骤与判断规则</h4>
+              <ul>
+                <li>先确认数据范围和分析目标</li>
+                <li>说明关键发现及其依据</li>
+                <li>不得编造数据中不存在的指标</li>
+                <li>数据不足时明确说明局限性</li>
+              </ul>
+              <h4>输出格式要求</h4>
+              <p>输出结论、关键依据和必要的局限性说明。</p>
+            </div>
+          </div>
+          <div class="alert alert-info">
+            <span>ℹ</span>
+            <span>
+              <strong>注册制路径</strong>：正文作为该工具的「操作说明」注入工具描述（或按需一次性上下文）；
+              模型据此调用；<code>params</code> 作入参 schema。
+              <strong>脚本路径</strong>（allow_scripts: true）：受控子进程执行，stdout/stderr 回传并截断。
+            </span>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-scripts" style="display:none">
+          <div class="section">
+            <h3>scripts/ <span class="hint">仅 allow_scripts: true · 扩展名白名单 .py / .sh / .js</span></h3>
+            <div class="file-list" id="fScripts">
+              <div class="file-item">
+                <div class="icon">PY</div>
+                <div>
+                  <div class="name">summarize.py</div>
+                  <div class="path">md-skills/data-analysis/scripts/summarize.py</div>
+                </div>
+              </div>
+            </div>
+            <p class="field help" style="margin-top:12px">
+              资源限制 CPU/内存；工作目录锁定在 skill 目录；默认无网络；超时强杀；拒绝 <code>..</code> 与目录外读写。
+              <strong>前端无「运行脚本」按钮。</strong>
+            </p>
+          </div>
+          <div class="section">
+            <h3>examples/ <span class="hint">可选 · 不自动获得执行权限</span></h3>
+            <div class="file-list">
+              <div class="file-item">
+                <div class="icon" style="background:#e0f2fe;color:#0369a1">CSV</div>
+                <div>
+                  <div class="name">sample.csv</div>
+                  <div class="path">md-skills/data-analysis/examples/sample.csv</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-load" style="display:none">
+          <div class="section">
+            <h3>加载与生效（规范）</h3>
+            <div class="load-steps">
+              <strong>后端</strong>
+              <ol>
+                <li>启动时扫描 <code>md-skills/</code>；watchdog 监听变更（新增/修改 ≤ 30 秒生效，不重启）</li>
+                <li>解析 front-matter → 校验 → 写 zr_skill(skill_type=MD_SKILL) + zr_skill_version</li>
+                <li>默认状态 ENABLED；<strong>首次启用需管理员一次确认</strong></li>
+                <li>绑定到 Agent 版本后，下一轮对话即可被模型看到</li>
+              </ol>
+              <strong style="display:block;margin-top:10px">写操作</strong>
+              <ol>
+                <li>改数据、发邮件等：requires_confirmation: true 或全局策略 → 单人确认 + 审计</li>
+              </ol>
+            </div>
+          </div>
+          <div class="alert alert-warn">
+            <span>⚠</span>
+            <span>控制台「同步 md-skills」仅触发扫描；不能代替管理员首次确认启用。已发布 Version 不因磁盘修改而原地覆盖。</span>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-versions" style="display:none">
+          <div class="section">
+            <h3>SkillVersion（系统递增，非文件内随意 version）</h3>
+            <div class="version-item current">
+              <div class="v-badge">v2</div>
+              <div class="v-body">
+                <div class="v-title">
+                  v2
+                  <span class="tag tag-published">当前发布</span>
+                </div>
+                <div class="v-meta">allow_scripts=true · summarize.py · params 已固化 · 管理员已确认启用</div>
+              </div>
+              <button class="btn-secondary" type="button" style="height:30px;font-size:12px;align-self:center">快照</button>
+            </div>
+            <div class="version-item">
+              <div class="v-badge">v1</div>
+              <div class="v-body">
+                <div class="v-title">v1</div>
+                <div class="v-meta">初始扫描发布</div>
+              </div>
+              <button class="btn-secondary" type="button" style="height:30px;font-size:12px;align-self:center">快照</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const skills = {
+      "contract-review": {
+        title: "contract-review",
+        desc: "审查合同风险条款",
+        breadcrumb: "Skill / MD-Skill / md-skills/contract-review/",
+        path: "md-skills/contract-review/",
+        allowScripts: "false（默认不执行 scripts/）",
+        confirm: "false（可按业务改为 true）",
+        timeout: "60",
+        tags: ["legal", "review"],
+        status: "pending",
+        params: `{
+  "type": "object",
+  "properties": {
+    "file_path": { "type": "string", "description": "合同文件路径" }
+  },
+  "required": ["file_path"]
+}`,
+        body: `<h4>适用场景</h4><p>审查合同中的风险条款与义务不平衡点。</p>
+<h4>步骤与判断规则</h4><ul>
+<li>识别责任限制、自动续约、违约金等条款</li>
+<li>标注对己方不利的表述并给出修改建议</li>
+<li>不得编造合同中不存在的条款</li>
+</ul>
+<h4>输出格式</h4><p>风险清单 + 条款引用 + 建议动作。</p>`,
+        scripts: false,
+      },
+      "data-analysis": {
+        title: "data-analysis",
+        desc: "分析结构化数据并生成摘要，支持区域汇总与异常检测。",
+        breadcrumb: "Skill / MD-Skill / md-skills/data-analysis/",
+        path: "md-skills/data-analysis/",
+        allowScripts: "true（允许 scripts/）",
+        confirm: "false",
+        timeout: "60",
+        tags: ["data", "analysis"],
+        status: "published",
+        params: `{
+  "type": "object",
+  "properties": {
+    "question": { "type": "string", "description": "分析问题" },
+    "file_path": { "type": "string", "description": "数据文件路径" }
+  },
+  "required": ["question"]
+}`,
+        body: null,
+        scripts: true,
+      },
+      "text-summary": {
+        title: "text-summary",
+        desc: "对长文本提取要点与结论，纯指令模式。",
+        breadcrumb: "Skill / MD-Skill / md-skills/text-summary/",
+        path: "md-skills/text-summary/",
+        allowScripts: "false",
+        confirm: "false",
+        timeout: "60",
+        tags: ["text", "summary"],
+        status: "published",
+        params: `{
+  "type": "object",
+  "properties": {
+    "text": { "type": "string", "description": "待摘要文本" }
+  },
+  "required": ["text"]
+}`,
+        body: `<h4>输出要求</h4><p>要点列表 + 一段结论；保持原文事实，不添加未提及信息。</p>`,
+        scripts: false,
+      },
+      "my-reply": {
+        title: "客户回复模板",
+        desc: "个人维护的回复结构，非 md-skills 目录来源。",
+        breadcrumb: "Skill / 我的 / 非目录",
+        path: "—（控制台创建，非 MD-Skill）",
+        allowScripts: "false",
+        confirm: "false",
+        timeout: "—",
+        tags: ["personal"],
+        status: "draft",
+        params: `{ "type": "object", "properties": {} }`,
+        body: `<p>个人草稿技能示例，用于对比 MD-Skill 与自建 Skill。</p>`,
+        scripts: false,
+        notMd: true,
+      },
+    };
+
+    function setActions(status, notMd) {
+      const el = document.getElementById("detailActions");
+      if (status === "pending") {
+        el.innerHTML = `
+          <button class="btn-success" type="button">确认启用（管理员）</button>
+          <button class="btn-secondary" type="button">查看扫描结果</button>
+          <button class="btn-danger-outline" type="button">忽略</button>`;
+      } else if (notMd && status === "draft") {
+        el.innerHTML = `
+          <button class="btn-secondary" type="button">继续编辑</button>
+          <button class="btn-primary" type="button">发布</button>
+          <button class="btn-danger-outline" type="button">删除草稿</button>`;
+      } else {
+        el.innerHTML = `
+          <button class="btn-secondary" type="button">复制到我的</button>
+          <button class="btn-secondary" type="button">查看快照</button>
+          <button class="btn-primary" type="button">发布新版本</button>`;
+      }
+    }
+
+    function showSkill(id) {
+      const s = skills[id];
+      if (!s) return;
+      document.getElementById("detailTitle").textContent = s.title;
+      document.getElementById("detailDesc").textContent = s.desc;
+      document.getElementById("breadcrumb").textContent = s.breadcrumb;
+      document.getElementById("fName").value = s.title;
+      document.getElementById("fDesc").value = s.desc;
+      document.getElementById("fAllowScripts").value = s.allowScripts;
+      document.getElementById("fConfirm").value = s.confirm;
+      document.getElementById("fTimeout").value = s.timeout;
+      document.getElementById("fPath").value = s.path;
+      document.getElementById("fParams").textContent = s.params;
+      document.getElementById("fTags").innerHTML = s.tags.map((t) => `<span class="tag-chip">${t}</span>`).join("");
+
+      const tags = document.getElementById("detailTags");
+      if (s.notMd) {
+        tags.innerHTML = `<span class="tag tag-mine">我的</span><span class="tag tag-draft">草稿</span>`;
+      } else if (s.status === "pending") {
+        tags.innerHTML = `
+          <span class="tag tag-md">MD-Skill</span>
+          <span class="tag tag-instruction">allow_scripts: false</span>
+          <span class="tag tag-pending">待管理员确认启用</span>`;
+      } else {
+        const script = String(s.allowScripts).includes("true");
+        tags.innerHTML = `
+          <span class="tag tag-md">MD-Skill</span>
+          <span class="tag ${script ? "tag-script" : "tag-instruction"}">${script ? "allow_scripts: true" : "纯指令"}</span>
+          <span class="tag tag-published">ENABLED · 已发布</span>
+          <span class="tag" style="background:#f1f5f9;color:#475569">timeout ${s.timeout}s</span>`;
+      }
+
+      if (s.body) document.getElementById("fBody").innerHTML = s.body;
+      const scriptsPanel = document.getElementById("fScripts");
+      if (s.scripts) {
+        scriptsPanel.innerHTML = `
+          <div class="file-item">
+            <div class="icon">PY</div>
+            <div>
+              <div class="name">summarize.py</div>
+              <div class="path">${s.path}scripts/summarize.py</div>
+            </div>
+          </div>`;
+      } else {
+        scriptsPanel.innerHTML = `<p class="field help">当前技能 allow_scripts 为 false，或无 scripts/。示例与脚本不会自动执行。</p>`;
+      }
+      setActions(s.status, s.notMd);
+    }
+
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+        tab.classList.add("active");
+        document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+        document.getElementById("panel-" + tab.dataset.tab).style.display = "block";
+      });
+    });
+
+    document.querySelectorAll(".filter-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".filter-tab").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const f = btn.dataset.filter;
+        document.querySelectorAll(".skill-card").forEach((card) => {
+          let show = true;
+          if (f === "md") show = card.dataset.kind === "md";
+          if (f === "instruction") show = card.dataset.mode === "instruction";
+          if (f === "script") show = card.dataset.mode === "script";
+          if (f === "pending") show = card.dataset.status === "pending";
+          card.style.display = show ? "" : "none";
+        });
+      });
+    });
+
+    document.getElementById("searchInput").addEventListener("input", (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      document.querySelectorAll(".skill-card").forEach((card) => {
+        card.style.display = !q || card.textContent.toLowerCase().includes(q) ? "" : "none";
+      });
+    });
+
+    document.querySelectorAll(".skill-card").forEach((card) => {
+      card.addEventListener("click", () => {
+        document.querySelectorAll(".skill-card").forEach((c) => c.classList.remove("active"));
+        card.classList.add("active");
+        showSkill(card.dataset.id);
+      });
+    });
+  </script>
+</body>
+</html>

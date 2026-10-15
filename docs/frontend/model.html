@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Z-Torque 极矩 · Model</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-secondary: #64748b;
+      --text-muted: #94a3b8;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-soft: #eff6ff;
+      --success: #16a34a;
+      --success-soft: #f0fdf4;
+      --warning: #d97706;
+      --warning-soft: #fffbeb;
+      --danger: #dc2626;
+      --danger-soft: #fef2f2;
+      --radius: 10px;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .topbar {
+      height: 52px; background: var(--surface); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; padding: 0 20px;
+    }
+    .topbar-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+    .topbar-brand .logo {
+      width: 28px; height: 28px; background: var(--primary); border-radius: 7px;
+      display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 700;
+    }
+    .topbar-nav { display: flex; gap: 4px; }
+    .topbar-nav a {
+      padding: 6px 12px; border-radius: 6px; color: var(--text-secondary);
+      text-decoration: none; font-size: 13px; font-weight: 500;
+    }
+    .topbar-nav a:hover { background: var(--bg); color: var(--text); }
+    .topbar-nav a.active { background: var(--primary-soft); color: var(--primary); }
+    .topbar-user { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-secondary); }
+    .topbar-user .avatar {
+      width: 28px; height: 28px; border-radius: 50%; background: var(--primary-soft); color: var(--primary);
+      display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;
+    }
+    .btn-text {
+      background: none; border: none; color: var(--text-secondary); cursor: pointer;
+      font-size: 13px; padding: 4px 8px; border-radius: 4px;
+    }
+    .btn-text:hover { color: var(--danger); background: var(--danger-soft); }
+
+    .main { display: flex; height: calc(100vh - 52px); }
+
+    /* 左侧：Provider 树 */
+    .list-pane {
+      width: 300px; background: var(--surface); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; flex-shrink: 0;
+    }
+    .list-header { padding: 16px; border-bottom: 1px solid var(--border); }
+    .list-header h1 { font-size: 18px; font-weight: 700; margin-bottom: 12px; }
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px;
+      border: none; border-radius: 8px; background: var(--primary); color: #fff;
+      font-size: 13px; font-weight: 500; cursor: pointer; width: 100%; justify-content: center;
+    }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-secondary {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+      border: 1px solid var(--border); border-radius: 8px; background: #fff;
+      color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-secondary:hover { background: var(--bg); color: var(--text); }
+    .btn-danger-outline {
+      height: 34px; padding: 0 12px; border: 1px solid #fecaca; border-radius: 8px;
+      background: #fff; color: var(--danger); font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-danger-outline:hover { background: var(--danger-soft); }
+
+    .provider-tree { flex: 1; overflow-y: auto; padding: 8px; }
+    .provider-group { margin-bottom: 4px; }
+    .provider-head {
+      display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+      border-radius: 8px; cursor: pointer; font-weight: 600; font-size: 13px;
+    }
+    .provider-head:hover { background: var(--bg); }
+    .provider-head.active { background: var(--primary-soft); color: var(--primary); }
+    .provider-head .status-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+    .status-dot.ok { background: var(--success); }
+    .status-dot.warn { background: var(--warning); }
+    .status-dot.err { background: var(--danger); }
+    .status-dot.off { background: var(--text-muted); }
+
+    .model-item {
+      padding: 8px 12px 8px 32px; border-radius: 6px; cursor: pointer;
+      font-size: 13px; color: var(--text-secondary);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .model-item:hover { background: var(--bg); color: var(--text); }
+    .model-item.active { background: var(--primary-soft); color: var(--primary); font-weight: 500; }
+    .model-item .mini-tag {
+      font-size: 10px; padding: 1px 5px; border-radius: 3px;
+      background: var(--bg); color: var(--text-muted);
+    }
+    .model-item.active .mini-tag { background: #dbeafe; color: var(--primary); }
+
+    /* 右侧详情 */
+    .detail-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+    .detail-header {
+      padding: 20px 28px 16px; background: var(--surface);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .detail-header .breadcrumb { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; }
+    .detail-header .title-row {
+      display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+    }
+    .detail-header h2 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+    .detail-header .subtitle { font-size: 13px; color: var(--text-secondary); }
+    .detail-actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+    .detail-tags { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+    .tag {
+      display: inline-flex; align-items: center; padding: 1px 7px;
+      border-radius: 4px; font-size: 11px; font-weight: 500;
+    }
+    .tag-ok { background: var(--success-soft); color: var(--success); }
+    .tag-warn { background: var(--warning-soft); color: var(--warning); }
+    .tag-err { background: var(--danger-soft); color: var(--danger); }
+    .tag-off { background: var(--bg); color: var(--text-muted); }
+    .tag-secret { background: #f5f3ff; color: #6d28d9; }
+    .detail-tags .tag { font-size: 12px; padding: 3px 10px; }
+
+    .tabs {
+      display: flex; padding: 0 28px; background: var(--surface);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .tab {
+      padding: 12px 16px; font-size: 13px; font-weight: 500; color: var(--text-secondary);
+      background: none; border: none; border-bottom: 2px solid transparent;
+      cursor: pointer; margin-bottom: -1px;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+    .detail-body { flex: 1; overflow-y: auto; padding: 24px 28px 40px; }
+
+    .section {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow);
+    }
+    .section h3 {
+      font-size: 14px; font-weight: 600; margin-bottom: 16px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .section h3 .hint { font-size: 12px; font-weight: 400; color: var(--text-muted); }
+
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .form-grid .full { grid-column: 1 / -1; }
+    .field label {
+      display: block; font-size: 12px; font-weight: 500;
+      color: var(--text-secondary); margin-bottom: 6px;
+    }
+    .field input, .field select, .field textarea {
+      width: 100%; border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px 12px; font-size: 13px; color: var(--text);
+      outline: none; background: #fff; font-family: inherit;
+    }
+    .field input:disabled, .field select:disabled, .field textarea:disabled {
+      background: var(--bg); color: var(--text-secondary); cursor: not-allowed;
+    }
+    .field .help { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+    .secret-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px; background: var(--bg); border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+    .secret-row .secret-status {
+      flex: 1; font-size: 13px; display: flex; align-items: center; gap: 8px;
+    }
+    .secret-row code {
+      font-size: 12px; background: #fff; padding: 2px 8px; border-radius: 4px;
+      border: 1px solid var(--border); color: var(--text-secondary);
+    }
+
+    .endpoint-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .endpoint-table th {
+      text-align: left; font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.03em; padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .endpoint-table td {
+      padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle;
+    }
+    .endpoint-table tr:last-child td { border-bottom: none; }
+    .endpoint-table .url {
+      font-family: ui-monospace, monospace; font-size: 12px; color: var(--text-secondary);
+      max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    .test-result {
+      margin-top: 12px; padding: 14px 16px; border-radius: 8px; font-size: 13px;
+    }
+    .test-result.ok { background: var(--success-soft); border: 1px solid #bbf7d0; color: #166534; }
+    .test-result.fail { background: var(--danger-soft); border: 1px solid #fecaca; color: #991b1b; }
+    .test-result .meta { font-size: 12px; margin-top: 6px; opacity: 0.85; }
+    .test-result .trace {
+      font-size: 11px; font-family: ui-monospace, monospace; margin-top: 4px; color: var(--text-muted);
+    }
+
+    .alert {
+      padding: 12px 14px; border-radius: 8px; font-size: 13px;
+      margin-bottom: 16px; display: flex; gap: 10px; align-items: flex-start;
+    }
+    .alert-info { background: var(--primary-soft); color: #1e40af; border: 1px solid #bfdbfe; }
+    .alert-warn { background: var(--warning-soft); color: #92400e; border: 1px solid #fde68a; }
+
+    .stat-row {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+    }
+    .stat-card {
+      padding: 14px; background: var(--bg); border-radius: 8px; border: 1px solid var(--border);
+    }
+    .stat-card .label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+    .stat-card .value { font-size: 16px; font-weight: 600; }
+
+    .empty-detail {
+      flex: 1; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; color: var(--text-muted); gap: 8px;
+    }
+
+    @media (max-width: 900px) {
+      .list-pane { width: 100%; }
+      .detail-pane { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="logo">Z</div>
+      <span>Z-Torque</span>
+    </div>
+    <nav class="topbar-nav">
+      <a href="chat.html">Chat</a>
+      <a href="agent.html">Agent</a>
+      <a href="skill.html">Skill</a>
+      <a href="#" class="active">Model</a>
+      <a href="#">Connector</a>
+      <a href="#">Audit</a>
+    </nav>
+    <div class="topbar-user">
+      <div class="avatar">管</div>
+      <span>admin</span>
+      <button class="btn-text" type="button">退出</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <aside class="list-pane">
+      <div class="list-header">
+        <h1>Model</h1>
+        <button class="btn-primary" type="button" id="btnAddProvider">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+          添加 Provider
+        </button>
+      </div>
+      <div class="provider-tree" id="providerTree">
+        <div class="provider-group">
+          <div class="provider-head active" data-provider="deepseek">
+            <span class="status-dot ok"></span>
+            DeepSeek
+          </div>
+          <div class="model-item active" data-model="deepseek-v3" data-provider="deepseek">
+            <span>DeepSeek-V3</span>
+            <span class="mini-tag">默认</span>
+          </div>
+          <div class="model-item" data-model="deepseek-r1" data-provider="deepseek">
+            <span>DeepSeek-R1</span>
+          </div>
+        </div>
+        <div class="provider-group">
+          <div class="provider-head" data-provider="openai">
+            <span class="status-dot ok"></span>
+            OpenAI
+          </div>
+          <div class="model-item" data-model="gpt-4o" data-provider="openai">
+            <span>gpt-4o</span>
+          </div>
+        </div>
+        <div class="provider-group">
+          <div class="provider-head" data-provider="qwen">
+            <span class="status-dot warn"></span>
+            通义千问
+          </div>
+          <div class="model-item" data-model="qwen-max" data-provider="qwen">
+            <span>qwen-max</span>
+            <span class="mini-tag">密钥将过期</span>
+          </div>
+        </div>
+        <div class="provider-group">
+          <div class="provider-head" data-provider="ollama">
+            <span class="status-dot off"></span>
+            本地 Ollama
+          </div>
+          <div class="model-item" data-model="llama3" data-provider="ollama">
+            <span>llama3</span>
+            <span class="mini-tag">未连接</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <section class="detail-pane" id="detailPane">
+      <div class="detail-header">
+        <div class="breadcrumb">Model / DeepSeek / DeepSeek-V3</div>
+        <div class="title-row">
+          <div>
+            <h2 id="detailTitle">DeepSeek-V3</h2>
+            <p class="subtitle" id="detailSubtitle">Provider: DeepSeek · OpenAI 兼容接口</p>
+            <div class="detail-tags" id="detailTags">
+              <span class="tag tag-ok">可用</span>
+              <span class="tag tag-secret">密钥已配置</span>
+              <span class="tag" style="background:#f1f5f9;color:#475569">默认 Endpoint</span>
+            </div>
+          </div>
+          <div class="detail-actions">
+            <button class="btn-primary" type="button" id="btnTest">测试连接</button>
+            <button class="btn-secondary" type="button">编辑</button>
+            <button class="btn-secondary" type="button">停用</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="overview" type="button">概览</button>
+        <button class="tab" data-tab="endpoints" type="button">Endpoint</button>
+        <button class="tab" data-tab="secret" type="button">密钥</button>
+        <button class="tab" data-tab="test" type="button">连接测试</button>
+      </div>
+
+      <div class="detail-body">
+        <div class="tab-panel" id="panel-overview">
+          <div class="alert alert-info">
+            <span>ℹ</span>
+            <span>模型调用由后端 ModelGateway 统一执行。API <strong>不返回密钥明文</strong>；页面仅展示是否已配置、Secret URI 或脱敏信息。更换密钥须走专用安全配置流程。</span>
+          </div>
+
+          <div class="section">
+            <h3>模型信息</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>显示名称</label>
+                <input type="text" value="DeepSeek-V3" id="fName" />
+              </div>
+              <div class="field">
+                <label>模型标识 model_id</label>
+                <input type="text" value="deepseek-chat" id="fModelId" />
+                <div class="help">请求上游时使用的 model 字段</div>
+              </div>
+              <div class="field">
+                <label>Provider</label>
+                <input type="text" value="DeepSeek" disabled />
+              </div>
+              <div class="field">
+                <label>接口类型</label>
+                <select>
+                  <option selected>OpenAI 兼容 Chat Completions</option>
+                  <option>Anthropic Messages</option>
+                  <option>自定义</option>
+                </select>
+              </div>
+              <div class="field full">
+                <label>说明</label>
+                <textarea rows="2">社区版默认推荐模型，用于 Agent 推理与技能编排。</textarea>
+              </div>
+              <div class="field">
+                <label>状态</label>
+                <select>
+                  <option selected>启用</option>
+                  <option>停用</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>设为 Agent 可选</label>
+                <select>
+                  <option selected>是</option>
+                  <option>否</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>最近状态</h3>
+            <div class="stat-row">
+              <div class="stat-card">
+                <div class="label">上次测试</div>
+                <div class="value" style="color:var(--success)">成功</div>
+              </div>
+              <div class="stat-card">
+                <div class="label">延迟</div>
+                <div class="value">312 ms</div>
+              </div>
+              <div class="stat-card">
+                <div class="label">最近错误</div>
+                <div class="value" style="font-size:13px;font-weight:500;color:var(--text-muted)">无</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-endpoints" style="display:none">
+          <div class="section">
+            <h3>
+              Endpoint 列表
+              <button class="btn-secondary" type="button" style="height:28px;font-size:12px">添加 Endpoint</button>
+            </h3>
+            <table class="endpoint-table">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>Base URL</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td style="font-weight:500">默认（生产）</td>
+                  <td class="url">https://api.deepseek.com/v1</td>
+                  <td><span class="tag tag-ok">启用 · 默认</span></td>
+                  <td>
+                    <button class="btn-secondary" type="button" style="height:28px;font-size:12px">编辑</button>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="font-weight:500">备用</td>
+                  <td class="url">https://api.deepseek.com/v1</td>
+                  <td><span class="tag tag-off">停用</span></td>
+                  <td>
+                    <button class="btn-secondary" type="button" style="height:28px;font-size:12px">编辑</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="field help" style="margin-top:12px">超时、重试等高级参数由后端配置；调用仍走 ModelGateway。</p>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-secret" style="display:none">
+          <div class="alert alert-warn">
+            <span>⚠</span>
+            <span>密钥通过 Secret Store 保存。页面只显示「已配置」或 Secret URI，<strong>永不展示明文</strong>。更换时提交新值由后端写入 Secret，旧引用失效。</span>
+          </div>
+          <div class="section">
+            <h3>API Key</h3>
+            <div class="secret-row">
+              <div class="secret-status">
+                <span class="tag tag-secret">已配置</span>
+                <code>secret://sk_••••••••7a2f</code>
+              </div>
+              <button class="btn-secondary" type="button">更换密钥</button>
+            </div>
+            <p class="field help" style="margin-top:10px">URI 仅为引用标识，不可用于还原明文。</p>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-test" style="display:none">
+          <div class="section">
+            <h3>连接测试 <span class="hint">经 ModelGateway，不经过前端直连上游</span></h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>使用 Endpoint</label>
+                <select id="testEndpoint">
+                  <option>默认（生产）</option>
+                  <option>备用</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>探测方式</label>
+                <select>
+                  <option selected>最小 Chat 请求</option>
+                  <option>模型列表（若上游支持）</option>
+                </select>
+              </div>
+            </div>
+            <div style="margin-top:16px">
+              <button class="btn-primary" type="button" id="btnRunTest" style="width:auto">
+                运行测试
+              </button>
+            </div>
+            <div class="test-result ok" id="testResult">
+              <strong>连接成功</strong>
+              <div class="meta">HTTP 200 · 耗时 312 ms · 模型 deepseek-chat 可用</div>
+              <div class="trace">trace_id: tr_01h8x2k9m3n4p5q6r7s8</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+        tab.classList.add("active");
+        document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+        document.getElementById("panel-" + tab.dataset.tab).style.display = "block";
+      });
+    });
+
+    const models = {
+      "deepseek-v3": {
+        title: "DeepSeek-V3",
+        provider: "DeepSeek",
+        breadcrumb: "Model / DeepSeek / DeepSeek-V3",
+        status: "ok",
+        secret: true,
+        modelId: "deepseek-chat",
+      },
+      "deepseek-r1": {
+        title: "DeepSeek-R1",
+        provider: "DeepSeek",
+        breadcrumb: "Model / DeepSeek / DeepSeek-R1",
+        status: "ok",
+        secret: true,
+        modelId: "deepseek-reasoner",
+      },
+      "gpt-4o": {
+        title: "gpt-4o",
+        provider: "OpenAI",
+        breadcrumb: "Model / OpenAI / gpt-4o",
+        status: "ok",
+        secret: true,
+        modelId: "gpt-4o",
+      },
+      "qwen-max": {
+        title: "qwen-max",
+        provider: "通义千问",
+        breadcrumb: "Model / 通义千问 / qwen-max",
+        status: "warn",
+        secret: true,
+        modelId: "qwen-max",
+      },
+      "llama3": {
+        title: "llama3",
+        provider: "本地 Ollama",
+        breadcrumb: "Model / 本地 Ollama / llama3",
+        status: "off",
+        secret: false,
+        modelId: "llama3",
+      },
+    };
+
+    document.querySelectorAll(".model-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        document.querySelectorAll(".model-item").forEach((i) => i.classList.remove("active"));
+        document.querySelectorAll(".provider-head").forEach((h) => h.classList.remove("active"));
+        item.classList.add("active");
+        const ph = item.closest(".provider-group").querySelector(".provider-head");
+        if (ph) ph.classList.add("active");
+
+        const m = models[item.dataset.model];
+        if (!m) return;
+        document.getElementById("detailTitle").textContent = m.title;
+        document.getElementById("detailSubtitle").textContent =
+          "Provider: " + m.provider + " · OpenAI 兼容接口";
+        document.querySelector(".breadcrumb").textContent = m.breadcrumb;
+        document.getElementById("fName").value = m.title;
+        document.getElementById("fModelId").value = m.modelId;
+
+        let statusTag = '<span class="tag tag-ok">可用</span>';
+        if (m.status === "warn") statusTag = '<span class="tag tag-warn">需关注</span>';
+        if (m.status === "off") statusTag = '<span class="tag tag-err">不可用</span>';
+        const secretTag = m.secret
+          ? '<span class="tag tag-secret">密钥已配置</span>'
+          : '<span class="tag tag-off">未配置密钥</span>';
+        document.getElementById("detailTags").innerHTML =
+          statusTag + secretTag + '<span class="tag" style="background:#f1f5f9;color:#475569">Endpoint</span>';
+      });
+    });
+
+    document.getElementById("btnRunTest").addEventListener("click", () => {
+      const el = document.getElementById("testResult");
+      el.className = "test-result ok";
+      el.innerHTML = `
+        <strong>连接成功</strong>
+        <div class="meta">HTTP 200 · 耗时 ${200 + Math.floor(Math.random() * 200)} ms · 探测完成</div>
+        <div class="trace">trace_id: tr_${Date.now().toString(36)}</div>`;
+    });
+    document.getElementById("btnTest").addEventListener("click", () => {
+      document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+      document.querySelector('.tab[data-tab="test"]').classList.add("active");
+      document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+      document.getElementById("panel-test").style.display = "block";
+      document.getElementById("btnRunTest").click();
+    });
+  </script>
+</body>
+</html>

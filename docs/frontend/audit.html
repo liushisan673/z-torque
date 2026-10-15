@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Z-Torque 极矩 · Audit</title>
+  <style>
+    :root {
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-secondary: #64748b;
+      --text-muted: #94a3b8;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-soft: #eff6ff;
+      --success: #16a34a;
+      --success-soft: #f0fdf4;
+      --warning: #d97706;
+      --warning-soft: #fffbeb;
+      --danger: #dc2626;
+      --danger-soft: #fef2f2;
+      --radius: 10px;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .topbar {
+      height: 52px; background: var(--surface); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; padding: 0 20px;
+    }
+    .topbar-brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 15px; }
+    .topbar-brand .logo {
+      width: 28px; height: 28px; background: var(--primary); border-radius: 7px;
+      display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 700;
+    }
+    .topbar-nav { display: flex; gap: 4px; }
+    .topbar-nav a {
+      padding: 6px 12px; border-radius: 6px; color: var(--text-secondary);
+      text-decoration: none; font-size: 13px; font-weight: 500;
+    }
+    .topbar-nav a:hover { background: var(--bg); color: var(--text); }
+    .topbar-nav a.active { background: var(--primary-soft); color: var(--primary); }
+    .topbar-user { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-secondary); }
+    .topbar-user .avatar {
+      width: 28px; height: 28px; border-radius: 50%; background: var(--primary-soft); color: var(--primary);
+      display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px;
+    }
+    .btn-text {
+      background: none; border: none; color: var(--text-secondary); cursor: pointer;
+      font-size: 13px; padding: 4px 8px; border-radius: 4px;
+    }
+    .btn-text:hover { color: var(--danger); background: var(--danger-soft); }
+
+    .main { display: flex; flex-direction: column; height: calc(100vh - 52px); }
+
+    /* 筛选栏 */
+    .filter-bar {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      flex-shrink: 0;
+    }
+    .filter-bar h1 {
+      font-size: 18px; font-weight: 700; margin-bottom: 14px;
+    }
+    .filter-row {
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end;
+    }
+    .filter-field { display: flex; flex-direction: column; gap: 4px; }
+    .filter-field label {
+      font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    .filter-field input, .filter-field select {
+      height: 34px; border: 1px solid var(--border); border-radius: 8px;
+      padding: 0 10px; font-size: 13px; color: var(--text); outline: none;
+      background: #fff; min-width: 140px;
+    }
+    .filter-field input:focus, .filter-field select:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
+    }
+    .filter-field input.wide { min-width: 200px; }
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px;
+      border: none; border-radius: 8px; background: var(--primary); color: #fff;
+      font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-primary:hover { background: var(--primary-hover); }
+    .btn-secondary {
+      display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+      border: 1px solid var(--border); border-radius: 8px; background: #fff;
+      color: var(--text-secondary); font-size: 13px; font-weight: 500; cursor: pointer;
+    }
+    .btn-secondary:hover { background: var(--bg); color: var(--text); }
+
+    .scope-hint {
+      margin-top: 10px; font-size: 12px; color: var(--text-muted);
+      display: flex; align-items: center; gap: 6px;
+    }
+    .scope-hint strong { color: var(--text-secondary); font-weight: 500; }
+
+    /* 内容区：表格 + 详情抽屉 */
+    .content {
+      flex: 1; display: flex; min-height: 0; overflow: hidden;
+    }
+
+    .table-pane {
+      flex: 1; display: flex; flex-direction: column; min-width: 0;
+      background: var(--bg);
+    }
+    .table-wrap {
+      flex: 1; overflow: auto; padding: 16px 24px;
+    }
+    .audit-table {
+      width: 100%; border-collapse: collapse; background: var(--surface);
+      border-radius: 12px; overflow: hidden; box-shadow: var(--shadow);
+      border: 1px solid var(--border); font-size: 13px;
+    }
+    .audit-table th {
+      text-align: left; font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.03em;
+      padding: 12px 14px; background: #f8fafc; border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      position: sticky; top: 0; z-index: 1;
+    }
+    .audit-table td {
+      padding: 12px 14px; border-bottom: 1px solid var(--border);
+      vertical-align: middle; color: var(--text);
+    }
+    .audit-table tr:last-child td { border-bottom: none; }
+    .audit-table tbody tr {
+      cursor: pointer; transition: background 0.1s;
+    }
+    .audit-table tbody tr:hover { background: #f8fafc; }
+    .audit-table tbody tr.active { background: var(--primary-soft); }
+
+    .tag {
+      display: inline-flex; align-items: center; padding: 2px 8px;
+      border-radius: 4px; font-size: 11px; font-weight: 500; white-space: nowrap;
+    }
+    .tag-login { background: #e0f2fe; color: #0369a1; }
+    .tag-authz { background: #fef3c7; color: #b45309; }
+    .tag-task { background: #dbeafe; color: #1d4ed8; }
+    .tag-model { background: #f3e8ff; color: #7e22ce; }
+    .tag-skill { background: #ecfdf5; color: #047857; }
+    .tag-config { background: #f1f5f9; color: #475569; }
+    .tag-ok { background: var(--success-soft); color: var(--success); }
+    .tag-fail { background: var(--danger-soft); color: var(--danger); }
+    .tag-deny { background: var(--warning-soft); color: var(--warning); }
+
+    .mono {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 12px; color: var(--text-secondary);
+    }
+    .time-cell { white-space: nowrap; color: var(--text-secondary); font-size: 12px; }
+    .actor-cell { font-weight: 500; }
+    .summary-cell {
+      max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--text-secondary);
+    }
+
+    .table-footer {
+      padding: 12px 24px; background: var(--surface); border-top: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 13px; color: var(--text-secondary); flex-shrink: 0;
+    }
+    .pager { display: flex; gap: 6px; align-items: center; }
+    .pager button {
+      height: 30px; min-width: 30px; padding: 0 8px; border: 1px solid var(--border);
+      border-radius: 6px; background: #fff; font-size: 12px; cursor: pointer; color: var(--text-secondary);
+    }
+    .pager button:hover:not(:disabled) { background: var(--bg); color: var(--text); }
+    .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .pager button.active { background: var(--primary-soft); color: var(--primary); border-color: #bfdbfe; }
+
+    /* 详情侧栏 */
+    .detail-drawer {
+      width: 400px; background: var(--surface); border-left: 1px solid var(--border);
+      display: flex; flex-direction: column; flex-shrink: 0;
+      transition: margin 0.2s, opacity 0.2s;
+    }
+    .detail-drawer.hidden { display: none; }
+
+    .drawer-header {
+      padding: 16px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+    }
+    .drawer-header h2 { font-size: 15px; font-weight: 600; }
+    .drawer-close {
+      width: 28px; height: 28px; border: none; background: none; border-radius: 6px;
+      cursor: pointer; color: var(--text-muted);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .drawer-close:hover { background: var(--bg); color: var(--text); }
+
+    .drawer-body { flex: 1; overflow-y: auto; padding: 20px; }
+
+    .detail-block { margin-bottom: 20px; }
+    .detail-block h3 {
+      font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px;
+    }
+    .kv { display: grid; grid-template-columns: 100px 1fr; gap: 8px 12px; font-size: 13px; }
+    .kv .k { color: var(--text-muted); }
+    .kv .v { color: var(--text); word-break: break-all; }
+    .kv .v.mono { font-size: 12px; }
+
+    .link-btn {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 13px; color: var(--primary); background: none; border: none;
+      cursor: pointer; padding: 0; font-weight: 500;
+    }
+    .link-btn:hover { text-decoration: underline; }
+
+    .payload-box {
+      background: #0f172a; color: #e2e8f0; border-radius: 8px;
+      padding: 12px 14px; font-family: ui-monospace, monospace; font-size: 12px;
+      line-height: 1.5; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+      max-height: 200px; overflow-y: auto;
+    }
+
+    .chain-list { display: flex; flex-direction: column; gap: 0; }
+    .chain-item {
+      display: flex; gap: 12px; padding: 10px 0;
+      border-bottom: 1px solid var(--border); font-size: 13px;
+    }
+    .chain-item:last-child { border-bottom: none; }
+    .chain-item .dot {
+      width: 10px; height: 10px; border-radius: 50%; margin-top: 4px; flex-shrink: 0;
+      background: var(--border);
+    }
+    .chain-item .dot.ok { background: var(--success); }
+    .chain-item .dot.fail { background: var(--danger); }
+    .chain-item .body { flex: 1; min-width: 0; }
+    .chain-item .title { font-weight: 500; }
+    .chain-item .meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+    .alert {
+      padding: 12px 14px; border-radius: 8px; font-size: 13px;
+      margin-bottom: 16px; display: flex; gap: 10px; align-items: flex-start;
+    }
+    .alert-info { background: var(--primary-soft); color: #1e40af; border: 1px solid #bfdbfe; }
+
+    .empty-drawer {
+      flex: 1; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; color: var(--text-muted); padding: 40px; text-align: center;
+    }
+    .empty-drawer p { font-size: 13px; margin-top: 8px; }
+
+    @media (max-width: 1100px) {
+      .detail-drawer { width: 340px; }
+    }
+    @media (max-width: 800px) {
+      .detail-drawer {
+        position: absolute; right: 0; top: 52px; bottom: 0; z-index: 30;
+        box-shadow: -4px 0 20px rgba(0,0,0,0.08);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="logo">Z</div>
+      <span>Z-Torque</span>
+    </div>
+    <nav class="topbar-nav">
+      <a href="chat.html">Chat</a>
+      <a href="agent.html">Agent</a>
+      <a href="skill.html">Skill</a>
+      <a href="model.html">Model</a>
+      <a href="connector.html">Connector</a>
+      <a href="#" class="active">Audit</a>
+    </nav>
+    <div class="topbar-user">
+      <div class="avatar">管</div>
+      <span>admin</span>
+      <button class="btn-text" type="button">退出</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <div class="filter-bar">
+      <h1>Audit</h1>
+      <div class="filter-row">
+        <div class="filter-field">
+          <label>时间范围</label>
+          <select id="fRange">
+            <option value="24h" selected>近 24 小时</option>
+            <option value="7d">近 7 天</option>
+            <option value="30d">近 30 天</option>
+            <option value="custom">自定义</option>
+          </select>
+        </div>
+        <div class="filter-field">
+          <label>事件类型</label>
+          <select id="fType">
+            <option value="">全部类型</option>
+            <option value="login">登录</option>
+            <option value="authz">权限判断</option>
+            <option value="task">Task 状态</option>
+            <option value="model">模型调用</option>
+            <option value="skill">Skill 执行</option>
+            <option value="config">配置变更</option>
+          </select>
+        </div>
+        <div class="filter-field">
+          <label>执行用户</label>
+          <input type="text" class="wide" id="fUser" placeholder="用户名" />
+        </div>
+        <div class="filter-field">
+          <label>Agent</label>
+          <input type="text" id="fAgent" placeholder="名称或 ID" />
+        </div>
+        <div class="filter-field">
+          <label>Task ID</label>
+          <input type="text" class="wide" id="fTask" placeholder="task_…" />
+        </div>
+        <div class="filter-field">
+          <label>结果</label>
+          <select id="fResult">
+            <option value="">全部</option>
+            <option value="ok">成功</option>
+            <option value="fail">失败</option>
+            <option value="deny">拒绝</option>
+          </select>
+        </div>
+        <button class="btn-primary" type="button" id="btnSearch">查询</button>
+        <button class="btn-secondary" type="button" id="btnReset">重置</button>
+      </div>
+      <div class="scope-hint">
+        <span>当前范围：</span>
+        <strong id="scopeText">管理员 · 可查看全量审计（audit.read_all）</strong>
+        <span>· 审计由后端写入，前端仅查询展示，无删除/关闭能力</span>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="table-pane">
+        <div class="table-wrap">
+          <table class="audit-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>类型</th>
+                <th>执行用户</th>
+                <th>资源 / 摘要</th>
+                <th>结果</th>
+                <th>耗时</th>
+                <th>Trace ID</th>
+              </tr>
+            </thead>
+            <tbody id="auditBody">
+              <tr class="active" data-id="e1">
+                <td class="time-cell">今天 14:02:15</td>
+                <td><span class="tag tag-task">Task</span></td>
+                <td class="actor-cell">admin</td>
+                <td class="summary-cell">Task 等待确认 · 数据分析助手 · 华东区异常标注</td>
+                <td><span class="tag tag-ok">成功</span></td>
+                <td class="mono">1.2s</td>
+                <td class="mono">tr_01h8x2k9m3</td>
+              </tr>
+              <tr data-id="e2">
+                <td class="time-cell">今天 14:02:08</td>
+                <td><span class="tag tag-skill">Skill</span></td>
+                <td class="actor-cell">admin</td>
+                <td class="summary-cell">Skill 执行 · 数据分析 v2 · 脚本 summarize.py</td>
+                <td><span class="tag tag-ok">成功</span></td>
+                <td class="mono">890ms</td>
+                <td class="mono">tr_01h8x2k9m3</td>
+              </tr>
+              <tr data-id="e3">
+                <td class="time-cell">今天 14:01:55</td>
+                <td><span class="tag tag-model">模型</span></td>
+                <td class="actor-cell">admin</td>
+                <td class="summary-cell">ModelGateway · DeepSeek-V3 · chat.completions</td>
+                <td><span class="tag tag-ok">成功</span></td>
+                <td class="mono">312ms</td>
+                <td class="mono">tr_01h8x2k9m3</td>
+              </tr>
+              <tr data-id="e4">
+                <td class="time-cell">今天 13:45:02</td>
+                <td><span class="tag tag-authz">权限</span></td>
+                <td class="actor-cell">user01</td>
+                <td class="summary-cell">拒绝 · model.manage · 无权限编辑模型</td>
+                <td><span class="tag tag-deny">拒绝</span></td>
+                <td class="mono">—</td>
+                <td class="mono">tr_01h8deny01</td>
+              </tr>
+              <tr data-id="e5">
+                <td class="time-cell">今天 13:40:11</td>
+                <td><span class="tag tag-login">登录</span></td>
+                <td class="actor-cell">user01</td>
+                <td class="summary-cell">登录成功 · 密码认证</td>
+                <td><span class="tag tag-ok">成功</span></td>
+                <td class="mono">45ms</td>
+                <td class="mono">tr_01h8login2</td>
+              </tr>
+              <tr data-id="e6">
+                <td class="time-cell">今天 12:18:33</td>
+                <td><span class="tag tag-config">配置</span></td>
+                <td class="actor-cell">admin</td>
+                <td class="summary-cell">更新 Connector · CRM 开放 API · 更换凭证</td>
+                <td><span class="tag tag-ok">成功</span></td>
+                <td class="mono">—</td>
+                <td class="mono">tr_01h8cfg9a</td>
+              </tr>
+              <tr data-id="e7">
+                <td class="time-cell">今天 11:02:00</td>
+                <td><span class="tag tag-login">登录</span></td>
+                <td class="actor-cell">unknown</td>
+                <td class="summary-cell">登录失败 · 密码错误 · 连续第 2 次</td>
+                <td><span class="tag tag-fail">失败</span></td>
+                <td class="mono">—</td>
+                <td class="mono">tr_01h8fail3</td>
+              </tr>
+              <tr data-id="e8">
+                <td class="time-cell">昨天 16:20:44</td>
+                <td><span class="tag tag-task">Task</span></td>
+                <td class="actor-cell">admin</td>
+                <td class="summary-cell">Task 完成 · 文档撰写助手 · 邮件草稿</td>
+                <td><span class="tag tag-ok">成功</span></td>
+                <td class="mono">4.1s</td>
+                <td class="mono">tr_01h8task7</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-footer">
+          <span>共 <strong>128</strong> 条 · 第 1 / 13 页</span>
+          <div class="pager">
+            <button type="button" disabled>上一页</button>
+            <button type="button" class="active">1</button>
+            <button type="button">2</button>
+            <button type="button">3</button>
+            <button type="button">…</button>
+            <button type="button">下一页</button>
+          </div>
+        </div>
+      </div>
+
+      <aside class="detail-drawer" id="detailDrawer">
+        <div class="drawer-header">
+          <h2>事件详情</h2>
+          <button class="drawer-close" type="button" id="btnCloseDrawer" title="关闭">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </button>
+        </div>
+        <div class="drawer-body" id="drawerBody">
+          <div class="alert alert-info">
+            <span>ℹ</span>
+            <span>参数与错误摘要已经后端脱敏。无关闭审计、修改或删除历史记录的入口。</span>
+          </div>
+
+          <div class="detail-block">
+            <h3>基本信息</h3>
+            <div class="kv">
+              <span class="k">时间</span>
+              <span class="v">2026-10-13 14:02:15 CST</span>
+              <span class="k">类型</span>
+              <span class="v"><span class="tag tag-task">Task 状态变化</span></span>
+              <span class="k">结果</span>
+              <span class="v"><span class="tag tag-ok">成功</span></span>
+              <span class="k">耗时</span>
+              <span class="v">1.2 s</span>
+              <span class="k">执行用户</span>
+              <span class="v">admin</span>
+              <span class="k">Trace ID</span>
+              <span class="v mono">tr_01h8x2k9m3n4p5q6r7s8</span>
+            </div>
+          </div>
+
+          <div class="detail-block">
+            <h3>关联资源</h3>
+            <div class="kv">
+              <span class="k">Agent</span>
+              <span class="v">数据分析助手 · v3</span>
+              <span class="k">Task</span>
+              <span class="v mono">task_01h8x2k9m3n4p5q6r7s8t9</span>
+              <span class="k">Skill</span>
+              <span class="v">数据分析 · v2（脚本）</span>
+              <span class="k">会话</span>
+              <span class="v mono">conv_01h8…</span>
+            </div>
+            <div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap">
+              <button class="link-btn" type="button">在 Chat 中查看 Task</button>
+              <button class="link-btn" type="button">复制 Trace ID</button>
+            </div>
+          </div>
+
+          <div class="detail-block">
+            <h3>摘要（已脱敏）</h3>
+            <div class="payload-box">{
+  "action": "task.waiting_human",
+  "message": "区域结论草稿待确认",
+  "region_flag": "华东区环比下降（已脱敏指标）",
+  "skill_version": "data-analysis@v2"
+}</div>
+          </div>
+
+          <div class="detail-block">
+            <h3>同 Trace 执行链路</h3>
+            <div class="chain-list">
+              <div class="chain-item">
+                <span class="dot ok"></span>
+                <div class="body">
+                  <div class="title">模型调用 · DeepSeek-V3</div>
+                  <div class="meta">14:01:55 · 312ms · 成功</div>
+                </div>
+              </div>
+              <div class="chain-item">
+                <span class="dot ok"></span>
+                <div class="body">
+                  <div class="title">Skill 执行 · 数据分析 v2</div>
+                  <div class="meta">14:02:08 · 890ms · 脚本 summarize.py</div>
+                </div>
+              </div>
+              <div class="chain-item">
+                <span class="dot ok"></span>
+                <div class="body">
+                  <div class="title">Task 状态 · 等待确认</div>
+                  <div class="meta">14:02:15 · 当前事件</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const details = {
+      e1: null, // 默认已渲染
+      e4: {
+        time: "2026-10-13 13:45:02 CST",
+        typeHtml: '<span class="tag tag-authz">权限判断</span>',
+        resultHtml: '<span class="tag tag-deny">拒绝</span>',
+        duration: "—",
+        user: "user01",
+        trace: "tr_01h8deny01xxxx",
+        agent: "—",
+        task: "—",
+        skill: "—",
+        conv: "—",
+        payload: `{
+  "permission": "model.manage",
+  "decision": "deny",
+  "reason": "role=user 无此权限"
+}`,
+        chain: null,
+      },
+      e5: {
+        time: "2026-10-13 13:40:11 CST",
+        typeHtml: '<span class="tag tag-login">登录</span>',
+        resultHtml: '<span class="tag tag-ok">成功</span>',
+        duration: "45ms",
+        user: "user01",
+        trace: "tr_01h8login2xxxx",
+        agent: "—",
+        task: "—",
+        skill: "—",
+        conv: "—",
+        payload: `{
+  "method": "password",
+  "ip": "192.168.***.***",
+  "user_agent": "Mozilla/5.0 …"
+}`,
+        chain: null,
+      },
+    };
+
+    function renderDefaultDetail() {
+      /* 保持 HTML 中 e1 的默认结构，切换非 e1 时用 JS 重写 */
+    }
+
+    function showDetail(id) {
+      const body = document.getElementById("drawerBody");
+      const d = details[id];
+      if (!d) {
+        // 恢复 e1 默认内容
+        body.innerHTML = document.getElementById("tplDefault").innerHTML;
+        return;
+      }
+      body.innerHTML = `
+        <div class="alert alert-info">
+          <span>ℹ</span>
+          <span>参数与错误摘要已经后端脱敏。无关闭审计、修改或删除历史记录的入口。</span>
+        </div>
+        <div class="detail-block">
+          <h3>基本信息</h3>
+          <div class="kv">
+            <span class="k">时间</span><span class="v">${d.time}</span>
+            <span class="k">类型</span><span class="v">${d.typeHtml}</span>
+            <span class="k">结果</span><span class="v">${d.resultHtml}</span>
+            <span class="k">耗时</span><span class="v">${d.duration}</span>
+            <span class="k">执行用户</span><span class="v">${d.user}</span>
+            <span class="k">Trace ID</span><span class="v mono">${d.trace}</span>
+          </div>
+        </div>
+        <div class="detail-block">
+          <h3>关联资源</h3>
+          <div class="kv">
+            <span class="k">Agent</span><span class="v">${d.agent}</span>
+            <span class="k">Task</span><span class="v mono">${d.task}</span>
+            <span class="k">Skill</span><span class="v">${d.skill}</span>
+            <span class="k">会话</span><span class="v mono">${d.conv}</span>
+          </div>
+        </div>
+        <div class="detail-block">
+          <h3>摘要（已脱敏）</h3>
+          <div class="payload-box">${d.payload.replace(/</g, "&lt;")}</div>
+        </div>`;
+    }
+
+    document.getElementById("auditBody").addEventListener("click", (e) => {
+      const row = e.target.closest("tr");
+      if (!row || !row.dataset.id) return;
+      document.querySelectorAll("#auditBody tr").forEach((r) => r.classList.remove("active"));
+      row.classList.add("active");
+      document.getElementById("detailDrawer").classList.remove("hidden");
+      if (row.dataset.id === "e1") {
+        document.getElementById("drawerBody").innerHTML = document.getElementById("tplDefault").innerHTML;
+      } else {
+        showDetail(row.dataset.id);
+      }
+    });
+
+    document.getElementById("btnCloseDrawer").addEventListener("click", () => {
+      document.getElementById("detailDrawer").classList.add("hidden");
+      document.querySelectorAll("#auditBody tr").forEach((r) => r.classList.remove("active"));
+    });
+
+    document.getElementById("btnReset").addEventListener("click", () => {
+      document.getElementById("fRange").value = "24h";
+      document.getElementById("fType").value = "";
+      document.getElementById("fUser").value = "";
+      document.getElementById("fAgent").value = "";
+      document.getElementById("fTask").value = "";
+      document.getElementById("fResult").value = "";
+    });
+  </script>
+
+  <!-- 默认详情模板，供切换回 e1 -->
+  <template id="tplDefault">
+    <div class="alert alert-info">
+      <span>ℹ</span>
+      <span>参数与错误摘要已经后端脱敏。无关闭审计、修改或删除历史记录的入口。</span>
+    </div>
+    <div class="detail-block">
+      <h3>基本信息</h3>
+      <div class="kv">
+        <span class="k">时间</span>
+        <span class="v">2026-10-13 14:02:15 CST</span>
+        <span class="k">类型</span>
+        <span class="v"><span class="tag tag-task">Task 状态变化</span></span>
+        <span class="k">结果</span>
+        <span class="v"><span class="tag tag-ok">成功</span></span>
+        <span class="k">耗时</span>
+        <span class="v">1.2 s</span>
+        <span class="k">执行用户</span>
+        <span class="v">admin</span>
+        <span class="k">Trace ID</span>
+        <span class="v mono">tr_01h8x2k9m3n4p5q6r7s8</span>
+      </div>
+    </div>
+    <div class="detail-block">
+      <h3>关联资源</h3>
+      <div class="kv">
+        <span class="k">Agent</span>
+        <span class="v">数据分析助手 · v3</span>
+        <span class="k">Task</span>
+        <span class="v mono">task_01h8x2k9m3n4p5q6r7s8t9</span>
+        <span class="k">Skill</span>
+        <span class="v">数据分析 · v2（脚本）</span>
+        <span class="k">会话</span>
+        <span class="v mono">conv_01h8…</span>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap">
+        <button class="link-btn" type="button">在 Chat 中查看 Task</button>
+        <button class="link-btn" type="button">复制 Trace ID</button>
+      </div>
+    </div>
+    <div class="detail-block">
+      <h3>摘要（已脱敏）</h3>
+      <div class="payload-box">{
+  "action": "task.waiting_human",
+  "message": "区域结论草稿待确认",
+  "region_flag": "华东区环比下降（已脱敏指标）",
+  "skill_version": "data-analysis@v2"
+}</div>
+    </div>
+    <div class="detail-block">
+      <h3>同 Trace 执行链路</h3>
+      <div class="chain-list">
+        <div class="chain-item">
+          <span class="dot ok"></span>
+          <div class="body">
+            <div class="title">模型调用 · DeepSeek-V3</div>
+            <div class="meta">14:01:55 · 312ms · 成功</div>
+          </div>
+        </div>
+        <div class="chain-item">
+          <span class="dot ok"></span>
+          <div class="body">
+            <div class="title">Skill 执行 · 数据分析 v2</div>
+            <div class="meta">14:02:08 · 890ms · 脚本 summarize.py</div>
+          </div>
+        </div>
+        <div class="chain-item">
+          <span class="dot ok"></span>
+          <div class="body">
+            <div class="title">Task 状态 · 等待确认</div>
+            <div class="meta">14:02:15 · 当前事件</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+</body>
+</html>

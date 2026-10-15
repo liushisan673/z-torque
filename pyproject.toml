@@ -1,0 +1,38 @@
+[project]
+name = "z-torque"
+version = "0.1.0"
+description = "Z-Torque Community Runtime"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.34.0",
+  "pydantic-settings==2.7.1",
+  "sqlalchemy==2.0.37",
+  "alembic==1.14.1",
+  "argon2-cffi==23.1.0",
+  "PyJWT==2.10.1",
+  "cryptography==44.0.0",
+  "python-multipart==0.0.20",
+  "httpx==0.28.1",
+  "sqlglot==26.8.0",
+  "jsonschema==4.23.0",
+  "PyYAML==6.0.2",
+  "uuid6==2025.0.1",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.4", "pytest-asyncio==0.25.3", "httpx==0.28.1"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
