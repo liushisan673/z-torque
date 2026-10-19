@@ -3,8 +3,8 @@ import sys
 
 import pytest
 
-from app.kernel.mcp_connectors import StdioMcpConnector, StdioServerRegistry, StdioServerRegistration
-from app.kernel.skill_gateway import McpProtocolError, McpTransportError
+from app.builtin_plugins.mcp import StdioMcpConnector, StdioServerRegistry, StdioServerRegistration
+from app.kernel.ports.connector import McpProtocolError, McpTransportError
 
 
 def test_stdio_registry_requires_absolute_existing_executable(tmp_path):

@@ -8,7 +8,6 @@ import pytest
 from sqlalchemy import delete
 
 from app.db.session import SessionLocal
-from app.kernel.ports.queue_driver import QueueDriver
 from app.kernel.task.dispatcher import OutboxDispatcher, execute_simulated
 from app.kernel.task.runtime import TaskRuntime
 from app.kernel.task.service import create_task, transition_task
@@ -152,7 +151,7 @@ def test_runtime_recover_requeues_running_and_writes_recovered_outbox():
         # create_task already wrote one TASK_READY; recover should add another.
         assert db.query(Outbox).filter_by(aggregate_id=task_id, event_type="TASK_READY").count() == 1
 
-    asyncio.run(TaskRuntime().recover())
+    asyncio.run(TaskRuntime(session_factory=SessionLocal).recover())
 
     with SessionLocal() as db:
         task = db.get(Task, task_id)

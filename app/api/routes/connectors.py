@@ -37,13 +37,14 @@ def _mcp_error_reason(exc: Exception) -> str:
     return str(exc).strip().splitlines()[0][:200] or "unknown error"
 
 
-async def _probe_mcp(config: dict) -> dict:
+async def _probe_mcp(config: dict, secret_ref: str | None = None) -> dict:
     """对 MCP 连接做真实探测：initialize 握手 + tools/list，返回 tools/list 原始结果。
 
     仅支持 HTTP 传输（Streamable HTTP）；失败抛 ApiError 或底层 Mcp*Error。
     """
     from app.config import get_settings
-    from app.kernel.skill_gateway import StreamableHttpMcpConnector
+    from app.builtin_plugins.mcp import StreamableHttpMcpConnector
+    from app.security.secret_store import SecretStore, SecretStoreError
 
     settings = get_settings()
     config = config or {}
@@ -55,11 +56,18 @@ async def _probe_mcp(config: dict) -> dict:
         timeout = float(raw_timeout) if raw_timeout else settings.mcp_timeout_seconds
     except (TypeError, ValueError):
         timeout = settings.mcp_timeout_seconds
+    auth_token = None
+    if secret_ref:
+        try:
+            auth_token = SecretStore().decrypt(secret_ref.removeprefix("secret://"))
+        except SecretStoreError as exc:
+            raise ApiError("AI_CONNECTOR_SECRET_INVALID", "连接器凭证无法解密", 503) from exc
     connector = StreamableHttpMcpConnector(
         endpoint,
         allowed_hosts=settings.mcp_allowed_hosts,
         timeout_seconds=max(min(timeout, MCP_PROBE_TIMEOUT_SECONDS), 1.0),
         max_response_bytes=settings.mcp_max_response_bytes,
+        auth_token=auth_token,
     )
     try:
         await connector.negotiate()
@@ -207,13 +215,13 @@ async def test_connector(connector_id: UUID, request: Request, user: ReadUser, d
         result["database"] = str((item.config or {}).get("database") or "")
         result["tables"] = tables
     elif item.connector_type == "MCP":
-        from app.kernel.skill_gateway import McpProtocolError, McpTransportError
+        from app.kernel.ports.connector import McpProtocolError, McpTransportError
 
         transport = str((item.config or {}).get("transport") or "http").lower()
         if transport not in ("http", ""):
             raise ApiError("AI_REQUEST_INVALID", "当前仅支持 HTTP 传输的 MCP 连接探测", 400)
         try:
-            listing = await _probe_mcp(dict(item.config or {}))
+            listing = await _probe_mcp(dict(item.config or {}), item.secret_ref)
         except ApiError:
             raise
         except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
@@ -245,10 +253,10 @@ async def discover_connector(connector_id: UUID, request: Request, user: ReadUse
         raise ApiError("AI_CONNECTOR_UNAVAILABLE", "connector is disabled", 503)
     if item.connector_type != "MCP":
         return success_response(request, {"connector_id": str(item.id), "tools": []})
-    from app.kernel.skill_gateway import McpProtocolError, McpTransportError
+    from app.kernel.ports.connector import McpProtocolError, McpTransportError
 
     try:
-        listing = await _probe_mcp(dict(item.config or {}))
+        listing = await _probe_mcp(dict(item.config or {}), item.secret_ref)
     except ApiError:
         raise
     except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:

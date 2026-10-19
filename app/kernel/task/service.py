@@ -92,8 +92,8 @@ def _create_task_records(
     task.last_event_seq = 1
     db.add(TaskEvent(id=new_uuid7(), tenant_id=tenant_id, task_id=task.id, seq=1, event_type="TASK_CREATED", to_state=TaskStatus.PENDING, summary=sanitize_summary("task created"), trace_id=trace_id))
     db.add(Outbox(tenant_id=tenant_id, aggregate_type="TASK", aggregate_id=task.id, event_type="TASK_READY", payload={"task_id": str(task.id)}))
-    if trigger_message_id is not None:
-        db.get(Message, trigger_message_id).task_id = task.id
+    # 注意：trigger 消息不回写 task_id（zr_message.task_id 有 UNIQUE 约束，保留给任务产出的 ASSISTANT 回复）；
+    # 任务与触发消息的关联由 Task.trigger_message_id 承载，避免 worker 收尾插入回复时触发唯一约束冲突。
     db.flush()
     return task
 
@@ -248,3 +248,30 @@ def transition_task(
         task.finished_at = _now()
     db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq, event_type=event_type, from_state=current, to_state=target, summary=sanitize_summary(summary), trace_id=trace_id))
     return task
+
+
+def append_task_event(
+    db: Session,
+    task: Task,
+    event_type: str,
+    summary: str,
+    trace_id: str | None = None,
+    payload_summary: dict | None = None,
+) -> None:
+    """细粒度过程事件（如 tool_call/tool_result）：不改变任务状态，仅递增 seq 追加事件。
+
+    乐观锁递增失败（并发）时静默丢弃——过程事件允许丢失，不影响状态一致性。
+    """
+    current = TaskStatus(task.status)
+    if current in TERMINAL_STATES:
+        return
+    next_event_seq = task.last_event_seq + 1
+    changed = db.execute(
+        update(Task)
+        .where(Task.id == task.id, Task.last_event_seq == task.last_event_seq)
+        .values(last_event_seq=Task.last_event_seq + 1)
+    )
+    if changed.rowcount != 1:
+        return
+    task.last_event_seq = next_event_seq
+    db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq, event_type=event_type, from_state=None, to_state=current, summary=sanitize_summary(summary), payload_summary=payload_summary, trace_id=trace_id))

@@ -63,6 +63,8 @@ export interface ChatResponse {
   status: string;
   // status=WAITING_HUMAN 时的审批挂起信息
   confirmation: ChatPendingConfirmation | null;
+  // response_type=CHAT 时随响应返回的回复文本（供前端打字机渲染，无需二次拉取）
+  assistant_content?: string | null;
 }
 
 // 写入类工具触发人工审批时的挂起信息（后端 ChatResponse.confirmation）
@@ -139,6 +141,8 @@ export interface Agent {
   is_default_parent: boolean;
   owner_user_id: string | null;
   created_at: string;
+  // 当前发布版本是否绑定了技能（工具）：前端据此路由「流式直答」或「任务执行链路」
+  has_tools?: boolean;
 }
 
 export interface AgentVersion {
@@ -153,6 +157,16 @@ export interface AgentVersion {
   child_necessity_policy: Record<string, unknown> | null;
   delegation_capability_version: string | null;
   published_at: string | null;
+}
+
+// 版本归档预检结果（GET /agents/{id}/versions/{vid}/archive-check）
+export interface AgentVersionArchiveCheck {
+  can_archive: boolean;
+  already_archived: boolean;
+  reasons: { code: string; message: string }[];
+  warnings: { code: string; message: string }[];
+  running_task_count: number;
+  referenced_by: { version_id: string; agent_name: string; version_number: number; status: string }[];
 }
 
 // Agent 版本已绑定的 Skill（GET /agents/{id}/versions/{vid}/skills）

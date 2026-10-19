@@ -64,3 +64,11 @@ class ModelGateway:
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[str]:
         raise NotImplementedError
+
+    async def stream_response(self, request: ModelRequest) -> AsyncIterator[dict[str, Any]]:
+        """默认实现：包装纯文本 stream() 聚合全文，final 不含 tool_calls（真实网关应覆写以支持流式分流）。"""
+        parts: list[str] = []
+        async for delta in self.stream(request):
+            parts.append(delta)
+            yield {'type': 'delta', 'content': delta}
+        yield {'type': 'final', 'response': ModelResponse(''.join(parts), [], 'stop', None, ModelUsage())}

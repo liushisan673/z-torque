@@ -3,7 +3,8 @@ import json
 import httpx
 import pytest
 
-from app.kernel.skill_gateway import McpProtocolError, McpTransportError, StreamableHttpMcpConnector
+from app.builtin_plugins.mcp import StreamableHttpMcpConnector
+from app.kernel.ports.connector import McpProtocolError, McpTransportError
 
 
 class McpTransport(httpx.AsyncBaseTransport):
@@ -88,6 +89,27 @@ async def test_streamable_http_allows_loopback_localhost():
     transport = McpTransport()
     connector = StreamableHttpMcpConnector("http://localhost:8765/mcp", allowed_hosts=[], transport=transport)
     await connector.negotiate()
+    await connector.close()
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_sends_bearer_token_when_configured():
+    # 配置了凭证时必须发送 Authorization: Bearer 头（如 TropaTT CRM 的 MCP 端点）
+    transport = McpTransport()
+    connector = StreamableHttpMcpConnector("https://mcp.example.test", allowed_hosts=["mcp.example.test"], transport=transport, auth_token="tok-123")
+    await connector.negotiate()
+    await connector.list_tools()
+    assert transport.requests[0][1]["authorization"] == "Bearer tok-123"
+    assert transport.requests[1][1]["authorization"] == "Bearer tok-123"
+    await connector.close()
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_omits_authorization_without_token():
+    transport = McpTransport()
+    connector = StreamableHttpMcpConnector("https://mcp.example.test", allowed_hosts=["mcp.example.test"], transport=transport)
+    await connector.negotiate()
+    assert "authorization" not in transport.requests[0][1]
     await connector.close()
 
 

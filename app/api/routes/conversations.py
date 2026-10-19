@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -42,8 +42,17 @@ async def create(payload: ConversationCreate, request: Request, user: User = Dep
     return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
 
 @router.get("")
-async def list_all(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = db.scalars(select(Conversation).where(Conversation.tenant_id == user.tenant_id, Conversation.owner_user_id == user.id).order_by(Conversation.created_at.desc())).all()
+async def list_all(
+    request: Request,
+    include_archived: bool = Query(default=False),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # 默认隐藏已归档会话（归档语义明确）；前端「显示已归档」开关显式传入 include_archived=true
+    query = select(Conversation).where(Conversation.tenant_id == user.tenant_id, Conversation.owner_user_id == user.id)
+    if not include_archived:
+        query = query.where(Conversation.status != "ARCHIVED")
+    rows = db.scalars(query.order_by(Conversation.created_at.desc())).all()
     return success_response(request, [ConversationResponse.model_validate(x).model_dump(mode="json") for x in rows])
 
 @router.get("/{conversation_id}")
@@ -58,6 +67,12 @@ async def update(conversation_id: UUID, payload: ConversationUpdate, request: Re
 @router.post("/{conversation_id}/archive")
 async def archive(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = conv(db, user, conversation_id); item.status = "ARCHIVED"; item.archived_at = datetime.now(timezone.utc); db.commit()
+    return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
+
+@router.post("/{conversation_id}/restore")
+async def restore(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # 归档可恢复：与智能体/技能不同，会话是用户的"工作现场"，误归档必须能找回
+    item = conv(db, user, conversation_id); item.status = "ACTIVE"; item.archived_at = None; db.commit()
     return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
 
 @router.get("/{conversation_id}/messages")

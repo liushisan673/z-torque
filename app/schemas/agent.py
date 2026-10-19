@@ -19,6 +19,15 @@ class VersionCreate(BaseModel):
     allowed_child_agent_versions: list[str] | None = None
     child_necessity_policy: dict | None = None
 
+class AgentVersionArchiveCheck(BaseModel):
+    """版本归档预检结果（GET /agents/{id}/versions/{vid}/archive-check）。"""
+    can_archive: bool
+    already_archived: bool = False
+    reasons: list[dict] = Field(default_factory=list)
+    warnings: list[dict] = Field(default_factory=list)
+    running_task_count: int = 0
+    referenced_by: list[dict] = Field(default_factory=list)
+
 class AgentResponse(BaseModel):
     id: UUID
     name: str

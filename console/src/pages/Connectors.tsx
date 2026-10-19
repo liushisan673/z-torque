@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { request, ApiRequestError } from "../services/api";
+import { errorText } from "../services/errorText";
 import type { Connector, ConnectorDiscoveredToolSummary, ConnectorTestResult, ConnectorToolLink } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { SecretRefInput } from "../components/SecretRefInput";
+import { GuideCallout } from "../components/GuideCallout";
+import { useToast } from "../components/Toast";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useAuth } from "../stores/auth";
 
 const API = "/api/z-torque/connectors";
@@ -110,6 +114,11 @@ function toolTypeLabel(t: string | null | undefined): string {
 
 export function ConnectorsPage() {
   const { user } = useAuth();
+  const { push: toast } = useToast();
+  // 危险操作三连：停用 / 归档 / 删除统一走 ConfirmDialog
+  const [confirmDisable, setConfirmDisable] = useState<{ id: string; name: string } | null>(null);
+  const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   // 权限：connector.manage 才能新建/编辑/启停/注册（对齐 connector.md 安全要求）
   const canManage = user?.permissions?.includes("connector.manage") ?? false;
 
@@ -189,7 +198,7 @@ export function ConnectorsPage() {
       const data = await request<Connector[]>(API);
       setItems(data);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载失败");
+      setError(errorText(err, "加载失败"));
     } finally {
       setLoading(false);
     }
@@ -198,6 +207,13 @@ export function ConnectorsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 默认展示列表第一项，避免主区空白（仅当前无选中时生效；删除当前选中后自动补选）
+  useEffect(() => {
+    if (loading || selectedId) return;
+    if (items.length > 0) void openDetail(items[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, items, selectedId]);
 
   const loadTools = useCallback(async (id: string) => {
     try {
@@ -226,7 +242,7 @@ export function ConnectorsPage() {
       setTableSelection(initTableSelection(d));
       await loadTools(d.id);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载详情失败");
+      setError(errorText(err, "加载详情失败"));
     } finally {
       setLoadingDetail(false);
     }
@@ -320,46 +336,66 @@ export function ConnectorsPage() {
       setDetail(d);
       setEditing(false);
       await load();
+      toast("success", "连接配置已保存");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "保存失败");
+      setError(errorText(err, "保存失败"));
     } finally {
       setBusy(false);
     }
   }
 
   async function toggleStatus(c: Connector) {
-    const disabling = c.status === "ENABLED";
-    if (disabling && !window.confirm(`确定停用「${c.name}」吗？停用后不可被 Skill 调用。`)) return;
+    if (!confirmDisable || confirmDisable.id !== c.id) return;
     setBusy(true);
     setError(null);
     try {
-      const d = await request<Connector>(`${API}/${c.id}/${disabling ? "disable" : "enable"}`, { method: "POST" });
+      const d = await request<Connector>(`${API}/${c.id}/disable`, { method: "POST" });
       setDetail(d);
       await load();
+      toast("success", "连接已停用");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "操作失败");
+      setError(errorText(err, "操作失败"));
+    } finally {
+      setBusy(false);
+      setConfirmDisable(null);
+    }
+  }
+
+  // 启用是低风险操作（恢复可见/可调用），不弹确认
+  async function enableConnector(c: Connector) {
+    setBusy(true);
+    setError(null);
+    try {
+      const d = await request<Connector>(`${API}/${c.id}/enable`, { method: "POST" });
+      setDetail(d);
+      await load();
+      toast("success", "连接已启用");
+    } catch (err) {
+      setError(errorText(err, "操作失败"));
     } finally {
       setBusy(false);
     }
   }
 
   async function archiveConnector(c: Connector) {
-    if (!window.confirm(`确定归档「${c.name}」吗？归档后连接不可再启用或调用。`)) return;
+    if (!confirmArchive || confirmArchive.id !== c.id) return;
     setBusy(true);
     setError(null);
     try {
       const d = await request<Connector>(`${API}/${c.id}/archive`, { method: "POST" });
       setDetail(d);
       await load();
+      toast("success", "连接已归档");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "归档失败");
+      setError(errorText(err, "归档失败"));
     } finally {
       setBusy(false);
+      setConfirmArchive(null);
     }
   }
 
   async function deleteConnector(c: Connector) {
-    if (!window.confirm(`确定删除「${c.name}」吗？仍注册有工具的连接无法删除，需先删除对应工具。`)) return;
+    if (!confirmDelete || confirmDelete.id !== c.id) return;
     setBusy(true);
     setError(null);
     try {
@@ -367,10 +403,12 @@ export function ConnectorsPage() {
       setDetail(null);
       setSelectedId(null);
       await load();
+      toast("success", "连接已删除");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "删除失败");
+      setError(errorText(err, "删除失败"));
     } finally {
       setBusy(false);
+      setConfirmDelete(null);
     }
   }
 
@@ -389,7 +427,7 @@ export function ConnectorsPage() {
         return next;
       });
       setTestFailure({
-        message: err instanceof ApiRequestError ? err.message : "检查失败",
+        message: errorText(err, "检查失败"),
         traceId: err instanceof ApiRequestError ? err.traceId : undefined,
       });
     } finally {
@@ -407,7 +445,7 @@ export function ConnectorsPage() {
       setDiscovered(r.tools);
     } catch (err) {
       setDiscovered(null);
-      setError(err instanceof ApiRequestError ? err.message : "发现工具失败");
+      setError(errorText(err, "发现工具失败"));
     } finally {
       setDiscovering(false);
     }
@@ -473,6 +511,7 @@ export function ConnectorsPage() {
       setCreateDbUser("");
       await load();
       await openDetail(d);
+      toast("success", "连接已创建");
       if (d.connector_type === "DB") {
         // 数据库连接创建后直接进入健康检查，探测表清单供勾选
         setTab("test");
@@ -484,7 +523,7 @@ export function ConnectorsPage() {
         await runTest(d);
       }
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建失败");
+      setError(errorText(err, "创建失败"));
     } finally {
       setBusy(false);
     }
@@ -508,7 +547,7 @@ export function ConnectorsPage() {
       await load();
       await runTest(d);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "保存失败");
+      setError(errorText(err, "保存失败"));
     } finally {
       setSavingTables(false);
     }
@@ -530,7 +569,7 @@ export function ConnectorsPage() {
       setSecretValue("");
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "更换凭证失败");
+      setError(errorText(err, "更换凭证失败"));
     } finally {
       setBusy(false);
     }
@@ -603,14 +642,48 @@ export function ConnectorsPage() {
       setRegSchema("");
       setRegSql("");
       await loadTools(detail.id);
+      toast("success", "工具已注册");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "注册失败");
+      setError(errorText(err, "注册失败"));
     } finally {
       setBusy(false);
     }
   }
 
+  // MCP 批量注册：把发现结果中尚未登记的工具按默认名称一次性注册，免去逐个弹窗
+  async function registerAllDiscovered() {
+    if (!detail || !discovered) return;
+    const pending = discovered.filter((t) => !registeredNames.has(t.name.trim()));
+    if (pending.length === 0) {
+      toast("info", "发现结果均已登记");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    let ok = 0;
+    const failed: string[] = [];
+    for (const t of pending) {
+      try {
+        await request(`${API}/${detail.id}/tools/register`, {
+          method: "POST",
+          body: { name: t.name.trim(), description: t.description || null, tool_type: "MCP", external_name: t.name.trim() },
+        });
+        ok += 1;
+      } catch {
+        failed.push(t.name);
+      }
+    }
+    await loadTools(detail.id);
+    setBusy(false);
+    if (failed.length === 0) toast("success", `已批量登记 ${ok} 个工具`);
+    else toast("info", `已登记 ${ok} 个，失败 ${failed.length} 个：${failed.slice(0, 3).join("、")}${failed.length > 3 ? "…" : ""}`);
+  }
+
   const lastTest = selected ? testResults[selected.id] ?? null : null;
+  // 已登记工具名集合：用于在发现结果里区分「已注册 / 未注册」，并支撑批量注册
+  const registeredNames = new Set(
+    tools.map((t) => String(t.external_name ?? t.name ?? "").trim()).filter(Boolean),
+  );
   const enabled = selected?.status === "ENABLED";
   const typeLabel = selected ? typeInfo(selected.connector_type).label : "—";
   const fields = selected ? configFields(selected.connector_type) : [];
@@ -679,8 +752,13 @@ export function ConnectorsPage() {
               <Loading />
             ) : filtered.length === 0 ? (
               <div className="connector-detail-empty">
-                <h2>暂无连接</h2>
-                <span>{canManage ? "请先新建连接或调整筛选条件" : "管理员尚未配置连接"}</span>
+                <GuideCallout
+                  title={loading ? "加载中" : "还没有连接"}
+                  why={loading ? undefined : canManage ? "接入外部系统与 MCP 工具，需要先创建连接" : "连接由管理员统一创建与维护"}
+                  actionLabel={canManage ? "新建连接" : undefined}
+                  onAction={canManage ? () => setCreateOpen(true) : undefined}
+                  hint={canManage ? "创建后可在「操作」tab 登记工具，供技能绑定调用" : undefined}
+                />
               </div>
             ) : (
               filtered.map((c) => {
@@ -748,7 +826,7 @@ export function ConnectorsPage() {
                       <button
                         className="btn btn-secondary"
                         disabled={busy}
-                        onClick={() => void archiveConnector(selected)}
+                        onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}
                       >
                         归档
                       </button>
@@ -757,7 +835,7 @@ export function ConnectorsPage() {
                       <button
                         className="skill-btn-danger-outline"
                         disabled={busy}
-                        onClick={() => void deleteConnector(selected)}
+                        onClick={() => setConfirmDelete({ id: selected.id, name: selected.name })}
                       >
                         删除
                       </button>
@@ -766,7 +844,13 @@ export function ConnectorsPage() {
                       <button
                         className={enabled ? "skill-btn-danger-outline" : "btn btn-primary"}
                         disabled={busy}
-                        onClick={() => void toggleStatus(selected)}
+                        onClick={() => {
+                          if (enabled) {
+                            setConfirmDisable({ id: selected.id, name: selected.name });
+                          } else {
+                            void enableConnector(selected);
+                          }
+                        }}
                       >
                         {enabled ? "停用" : "启用"}
                       </button>
@@ -1033,6 +1117,16 @@ export function ConnectorsPage() {
                               {discovering ? "发现中…" : "从 MCP 服务发现工具"}
                             </button>
                           )}
+                          {selected.connector_type === "MCP" && discovered !== null && (
+                            <button
+                              className="btn btn-primary btn-sm"
+                              disabled={busy || discovering || discovered.every((t) => registeredNames.has(t.name.trim()))}
+                              onClick={() => void registerAllDiscovered()}
+                              title="把发现结果中尚未登记的工具按默认名称一次性注册"
+                            >
+                              批量登记未注册工具（{discovered.filter((t) => !registeredNames.has(t.name.trim())).length}）
+                            </button>
+                          )}
                         </div>
                       )}
                       {/* MCP 发现结果：发现 ≠ 已授权，注册后才能被 Skill 绑定调用 */}
@@ -1051,23 +1145,30 @@ export function ConnectorsPage() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {discovered.map((t) => (
-                                  <tr key={t.name}>
-                                    <td className="op-name">{t.name}</td>
-                                    <td>{t.description || "—"}</td>
-                                    {canManage && enabled && (
-                                      <td>
-                                        <button
-                                          className="btn btn-secondary btn-sm"
-                                          disabled={busy}
-                                          onClick={() => { setRegType("MCP"); setRegName(t.name); setRegExternal(t.name); setRegDesc(t.description); setRegOpen(true); }}
-                                        >
-                                          注册为工具
-                                        </button>
-                                      </td>
-                                    )}
-                                  </tr>
-                                ))}
+                                {discovered.map((t) => {
+                                  const already = registeredNames.has(t.name.trim());
+                                  return (
+                                    <tr key={t.name}>
+                                      <td className="op-name">{t.name}</td>
+                                      <td>{t.description || "—"}</td>
+                                      {canManage && enabled && (
+                                        <td>
+                                          {already ? (
+                                            <span className="connector-tag connector-tag-ok">已登记</span>
+                                          ) : (
+                                            <button
+                                              className="btn btn-secondary btn-sm"
+                                              disabled={busy}
+                                              onClick={() => { setRegType("MCP"); setRegName(t.name); setRegExternal(t.name); setRegDesc(t.description); setRegOpen(true); }}
+                                            >
+                                              登记为工具
+                                            </button>
+                                          )}
+                                        </td>
+                                      )}
+                                    </tr>
+                                  );
+                                })}
                               </tbody>
                             </table>
                           )}
@@ -1319,6 +1420,7 @@ export function ConnectorsPage() {
             <div className="form-field">
               <label>请求 URL</label>
               <input className="input" value={regUrl} onChange={(e) => setRegUrl(e.target.value)} placeholder="https://api.example.com/v1/resource" />
+              <div className="field-help">当前仅支持 GET 请求；POST/PUT 等写接口暂不支持登记。</div>
             </div>
             <div className="form-field">
               <label>请求头（JSON，可选）</label>
@@ -1341,6 +1443,43 @@ export function ConnectorsPage() {
           <textarea className="textarea" value={regDesc} onChange={(e) => setRegDesc(e.target.value)} placeholder="该操作的用途（可选）" />
         </div>
       </Modal>
+
+      {/* 危险操作三连：停用 / 归档 / 删除 */}
+      <ConfirmDialog
+        open={confirmDisable !== null}
+        title="停用该连接？"
+        confirmText="停用"
+        busy={busy}
+        onCancel={() => setConfirmDisable(null)}
+        onConfirm={() => { const c = detail?.id === confirmDisable?.id ? detail : null; if (c) void toggleStatus(c); }}
+      >
+        <p>连接「{confirmDisable?.name ?? ""}」将进入「停用」状态，Skill 不再可调用。已注册的工具也会暂停使用。</p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmArchive !== null}
+        title="归档该连接？"
+        confirmText="归档"
+        busy={busy}
+        onCancel={() => setConfirmArchive(null)}
+        onConfirm={() => { const c = detail?.id === confirmArchive?.id ? detail : null; if (c) void archiveConnector(c); }}
+      >
+        <p>连接「{confirmArchive?.name ?? ""}」将进入「已归档」状态，之后不可再启用或调用。配置信息保留。</p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="删除该连接？"
+        confirmText="删除"
+        destructive
+        requireText={confirmDelete?.name ?? ""}
+        requireLabel="请输入连接名称以确认删除"
+        busy={busy}
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={() => { const c = detail?.id === confirmDelete?.id ? detail : null; if (c) void deleteConnector(c); }}
+      >
+        <p>连接「{confirmDelete?.name ?? ""}」将被永久删除。若仍注册有工具，后端会拒绝删除，请先删除对应工具。</p>
+      </ConfirmDialog>
     </div>
   );
 }

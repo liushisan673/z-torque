@@ -173,15 +173,14 @@ async def test_admin_iam_crud_happy_path(iam_baseline):
         )
         assert rp.status_code == 200
 
-        # delete (community: disable)
+        # delete（硬删除：级联清理业务数据并解除引用，用户从列表移除）
         du = await client.delete(f"/api/z-torque/admin/iam/users/{user_id}", headers=headers)
         assert du.status_code == 200
 
         lu = await client.get("/api/z-torque/admin/iam/users", headers=headers)
         assert lu.status_code == 200
         items = lu.json()["data"]["items"]
-        alice_item = next(u for u in items if u["id"] == user_id)
-        assert alice_item["is_active"] is False
+        assert all(u["id"] != user_id for u in items)
 
         # delete role
         dr = await client.delete(f"/api/z-torque/admin/iam/roles/{role_id}", headers=headers)

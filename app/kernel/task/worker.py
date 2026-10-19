@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from uuid import UUID
 
 from app.kernel.ports.queue_driver import Executor, QueueDriver
+
+logger = logging.getLogger("z_torque.task_worker")
 
 
 class Worker:
@@ -19,9 +22,16 @@ class Worker:
         finally:
             self.queue.task_done()
 
-    async def run(self) -> None:
-        while not self._stopped:
-            await self.run_once()
-
     def stop(self) -> None:
+        """请求 worker 在当前任务完成后退出循环（TaskRuntime.stop 先调它再 cancel）。"""
         self._stopped = True
+
+    async def run(self) -> None:
+        # 单个任务执行异常不得终止 worker 循环（否则后续任务将永久停留在队列中无人消费）
+        while not self._stopped:
+            try:
+                await self.run_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("task executor failed")

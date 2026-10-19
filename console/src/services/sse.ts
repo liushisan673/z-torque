@@ -23,11 +23,13 @@ function authHeaders(extra?: Record<string, string>): Record<string, string> {
 
 /**
  * 通过 POST 建立流式请求（用于 Chat Stream），逐个事件回调。
+ * extraHeaders：附加请求头（如 Idempotency-Key），与认证头合并发送。
  */
 export function openPostStream(
   path: string,
   body: unknown,
   handlers: { onEvent: EventHandler; onError?: (err: Error) => void; onDone?: () => void },
+  extraHeaders?: Record<string, string>,
 ): SseHandle {
   const controller = new AbortController();
   void (async () => {
@@ -35,7 +37,7 @@ export function openPostStream(
       const resp = await fetchWithAuth(path, {
         method: "POST",
         credentials: "same-origin",
-        headers: authHeaders({ "Content-Type": "application/json" }),
+        headers: authHeaders({ "Content-Type": "application/json", ...extraHeaders }),
         body: JSON.stringify(body),
         signal: controller.signal,
       });

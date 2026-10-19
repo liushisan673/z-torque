@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { request, ApiRequestError } from "../services/api";
+import { request } from "../services/api";
+import { errorText } from "../services/errorText";
+import { useToast } from "../components/Toast";
 import type { IamRole, IamUser } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
@@ -53,11 +55,11 @@ function roleDesc(name: string): string {
 type DialogKind = "create" | "edit" | "reset" | "delete" | null;
 
 export function UsersPage() {
+  const { push: toast } = useToast();
   const [users, setUsers] = useState<IamUser[]>([]);
   const [roles, setRoles] = useState<IamRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
   // 工具栏筛选（后端返回全量列表，筛选在客户端进行，与文档工具栏一致）
   const [keyword, setKeyword] = useState("");
@@ -91,7 +93,7 @@ export function UsersPage() {
       setRoles(r.items);
       setSelected((prev) => (prev ? u.items.find((x) => x.id === prev.id) ?? null : null));
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载失败");
+      setError(errorText(err, "加载失败"));
     } finally {
       setLoading(false);
     }
@@ -110,11 +112,6 @@ export function UsersPage() {
       return true;
     });
   }, [users, keyword, roleFilter, stateFilter]);
-
-  function flash(msg: string) {
-    setNotice(msg);
-    window.setTimeout(() => setNotice(null), 4000);
-  }
 
   function openCreate() {
     setTarget(null);
@@ -154,10 +151,10 @@ export function UsersPage() {
         body: { username: mUsername.trim(), password: mPassword, display_name: mDisplayName.trim() || null, is_active: true, role_ids: mRoleIds },
       });
       setDialog(null);
-      flash("用户已创建");
+      toast("success", "用户已创建");
       await reload();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建失败");
+      setError(errorText(err, "创建失败"));
     } finally {
       setBusy(false);
     }
@@ -172,10 +169,10 @@ export function UsersPage() {
         body: { display_name: mDisplayName.trim() || null, is_active: mActive, role_ids: mRoleIds },
       });
       setDialog(null);
-      flash("用户已更新");
+      toast("success", "用户已更新");
       await reload();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "更新失败");
+      setError(errorText(err, "更新失败"));
     } finally {
       setBusy(false);
     }
@@ -192,10 +189,10 @@ export function UsersPage() {
         body: { password: mPassword },
       });
       setDialog(null);
-      flash("密码已重置（Argon2id 存储）");
+      toast("success", "密码已重置（Argon2id 存储）");
       await reload();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "重置失败");
+      setError(errorText(err, "重置失败"));
     } finally {
       setBusy(false);
     }
@@ -208,10 +205,10 @@ export function UsersPage() {
     try {
       await request(`${API}/users/${target.id}`, { method: "DELETE" });
       setDialog(null);
-      flash("用户已删除");
+      toast("success", "用户已删除");
       await reload();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "删除失败");
+      setError(errorText(err, "删除失败"));
     } finally {
       setBusy(false);
     }
@@ -221,10 +218,10 @@ export function UsersPage() {
     setBusy(true); setError(null);
     try {
       await request(`${API}/users/${u.id}`, { method: "PATCH", body: { is_active: !u.is_active } });
-      flash(u.is_active ? "已禁用" : "已启用");
+      toast("success", u.is_active ? "已禁用" : "已启用");
       await reload();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "操作失败");
+      setError(errorText(err, "操作失败"));
     } finally {
       setBusy(false);
     }
@@ -234,10 +231,10 @@ export function UsersPage() {
     setBusy(true); setError(null);
     try {
       await request(`${API}/users/${u.id}/unlock`, { method: "POST" });
-      flash("已解锁（失败计数清零）");
+      toast("success", "已解锁（失败计数清零）");
       await reload();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "解锁失败");
+      setError(errorText(err, "解锁失败"));
     } finally {
       setBusy(false);
     }
@@ -276,12 +273,6 @@ export function UsersPage() {
           <span>⚠</span><span>{error}</span>
         </div>
       )}
-      {notice && (
-        <div className="skill-alert skill-alert-ok" style={{ marginBottom: 12 }}>
-          <span>✓</span><span>{notice}</span>
-        </div>
-      )}
-
       <div className="users-shell">
         {/* 列表 */}
         <div className="users-list-pane">

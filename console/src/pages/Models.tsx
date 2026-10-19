@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { request, ApiRequestError } from "../services/api";
+import { errorText } from "../services/errorText";
 import type { ModelProvider, ModelResource, ModelEndpoint, ModelTestResult } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { SecretRefInput } from "../components/SecretRefInput";
+import { GuideCallout } from "../components/GuideCallout";
+import { useToast } from "../components/Toast";
 import { useAuth } from "../stores/auth";
 
 type Tab = "overview" | "endpoints" | "secret" | "test";
@@ -42,6 +46,15 @@ const INTERFACE_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: "custom", label: "自定义" },
 ];
 
+// 常见供应商预设：一键填充名称与 Base URL（密钥仍需自行填写）
+const PROVIDER_PRESETS: { name: string; base_url: string; type: string }[] = [
+  { name: "DeepSeek", base_url: "https://api.deepseek.com/v1", type: "openai_compatible" },
+  { name: "OpenAI", base_url: "https://api.openai.com/v1", type: "openai_compatible" },
+  { name: "通义千问", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", type: "openai_compatible" },
+  { name: "Moonshot Kimi", base_url: "https://api.moonshot.cn/v1", type: "openai_compatible" },
+  { name: "Ollama 本地", base_url: "http://127.0.0.1:11434/v1", type: "openai_compatible" },
+];
+
 function ifaceText(value: string | null | undefined): string | null {
   if (!value) return null;
   return INTERFACE_TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value;
@@ -58,6 +71,9 @@ export function ModelsPage() {
   const { user } = useAuth();
   // 仅 model.manage 持有者可执行写操作与连接测试；其余账号进入只读模式
   const canManage = (user?.permissions ?? []).includes("model.manage");
+  const { push: toast } = useToast();
+  // 停用模型需要走 ConfirmDialog 确认（影响智能体配置可选项）
+  const [disableModelConfirm, setDisableModelConfirm] = useState(false);
   const [providers, setProviders] = useState<ModelProvider[]>([]);
   const [models, setModels] = useState<ModelResource[]>([]);
   const [loading, setLoading] = useState(true);
@@ -119,7 +135,7 @@ export function ModelsPage() {
       setProviders(ps);
       setModels(ms);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载失败");
+      setError(errorText(err, "加载失败"));
     } finally {
       setLoading(false);
     }
@@ -128,6 +144,13 @@ export function ModelsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 默认展示列表第一项，避免主区空白（仅当前无选中时生效；删除当前选中后自动补选）
+  useEffect(() => {
+    if (loading || selectedId) return;
+    if (models.length > 0) void openModel(models[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, models, selectedId]);
 
   // 详情打开时同步编辑表单
   function fillForm(d: ModelResource) {
@@ -154,7 +177,7 @@ export function ModelsPage() {
       const eps = (d.endpoints ?? []).filter((e) => e.status === "ENABLED");
       setTestEndpointId(eps.length > 0 ? [...eps].sort((a, b) => a.priority - b.priority)[0].id : "");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载详情失败");
+      setError(errorText(err, "加载详情失败"));
     } finally {
       setLoadingDetail(false);
     }
@@ -187,8 +210,9 @@ export function ModelsPage() {
       setDetail(d);
       fillForm(d);
       await load();
+      toast("success", "模型信息已保存");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "保存失败");
+      setError(errorText(err, "保存失败"));
     } finally {
       setBusy(false);
     }
@@ -197,7 +221,7 @@ export function ModelsPage() {
   async function toggleModel() {
     if (!detail) return;
     const action = detail.status === "ENABLED" ? "disable" : "enable";
-    if (action === "disable" && !window.confirm("停用后 Agent 配置侧将不可选用该模型，确定吗？")) return;
+    if (action === "disable" && !disableModelConfirm) return;
     setBusy(true);
     setError(null);
     try {
@@ -205,10 +229,12 @@ export function ModelsPage() {
       setDetail(d);
       fillForm(d);
       await load();
+      toast("success", action === "enable" ? "模型已启用" : "模型已停用");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "操作失败");
+      setError(errorText(err, "操作失败"));
     } finally {
       setBusy(false);
+      setDisableModelConfirm(false);
     }
   }
 
@@ -267,8 +293,9 @@ export function ModelsPage() {
       setProviderOpen(false);
       setPName(""); setPType("openai_compatible"); setPBaseUrl(""); setPSecret(""); setPDesc("");
       await load();
+      toast("success", "供应商已创建，下一步添加模型");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建失败");
+      setError(errorText(err, "创建失败"));
     } finally {
       setBusy(false);
     }
@@ -286,8 +313,9 @@ export function ModelsPage() {
       setModelOpen(null);
       setMName(""); setMIdentifier(""); setMDesc("");
       await load();
+      toast("success", "模型已创建");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建失败");
+      setError(errorText(err, "创建失败"));
     } finally {
       setBusy(false);
     }
@@ -334,7 +362,7 @@ export function ModelsPage() {
       await refreshDetail(detail.id);
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "保存失败");
+      setError(errorText(err, "保存失败"));
     } finally {
       setBusy(false);
     }
@@ -350,7 +378,7 @@ export function ModelsPage() {
       await refreshDetail(detail.id);
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "操作失败");
+      setError(errorText(err, "操作失败"));
     } finally {
       setBusy(false);
     }
@@ -369,8 +397,9 @@ export function ModelsPage() {
       setSecretValue("");
       await refreshDetail(detail.id);
       await load();
+      toast("success", "密钥已更新");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "更换密钥失败");
+      setError(errorText(err, "更换密钥失败"));
     } finally {
       setBusy(false);
     }
@@ -400,8 +429,13 @@ export function ModelsPage() {
               <Loading />
             ) : providers.length === 0 ? (
               <div className="model-detail-empty">
-                <h2>暂无供应商</h2>
-                <span>请先添加供应商</span>
+                <GuideCallout
+                  title="还没有模型供应商"
+                  why="智能对话依赖至少一个已配置密钥的模型供应商"
+                  actionLabel={canManage ? "添加供应商" : undefined}
+                  onAction={canManage ? () => { setPName(""); setPType("openai_compatible"); setPBaseUrl(""); setPSecret(""); setPDesc(""); setProviderOpen(true); } : undefined}
+                  hint={canManage ? "配置完成后，到「智能体管理」绑定模型并发布即可开聊" : "请联系管理员完成模型配置"}
+                />
               </div>
             ) : (
               providers.map((p) => {
@@ -422,8 +456,17 @@ export function ModelsPage() {
                       )}
                     </div>
                     {mine.length === 0 ? (
-                      <div className="model-item" style={{ cursor: "default" }}>
-                        <span>暂无模型</span>
+                      <div className="model-item" style={{ cursor: "default", display: "block" }}>
+                        {canManage ? (
+                          <GuideCallout
+                            compact
+                            title="该供应商下还没有模型"
+                            actionLabel="添加模型"
+                            onAction={() => { setMName(""); setMIdentifier(""); setMDesc(""); setModelOpen(p.id); }}
+                          />
+                        ) : (
+                          <span>暂无模型</span>
+                        )}
                       </div>
                     ) : (
                       mine.map((m) => {
@@ -484,7 +527,15 @@ export function ModelsPage() {
                     {canManage && (
                       <>
                         <button className="btn btn-primary" type="button" disabled={busy} onClick={() => { setTab("test"); void runTest(); }}>测试连接</button>
-                        <button className="btn btn-secondary" type="button" disabled={busy} onClick={() => void toggleModel()}>
+                        <button
+                          className="btn btn-secondary"
+                          type="button"
+                          disabled={busy}
+                          onClick={() => {
+                            if (detail?.status === "ENABLED") setDisableModelConfirm(true);
+                            else void toggleModel();
+                          }}
+                        >
                           {detail?.status === "ENABLED" ? "停用" : "启用"}
                         </button>
                       </>
@@ -665,6 +716,16 @@ export function ModelsPage() {
                       <span>⚠</span>
                       <span>密钥通过 Secret Store 保存。页面只显示「已配置」或脱敏密钥引用，<strong>永不展示明文</strong>。更换时提交新值由后端写入密钥库。</span>
                     </div>
+                    {/* 状态联动：密钥缺失时直接给出修复入口，不用让用户猜去哪修 */}
+                    {!detail?.provider?.secret_configured && (
+                      <GuideCallout
+                        title="该模型所属供应商尚未配置密钥"
+                        why="未配置密钥的模型无法通过连接测试，对话中也不可用"
+                        actionLabel={canManage ? "立即配置密钥" : undefined}
+                        onAction={canManage ? () => { setSecretValue(""); setSecretOpen(true); } : undefined}
+                        hint={canManage ? undefined : "请联系管理员在模型管理中配置"}
+                      />
+                    )}
                     <div className="model-section">
                       <h3>API Key</h3>
                       <div className="model-secret-row">
@@ -774,6 +835,17 @@ export function ModelsPage() {
         }
       >
         <div className="form-field">
+          <label>供应商预设</label>
+          <div className="preset-row">
+            {PROVIDER_PRESETS.map((p) => (
+              <button key={p.name} type="button" className="preset-chip" onClick={() => { setPName(p.name); setPBaseUrl(p.base_url); setPType(p.type); }}>
+                {p.name}
+              </button>
+            ))}
+          </div>
+          <div className="help">点击自动填充名称与 Base URL，密钥仍需自行填写。</div>
+        </div>
+        <div className="form-field">
           <label>名称</label>
           <input className="input" value={pName} onChange={(e) => setPName(e.target.value)} placeholder="例如：DeepSeek" />
         </div>
@@ -877,6 +949,18 @@ export function ModelsPage() {
           <SecretRefInput value={secretValue} onChange={setSecretValue} placeholder="secret://…" />
         </div>
       </Modal>
+
+      {/* 停用模型：影响智能体配置可选项，必须二次确认 */}
+      <ConfirmDialog
+        open={disableModelConfirm}
+        title="停用该模型？"
+        confirmText="停用"
+        busy={busy}
+        onCancel={() => setDisableModelConfirm(false)}
+        onConfirm={() => void toggleModel()}
+      >
+        <p>模型「{detail?.name ?? ""}」将进入「停用」状态，Agent 配置侧将不可再选用该模型，已发布版本会自动回退到其它可用模型。</p>
+      </ConfirmDialog>
     </div>
   );
 }

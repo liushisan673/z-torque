@@ -21,7 +21,7 @@ from sqlglot import exp, parse
 # 本进程内 pg8000 仅由本模块使用：统一 named 参数风格（:name 绑定变量）
 pg8000.dbapi.paramstyle = "named"
 
-from app.kernel.skill_gateway import ExecutionResult
+from app.kernel.ports.skill_executor import ExecutionResult
 
 # 模板占位符：{{参数名}}（与 HTTP executor 外观一致，但语义是绑定变量而非字符串替换）
 _TEMPLATE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")

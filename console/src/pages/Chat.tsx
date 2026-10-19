@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { request, uploadFile, ApiRequestError } from "../services/api";
+import { useNavigate } from "react-router-dom";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { request, uploadFile } from "../services/api";
+import { errorText } from "../services/errorText";
 import { openGetStream, openPostStream } from "../services/sse";
-import type { Agent, ChatPendingConfirmation, ChatResponse, Confirmation, Conversation, FileContent, FileMetadata, FileStatus, Message, Task, TaskEvent } from "../types";
+import type { Agent, ChatResponse, Confirmation, Conversation, FileContent, FileMetadata, FileStatus, Message, Task, TaskEvent } from "../types";
 import { StatusTag, EmptyState, Alert } from "../components/ui";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { GuideCallout } from "../components/GuideCallout";
+import { useToast } from "../components/Toast";
 import { AppTopbar, APP_NAV } from "../components/AppTopbar";
 
 interface TaskStep {
@@ -12,6 +19,59 @@ interface TaskStep {
   eventType: string;
   summary: string;
   time: string;
+  payload?: Record<string, unknown> | null;
+}
+
+// 会话记忆摘要（GET /memory 与 POST /memory/summarize 共用返回结构）
+interface MemorySummary {
+  summary: string;
+  source_start: number;
+  source_end: number;
+  updated_at: string;
+}
+
+// 内联执行块（run-block）状态：当前正在展示的任务（chat.md 定稿：过程在上、结论在下）
+interface ActiveRun {
+  taskId: string;
+  steps: TaskStep[];
+  status: string;
+  waiting: boolean;
+  // 用户主动停止（区别于后端失败）：过程标记为「已停止」
+  stopped?: boolean;
+}
+
+// 本地步骤：不来自后端事件（理解需求 / 汇总结论 / 已停止），用负 seq 与真实事件隔离
+let LOCAL_SEQ = -1;
+function localStep(eventType: string, summary: string): TaskStep {
+  return { seq: LOCAL_SEQ--, eventType, summary, time: new Date().toLocaleTimeString(), payload: null };
+}
+
+// 长文本截断：工具参数/结果做脱敏与长度限制（文档 6.5）
+function clipText(text: string, limit: number): string {
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+// 参数/结果统一转展示文本：后端 payload 可能是字符串（_brief）或对象
+function toDisplayText(value: unknown, limit: number): string | null {
+  if (value === null || value === undefined) return null;
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return text.trim() ? clipText(text, limit) : null;
+}
+
+// SSE 事件数据中的框架字段：剔除后剩下的即业务 payload（tool_name / arguments / result …）
+const EVENT_META_KEYS = new Set([
+  "task_id", "seq", "summary", "status", "root_task_id", "parent_task_id",
+  "delegation_depth", "child_sequence", "from_state", "to_state", "created_at", "conversation_id",
+]);
+function payloadOf(d: Record<string, unknown>): Record<string, unknown> | null {
+  const rest: Record<string, unknown> = {};
+  let has = false;
+  for (const [k, v] of Object.entries(d)) {
+    if (EVENT_META_KEYS.has(k)) continue;
+    rest[k] = v;
+    has = true;
+  }
+  return has ? rest : null;
 }
 
 function eventLabel(eventType: string): string {
@@ -32,12 +92,19 @@ function eventLabel(eventType: string): string {
     TASK_APPROVAL_REJECTED: "已拒绝",
     TASK_SKILL_FAILED: "能力执行失败",
     TASK_MODEL_FAILED: "模型推理失败",
+    // 工具执行事件（细粒度时间线）
+    TASK_TOOL_CALL: "正在调用能力",
+    TASK_TOOL_RESULT: "能力返回结果",
+    // 本地阶段事件（前端生成，不来自后端，文案对齐 chat.html）
+    LOCAL_UNDERSTAND: "理解需求",
+    LOCAL_SUMMARY: "汇总结论",
+    LOCAL_STOPPED: "已停止",
     // 流式阶段事件（与文档 5.3 节事件名对齐，不虚构未发生步骤）
     "task.snapshot": "任务状态快照",
     "task.status": "状态更新",
     "task.delta": "执行进展",
-    "task.tool_call": "工具调用",
-    "task.tool_result": "工具结果",
+    "task.tool_call": "正在调用能力",
+    "task.tool_result": "能力返回结果",
     "task.waiting_human": "等待人工确认",
     "task.human_decision": "人工决策",
     "task.result": "最终结果",
@@ -58,6 +125,13 @@ const TERMINAL = new Set(["SUCCESS", "FAILED", "TIMEOUT", "CANCELLED"]);
 const ALLOWED_FILE_EXTS = ["pdf", "txt", "md", "csv", "xlsx"];
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 
+// 首启示例提问：降低"不知道该问什么"的门槛；点击仅填入输入框，不自动发送
+const STARTER_PROMPTS = [
+  "帮我总结一段文字的关键结论",
+  "把下面的内容整理成表格",
+  "查一下数据库里的用户表结构",
+];
+
 export function ChatPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -73,19 +147,22 @@ export function ChatPage() {
   const [uploading, setUploading] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-  const [memory, setMemory] = useState<{ summary: string; source_start: number; source_end: number; updated_at: string } | null>(null);
-  const [loadingMemory, setLoadingMemory] = useState(false);
+  // 会话项 ⋯ 下拉菜单：记录当前展开菜单的会话 ID
+  const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
+  // 记忆摘要弹窗：从 ⋯ 菜单打开，按需加载对应会话的摘要
+  const [memoryModal, setMemoryModal] = useState<{ convId: string } | null>(null);
+  const [memoryData, setMemoryData] = useState<MemorySummary | null>(null);
+  const [memoryLoading, setMemoryLoading] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [taskHistoryOpen, setTaskHistoryOpen] = useState(false);
   const [taskHistory, setTaskHistory] = useState<Task[]>([]);
 
   const [task, setTask] = useState<Task | null>(null);
   const [steps, setSteps] = useState<TaskStep[]>([]);
   const [waitingConfirm, setWaitingConfirm] = useState(false);
-  // 写入类工具触发的审批挂起信息（工具名 + 参数，带批准/拒绝按钮）
-  const [pendingConf, setPendingConf] = useState<ChatPendingConfirmation | null>(null);
   const [childTasks, setChildTasks] = useState<Task[]>([]);
-  // Task 面板折叠状态：有等待确认时自动展开并高亮（文档 5.1）
-  const [taskPanelOpen, setTaskPanelOpen] = useState(true);
+  // Task 面板：降级为详情入口（默认收起，通过 badge / 消息「查看执行过程」打开）
+  const [taskPanelOpen, setTaskPanelOpen] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const streamRef = useRef<{ abort: () => void } | null>(null);
   const lastEventIdRef = useRef<string>("");
@@ -94,6 +171,18 @@ export function ChatPage() {
 
   // 普通聊天流式输出的增量文本（会话页默认流式输出，无需开关）
   const [streamingText, setStreamingText] = useState<string | null>(null);
+
+  // 任务链路内联执行块（run-block）：任务事件实时驱动步骤逐条增加
+  const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
+  // 任务完成后最终结论的打字机文本（来源 task.done 的 result.content）
+  const [runAnswer, setRunAnswer] = useState<string | null>(null);
+  // 当前这一轮助手回复的开始时间（过程块与结论共用同一时间戳）
+  const [turnTime, setTurnTime] = useState<string>("");
+  const typeTimerRef = useRef<number | null>(null);
+  // 首次进入页面已自动选中过会话的标记（仅生效一次，避免覆盖切智能体的新对话）
+  const autoSelectedRef = useRef(false);
+  // 当前会话引用：流式回调使用（闭包中的 state 会过期，切换会话后旧回调不得回写视图）
+  const conversationIdRef = useRef<string | null>(null);
 
   // 文件详情弹窗
   const [fileDetail, setFileDetail] = useState<{ meta: FileMetadata; status: FileStatus | null; content: FileContent | null } | null>(null);
@@ -104,38 +193,153 @@ export function ChatPage() {
   const [confList, setConfList] = useState<Confirmation[]>([]);
   const [confRecord, setConfRecord] = useState<Confirmation | null>(null);
 
+  // 会话归档可恢复：显示已归档开关 + 恢复入口，避免误归档后永久丢失
+  const [showArchived, setShowArchived] = useState(false);
+  const [archiveTarget, setArchiveTarget] = useState<Conversation | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  // 切换智能体时若存在正在推进的执行链路，先确认再切换（原本会静默丢弃）
+  const [pendingAgentId, setPendingAgentId] = useState<string | null>(null);
+  // 高危操作：删除附件（不可恢复）需要显式确认
+  const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
+  // 窄屏抽屉：原实现在 <768px 直接隐藏侧栏，手机上无法切换会话与智能体
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const navigate = useNavigate();
+  const { push: toast } = useToast();
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
   const loadAgentsAndConversations = useCallback(async () => {
     setError(null);
     try {
       const [a, c] = await Promise.all([
         request<Agent[]>("/api/z-torque/agents"),
-        request<Conversation[]>("/api/z-torque/conversations"),
+        request<Conversation[]>("/api/z-torque/conversations", {
+          query: { include_archived: showArchived ? "true" : undefined },
+        }),
       ]);
       setAgents(a);
       setConversations(c);
       const usable = a.filter((x) => x.current_published_version_id);
       const def = usable.find((x) => x.is_default_parent) ?? usable[0];
       if (def && !agentId) setAgentId(def.id);
+      // 默认展示第一个会话，避免进入页面主区空白（仅首次生效，不干扰切智能体的新对话）
+      if (!autoSelectedRef.current && c.length > 0 && !conversationId) {
+        autoSelectedRef.current = true;
+        selectConversation(c[0]);
+      }
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载失败");
+      setError(errorText(err, "加载失败"));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 仅刷新会话列表：归档 / 恢复 / 切换「显示已归档」后使用
+  const loadConversations = useCallback(async (includeArchived: boolean) => {
+    try {
+      const c = await request<Conversation[]>("/api/z-torque/conversations", {
+        query: { include_archived: includeArchived ? "true" : undefined },
+      });
+      setConversations(c);
+    } catch (err) {
+      setError(errorText(err, "加载会话失败"));
+    }
   }, []);
 
   useEffect(() => {
     void loadAgentsAndConversations();
   }, [loadAgentsAndConversations]);
 
-  // 等待人工确认时自动展开 Task 面板并高亮（文档 5.1）
+  // 「显示已归档」开关变化后重新拉取（首次加载由 loadAgentsAndConversations 完成）
+  const archivedTouchedRef = useRef(false);
   useEffect(() => {
-    if (waitingConfirm) setTaskPanelOpen(true);
-  }, [waitingConfirm]);
+    if (!archivedTouchedRef.current) {
+      archivedTouchedRef.current = true;
+      return;
+    }
+    void loadConversations(showArchived);
+  }, [showArchived, loadConversations]);
+
+  // ⋯ 菜单展开时监听全局点击：点击菜单外任意位置自动收起
+  useEffect(() => {
+    if (!menuOpenId) return;
+    const close = () => setMenuOpenId(null);
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [menuOpenId]);
+
+  // 会话列表 ref：发送完成后判断是否需要同步自动标题（避免回调闭包读到过期列表）
+  const conversationsRef = useRef<Conversation[]>([]);
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  // 首条消息落库后后端自动生成会话标题（取消息内容摘要）；列表中该会话仍无标题时静默刷新
+  async function syncAutoTitle(convId: string | null) {
+    if (!convId) return;
+    if (conversationsRef.current.some((c) => c.id === convId && c.title)) return;
+    try {
+      const list = await request<Conversation[]>("/api/z-torque/conversations");
+      setConversations(list);
+    } catch {
+      /* 标题同步失败不影响主流程，下次进入页面会显示正确标题 */
+    }
+  }
 
   // 消息或流式内容变化时自动滚动到底部，保证最新内容可见
   useEffect(() => {
     const el = messagesScrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, streamingText, pendingConf]);
+  }, [messages, streamingText, runAnswer, activeRun]);
+
+  // 组件卸载时清理打字机定时器，避免内存泄漏
+  useEffect(() => () => {
+    if (typeTimerRef.current !== null) window.clearTimeout(typeTimerRef.current);
+  }, []);
+
+  // 最终结论打字机：逐字上屏（内容来自 task.done 的 result.content 或 CHAT 响应）
+  function startTypewriter(text: string, onDone: () => void) {
+    clearTypeTimer();
+    if (!text) {
+      onDone();
+      return;
+    }
+    // 结论气泡出现即刷新本轮时间戳（与 chat.html 的 finishUi 一致）
+    setTurnTime(new Date().toLocaleTimeString());
+    setRunAnswer("");
+    let i = 0;
+    const tick = () => {
+      i += 2;
+      setRunAnswer(text.slice(0, i));
+      if (i < text.length) {
+        typeTimerRef.current = window.setTimeout(tick, 16);
+      } else {
+        typeTimerRef.current = null;
+        onDone();
+      }
+    };
+    typeTimerRef.current = window.setTimeout(tick, 16);
+  }
+
+  function clearTypeTimer() {
+    if (typeTimerRef.current !== null) {
+      window.clearTimeout(typeTimerRef.current);
+      typeTimerRef.current = null;
+    }
+  }
+
+  // 开启一轮内联执行块：立刻出现「理解需求」首步（chat.html 阶段 A 的本地步骤）
+  function startRun(taskId: string, status = "QUEUED") {
+    clearTypeTimer();
+    setRunAnswer(null);
+    setTurnTime(new Date().toLocaleTimeString());
+    setActiveRun({
+      taskId,
+      steps: [localStep("LOCAL_UNDERSTAND", "识别到需要执行，准备创建任务")],
+      status,
+      waiting: false,
+      stopped: false,
+    });
+  }
 
   // 复制文本到剪贴板，并在短时间内给出「已复制」反馈
   async function copyText(text: string, key: string) {
@@ -156,7 +360,7 @@ export function ChatPage() {
       setMessages(msgs);
       return msgs;
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载消息失败");
+      setError(errorText(err, "加载消息失败"));
       return [];
     } finally {
       if (!options?.quiet) setLoadingConv(false);
@@ -181,82 +385,138 @@ export function ChatPage() {
         request<{ items: TaskEvent[] }>(`/api/z-torque/tasks/${taskId}/events`),
       ]);
       setTask(t);
-      setSteps(ev.items.map((e) => ({ seq: e.seq, eventType: e.event_type, summary: e.summary, time: new Date(e.created_at).toLocaleTimeString() })));
+      const mapped: TaskStep[] = ev.items.map((e) => ({
+        seq: e.seq,
+        eventType: e.event_type,
+        summary: e.summary,
+        time: new Date(e.created_at).toLocaleTimeString(),
+        payload: e.payload_summary,
+      }));
+      setSteps(mapped);
+      // 内联执行块恢复：当前展示的正是该任务时，同步步骤与状态（刷新/切会话场景）
+      // 保留本地步骤（seq < 0 的「理解需求」等），真实事件按 seq 追加在后
+      setActiveRun((prev) =>
+        prev?.taskId === taskId
+          ? { ...prev, steps: [...prev.steps.filter((s) => s.seq < 0), ...mapped], status: t.status, waiting: t.status === "WAITING_HUMAN" }
+          : prev,
+      );
       setWaitingConfirm(t.status === "WAITING_HUMAN");
       const last = ev.items[ev.items.length - 1];
       lastEventIdRef.current = last ? String(last.seq) : "";
       void refreshChildTasks(t.root_task_id || taskId);
       return t;
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载任务详情失败");
+      setError(errorText(err, "加载任务详情失败"));
       return null;
     }
   }, [refreshChildTasks]);
 
   function selectConversation(c: Conversation) {
+    // 切换会话先中断旧流：旧会话的流式回调不得把消息刷进新会话视图
+    stopStream();
     setConversationId(c.id);
     setAgentId(c.agent_id);
+    conversationIdRef.current = c.id;
     setTask(null);
     setSteps([]);
     setWaitingConfirm(false);
-    setPendingConf(null);
     setChildTasks([]);
     setStreamingText(null);
     setConfRecord(null);
     setFileDetail(null);
     lastEventIdRef.current = "";
     setAttachments([]);
+    // 切换会话：清理打字机与内联执行块（内联块仅在任务仍在执行时于下方恢复）
+    clearTypeTimer();
+    setActiveRun(null);
+    setRunAnswer(null);
+    setTurnTime("");
     void (async () => {
-      const msgs = await loadMessages(c.id);
-      const withTask = [...msgs].reverse().find((m) => m.task_id);
-      if (withTask?.task_id) {
-        const t = await loadTaskDetail(withTask.task_id);
-        if (t && !TERMINAL.has(t.status)) subscribeTask(withTask.task_id, { resume: true });
+      await loadMessages(c.id);
+      // 执行中任务恢复：按会话过滤任务列表（消息仅在回复完成后携带 task_id）
+      try {
+        const r = await request<{ items: Task[] }>("/api/z-torque/tasks", { query: { limit: 20 } });
+        const active = r.items.find((t) => t.conversation_id === c.id && !TERMINAL.has(t.status));
+        if (!active) return;
+        // 先恢复内联执行块骨架，loadTaskDetail 会回填步骤与状态
+        setActiveRun({
+          taskId: active.id,
+          steps: [localStep("LOCAL_UNDERSTAND", "识别到需要执行，准备创建任务")],
+          status: active.status,
+          waiting: active.status === "WAITING_HUMAN",
+          stopped: false,
+        });
+        setTurnTime(new Date().toLocaleTimeString());
+        const t = await loadTaskDetail(active.id);
+        if (t && !TERMINAL.has(t.status)) subscribeTask(active.id, { resume: true, convId: c.id });
+        else setActiveRun(null); // 历史终态任务仅保留「查看执行过程」入口
+      } catch {
+        /* 任务列表加载失败不影响主流程 */
       }
     })();
-    void loadMemory(c.id);
   }
 
-  async function loadMemory(convId: string) {
-    setLoadingMemory(true);
+  // 打开记忆摘要弹窗：按会话加载（GET 空闲超时会触发后端自动补摘要，加载中状态兜底）
+  async function openMemoryModal(convId: string) {
+    setMemoryModal({ convId });
+    setMemoryData(null);
+    setMemoryError(null);
+    setMemoryLoading(true);
     try {
-      const m = await request<{ summary: string; source_start: number; source_end: number; updated_at: string } | null>(`/api/z-torque/conversations/${convId}/memory`);
-      setMemory(m);
-    } catch {
-      setMemory(null);
-    } finally {
-      setLoadingMemory(false);
-    }
-  }
-
-  async function summarizeMemory() {
-    if (!conversationId) return;
-    setError(null);
-    setLoadingMemory(true);
-    try {
-      const m = await request<{ summary: string; source_start: number; source_end: number; updated_at: string }>(`/api/z-torque/conversations/${conversationId}/memory/summarize`, { method: "POST" });
-      setMemory(m);
+      const m = await request<MemorySummary | null>(`/api/z-torque/conversations/${convId}/memory`);
+      setMemoryData(m);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "生成摘要失败");
+      setMemoryError(errorText(err, "加载记忆摘要失败"));
     } finally {
-      setLoadingMemory(false);
+      setMemoryLoading(false);
     }
   }
 
+  // 生成/重新生成当前弹窗会话的记忆摘要
+  async function summarizeMemory() {
+    if (!memoryModal) return;
+    setMemoryError(null);
+    setMemoryLoading(true);
+    try {
+      const m = await request<MemorySummary>(`/api/z-torque/conversations/${memoryModal.convId}/memory/summarize`, { method: "POST" });
+      setMemoryData(m);
+    } catch (err) {
+      setMemoryError(errorText(err, "生成摘要失败"));
+    } finally {
+      setMemoryLoading(false);
+    }
+  }
+
+  // 归档：确认由统一 ConfirmDialog 承载；归档后可随时恢复（列表「显示已归档」开关）
   async function archiveConversation(id: string) {
-    if (!window.confirm("确定归档该会话吗？")) return;
     setError(null);
     try {
       await request(`/api/z-torque/conversations/${id}/archive`, { method: "POST" });
-      setConversations((prev) => prev.filter((c) => c.id !== id));
+      setArchiveTarget(null);
+      toast("success", "会话已归档，可在「显示已归档」中恢复");
+      await loadConversations(showArchived);
       if (conversationId === id) {
         setConversationId(null);
         setMessages([]);
-        setMemory(null);
         setTask(null);
       }
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "归档失败");
+      setError(errorText(err, "归档失败"));
+    }
+  }
+
+  // 恢复归档会话：误归档的唯一补救入口
+  async function restoreConversation(id: string) {
+    setError(null);
+    setRestoringId(id);
+    try {
+      await request(`/api/z-torque/conversations/${id}/restore`, { method: "POST" });
+      toast("success", "会话已恢复");
+      await loadConversations(showArchived);
+    } catch (err) {
+      setError(errorText(err, "恢复失败"));
+    } finally {
+      setRestoringId(null);
     }
   }
 
@@ -267,7 +527,7 @@ export function ChatPage() {
       const r = await request<{ items: Task[] }>("/api/z-torque/tasks", { query: { limit: 20 } });
       setTaskHistory(r.items);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载任务失败");
+      setError(errorText(err, "加载任务失败"));
     }
   }
 
@@ -281,8 +541,9 @@ export function ChatPage() {
       });
       setConversations((prev) => [c, ...prev]);
       selectConversation(c);
+      setSidebarOpen(false);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建会话失败");
+      setError(errorText(err, "创建会话失败"));
     }
   }
 
@@ -294,14 +555,36 @@ export function ChatPage() {
       await request(`/api/z-torque/conversations/${id}`, { method: "PATCH", body: { title } });
       setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
       setRenamingId(null);
+      toast("success", "会话已重命名");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "重命名失败");
+      setError(errorText(err, "重命名失败"));
     }
   }
 
   function startRename(c: Conversation) {
     setRenamingId(c.id);
     setRenameValue(c.title ?? "");
+  }
+
+  // 切换智能体：若当前有正在推进的执行链路（任务运行中 / 流式输出中），先确认再切换，
+  // 否则用户一次误选就会丢失正在进行的回答。
+  function handleAgentChange(nextId: string) {
+    const busy = (activeRun !== null && !TERMINAL.has(activeRun.status)) || streamingText !== null;
+    if (busy) {
+      setPendingAgentId(nextId);
+      return;
+    }
+    applyAgentSwitch(nextId);
+  }
+
+  function applyAgentSwitch(nextId: string) {
+    setAgentId(nextId);
+    setConversationId(null);
+    setMessages([]);
+    setTask(null);
+    setAttachments([]);
+    setPendingAgentId(null);
+    setSidebarOpen(false);
   }
 
   async function handleUpload(file: File) {
@@ -323,7 +606,7 @@ export function ChatPage() {
       });
       setAttachments((prev) => [...prev, meta]);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "上传失败");
+      setError(errorText(err, "上传失败"));
     } finally {
       setUploading(false);
     }
@@ -334,7 +617,30 @@ export function ChatPage() {
     streamRef.current = null;
   }
 
-  function subscribeTask(taskId: string, options?: { resume?: boolean }) {
+  // 停止当前输出：中断 SSE 流，任务链路同时请求后端取消任务
+  async function stopActive() {
+    clearTypeTimer();
+    streamRef.current?.abort();
+    streamRef.current = null;
+    setStreamingText(null);
+    setSending(false);
+    const runningId = activeRun && !TERMINAL.has(activeRun.status) ? activeRun.taskId : task && !TERMINAL.has(task.status) ? task.id : null;
+    // 执行块标记「已停止」并追加末步（对齐 chat.html 的 finishUi(stopped)）
+    setActiveRun((prev) =>
+      prev && !TERMINAL.has(prev.status)
+        ? { ...prev, status: "CANCELLED", waiting: false, stopped: true, steps: [...prev.steps, localStep("LOCAL_STOPPED", "用户取消或连接中断")] }
+        : prev,
+    );
+    if (runningId) {
+      try {
+        await request(`/api/z-torque/tasks/${runningId}/cancel`, { method: "POST" });
+      } catch (err) {
+        setError(errorText(err, "取消失败"));
+      }
+    }
+  }
+
+  function subscribeTask(taskId: string, options?: { resume?: boolean; convId?: string | null }) {
     stopStream();
     if (!options?.resume) {
       setSteps([]);
@@ -342,6 +648,10 @@ export function ChatPage() {
       lastEventIdRef.current = "";
     }
     const seen = new Set<string>();
+    // applyRun 仅当当前展示的正是该任务时生效（prev 已保证非空）
+    const applyRun = (updater: (prev: ActiveRun) => ActiveRun) => {
+      setActiveRun((prev) => (prev?.taskId === taskId ? updater(prev) : prev));
+    };
     streamRef.current = openGetStream(`/api/z-torque/tasks/${taskId}/stream`, {
       lastEventId: lastEventIdRef.current || undefined,
       onEvent: (msg) => {
@@ -356,7 +666,10 @@ export function ChatPage() {
             delegation_depth: Number(d.delegation_depth ?? prev?.delegation_depth ?? 0),
             result: (d.result as Record<string, unknown>) ?? prev?.result ?? null,
           } as Task));
-          if (status === "WAITING_HUMAN") setWaitingConfirm(true);
+          if (status === "WAITING_HUMAN") {
+            setWaitingConfirm(true);
+            applyRun((prev) => ({ ...prev, status, waiting: true }));
+          }
           return;
         }
         const key = String(msg.id || "");
@@ -366,51 +679,102 @@ export function ChatPage() {
         const d = msg.data as Record<string, unknown>;
         const eventType = msg.event;
         const seq = Number(d.seq ?? seen.size);
-        setSteps((prev) => (prev.some((s) => s.seq === seq) ? prev : [...prev, { seq, eventType, summary: String(d.summary ?? eventLabel(eventType)), time: new Date().toLocaleTimeString() }]));
-        if (eventType === "TASK_WAITING_HUMAN") setWaitingConfirm(true);
-        if (eventType === "TASK_APPROVAL_GRANTED" || eventType === "TASK_APPROVAL_REJECTED") setWaitingConfirm(false);
-        const toState = String(d.to_state ?? "");
+
+        // task.done：终态收尾（结论打字机 → 清理执行块）
+        if (eventType === "task.done") {
+          const status = String(d.status ?? "");
+          setTask((prev) => (prev ? { ...prev, status, result: (d.result as Record<string, unknown>) ?? prev.result } : prev));
+          setWaitingConfirm(false);
+          applyRun((prev) => ({ ...prev, status, waiting: false }));
+          const content = (d.result as Record<string, unknown> | null)?.content;
+          const finishUp = () => {
+            setActiveRun((prev) => (prev?.taskId === taskId ? null : prev));
+            setRunAnswer(null);
+            void loadMessages(options?.convId ?? conversationId ?? "", { quiet: true });
+          };
+          if (status === "SUCCESS" && typeof content === "string" && content) {
+            // 阶段 B 前的最后一步：过程收尾（结论气泡随后出现在执行块下方）
+            applyRun((prev) => (prev.steps.some((s) => s.eventType === "LOCAL_SUMMARY") ? prev : { ...prev, steps: [...prev.steps, localStep("LOCAL_SUMMARY", "根据工具结果整理对用户的答复")] }));
+            startTypewriter(content, finishUp);
+          } else {
+            finishUp();
+          }
+          return;
+        }
+
+        // 其余事件：步骤逐条追加（右栏与内联执行块共用数据源）
+        const step: TaskStep = {
+          seq,
+          eventType,
+          summary: String(d.summary ?? eventLabel(eventType)),
+          time: new Date().toLocaleTimeString(),
+          // 后端把 payload_summary 打平进 data（tool_name/arguments/result 等），兼容嵌套写法
+          payload: (d.payload_summary as Record<string, unknown> | undefined) ?? payloadOf(d),
+        };
+        setSteps((prev) => (prev.some((s) => s.seq === seq) ? prev : [...prev, step]));
+        applyRun((prev) => ({ ...prev, steps: prev.steps.some((s) => s.seq === seq) ? prev.steps : [...prev.steps, step] }));
+        if (eventType === "TASK_WAITING_HUMAN") {
+          setWaitingConfirm(true);
+          applyRun((prev) => ({ ...prev, waiting: true }));
+        }
+        if (eventType === "TASK_APPROVAL_GRANTED" || eventType === "TASK_APPROVAL_REJECTED") {
+          setWaitingConfirm(false);
+          applyRun((prev) => ({ ...prev, waiting: false }));
+        }
+        // 后端未在事件中下发 to_state，但每帧都带当前 status，据此同步任务状态
+        const toState = String(d.to_state ?? d.status ?? "");
         if (toState) {
-          setTask((prev) => prev ? { ...prev, status: toState } : prev);
+          setTask((prev) => (prev ? { ...prev, status: toState } : prev));
+          applyRun((prev) => ({ ...prev, status: toState }));
         }
         if (TERMINAL.has(toState)) {
           setWaitingConfirm(false);
+          applyRun((prev) => ({ ...prev, waiting: false }));
         }
       },
       onDone: () => {
-        // 流结束后刷新消息、任务详情与子任务
+        // 流结束后刷新消息与任务详情（兜底：正常收尾已在 task.done 中处理）
         void (async () => {
-          await loadMessages(conversationId ?? "");
+          // 用户已切到其他会话：旧流的收尾刷新不得覆盖当前视图
+          const targetConv = options?.convId ?? conversationId ?? "";
+          if (conversationIdRef.current !== targetConv) return;
+          await loadMessages(targetConv, { quiet: true });
           await loadTaskDetail(taskId);
         })();
       },
     });
   }
 
-  // 发送消息：默认流式输出（POST /chat/stream）；
-  // 选择智能体（工具链路：任务/人工审批）或携带附件时回退 POST /chat（仅该链路支持）
-  async function sendMessage() {
-    const text = input.trim();
+  // 发送消息路由（阶段05 分流定稿）：
+  // 1) 带附件 → POST /chat 异步任务链路（附件解析依赖任务执行）
+  // 2) 其余一律 → POST /chat/stream 统一流式：纯文本=闲聊直答落库（不创建任务）；
+  //    模型返回 tool_calls 时后端分流创建任务（message.task_created），前端切换任务事件流
+  async function sendMessage(retryText?: string, retryParts?: { file_id: string }[]) {
+    // retryText 传入时为失败重试：不读输入框、不动已暂存附件
+    const isRetry = retryText !== undefined;
+    const text = (retryText ?? input).trim();
     if (!text || sending) return;
     setError(null);
     setSending(true);
     let convId = conversationId;
+    const contentParts = isRetry ? retryParts ?? [] : attachments.map((f) => ({ file_id: f.id }));
     // 乐观更新：用户消息立即上屏并清空输入框，无需等待后端返回
     const optimistic: Message = {
       id: `pending-${Date.now()}`,
       conversation_id: convId ?? "",
       sender_type: "USER",
       content: text,
-      content_parts: null,
+      content_parts: contentParts.length ? contentParts : null,
       status: "COMPLETED",
       task_id: null,
       error_code: null,
       created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimistic]);
-    setInput("");
-    const contentParts = attachments.map((f) => ({ file_id: f.id }));
-    setAttachments([]);
+    if (!isRetry) {
+      setInput("");
+      setAttachments([]);
+    }
     try {
       if (!convId) {
         const c = await request<Conversation>("/api/z-torque/conversations", { method: "POST", body: { agent_id: agentId || null } });
@@ -421,12 +785,15 @@ export function ChatPage() {
     } catch (err) {
       // 会话创建失败：移除乐观消息并恢复输入内容，便于用户重试
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-      setInput(text);
-      setError(err instanceof ApiRequestError ? err.message : "发送失败");
+      if (!isRetry) setInput(text);
+      setError(errorText(err, "发送失败"));
       setSending(false);
       return;
     }
-    if (agentId || contentParts.length > 0) {
+    // 任务链路：携带附件（附件解析依赖任务执行）
+    if (contentParts.length > 0) {
+      clearTypeTimer();
+      setRunAnswer(null);
       try {
         const idempotencyKey = crypto.randomUUID();
         const resp = await request<ChatResponse>("/api/z-torque/chat", {
@@ -439,45 +806,58 @@ export function ChatPage() {
           },
           idempotencyKey,
         });
-        if (resp.status === "WAITING_HUMAN" && resp.confirmation) {
-          // 写入类工具触发人工审批：消息区显示审批卡片，任务面板同步挂起状态
-          setPendingConf(resp.confirmation);
-          subscribeTask(resp.task_id!);
-        } else if (resp.response_type === "TASK" && resp.task_id) {
-          subscribeTask(resp.task_id);
-        } else {
-          setTask(null);
-          setSteps([]);
-          setWaitingConfirm(false);
-          setPendingConf(null);
-        }
-        await loadMessages(resp.conversation_id, { quiet: true });
         setConversationId(resp.conversation_id);
+        void syncAutoTitle(resp.conversation_id); // 后端已按首条消息生成标题，静默刷新左侧列表
+        if (resp.response_type === "TASK" && resp.task_id) {
+          // 任务链路：内联执行块占位 + 订阅事件流（步骤逐条增加）
+          startRun(resp.task_id);
+          subscribeTask(resp.task_id, { convId });
+        } else if (resp.response_type === "CHAT" && resp.assistant_content) {
+          // 网关直答降级：随响应返回全文，打字机上屏后由真实消息替换
+          startTypewriter(resp.assistant_content, () => {
+            setRunAnswer(null);
+            void loadMessages(resp.conversation_id, { quiet: true });
+          });
+        } else {
+          await loadMessages(resp.conversation_id, { quiet: true });
+        }
       } catch (err) {
         // 发送失败：移除乐观消息并恢复输入内容，便于用户重试
         setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-        setInput(text);
-        setError(err instanceof ApiRequestError ? err.message : "发送失败");
+        if (!isRetry) setInput(text);
+        setError(errorText(err, "发送失败"));
       } finally {
         setSending(false);
       }
       return;
     }
-    // 默认流式输出（仅文本增量，不触发任务）
+    // 统一流式链路：闲聊直答 + 工具分流（后端按模型返回分流，见阶段05 文档 2.6）
+    clearTypeTimer();
+    setRunAnswer(null);
+    setTurnTime(new Date().toLocaleTimeString());
     setStreamingText("");
     const finish = () => {
       setSending(false);
       setStreamingText(null);
-      void loadMessages(convId!);
+      // 切换会话后旧流的收尾刷新不得覆盖当前视图（selectConversation 已 abort，此处兜底）
+      if (conversationIdRef.current === convId) void loadMessages(convId!);
     };
     streamRef.current = openPostStream(
       "/api/z-torque/chat/stream",
-      { agent_id: null, conversation_id: convId, message: text, content_parts: null, stream: true },
+      { agent_id: agentId || null, conversation_id: convId, message: text, content_parts: null, stream: true },
       {
         onEvent: (msg) => {
           if (msg.event === "message.delta") {
             const d = msg.data as { content?: string };
             setStreamingText((prev) => (prev ?? "") + (d.content ?? ""));
+          } else if (msg.event === "message.task_created") {
+            // 分流：模型要求调用工具 → 后端已创建任务，切换到任务事件流（内联执行块承接后续过程）
+            const d = msg.data as { task_id?: string; conversation_id?: string };
+            if (!d.task_id) return;
+            setStreamingText(null);
+            startRun(d.task_id);
+            subscribeTask(d.task_id, { convId: d.conversation_id ?? convId });
+            // 流由服务端关闭，onDone 里 finish 统一收尾
           } else if (msg.event === "message.error") {
             const d = msg.data as { message?: string };
             setError(d.message ?? "流式响应失败");
@@ -488,9 +868,33 @@ export function ChatPage() {
           setError(err.message);
           finish();
         },
-        onDone: finish,
+        onDone: () => {
+          void syncAutoTitle(convId); // 流式首条消息结束后同步自动标题
+          finish();
+        },
       },
+      { "Idempotency-Key": crypto.randomUUID() },
     );
+  }
+
+  // 失败重试：取失败助手消息之前最近一条用户消息（含附件）原样重发
+  function retryFailedMessage(failed: Message) {
+    const idx = messages.findIndex((x) => x.id === failed.id);
+    if (idx < 0 || sending) return;
+    for (let i = idx - 1; i >= 0; i--) {
+      const u = messages[i];
+      if (u.sender_type !== "USER" || !u.content.trim()) continue;
+      const parts = Array.isArray(u.content_parts)
+        ? (u.content_parts as { file_id?: string }[]).filter((p) => p?.file_id).map((p) => ({ file_id: p.file_id as string }))
+        : [];
+      void sendMessage(u.content, parts);
+      return;
+    }
+  }
+
+  // 消息气泡中的附件 chip：占位元数据即可，viewFile 内部会拉取真实详情
+  function openMessageFile(fileId: string) {
+    void viewFile({ id: fileId, name: `附件 ${fileId.slice(0, 8)}`, media_type: "", size_bytes: 0, status: "UPLOADED", created_at: "" });
   }
 
   // 文件详情 / 状态 / 解析内容
@@ -506,21 +910,22 @@ export function ChatPage() {
       const ct = st.status === "PARSED" ? await request<FileContent>(`/api/z-torque/files/${meta.id}/content`) : null;
       setFileDetail({ meta: fresh, status: st, content: ct });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载文件详情失败");
+      setError(errorText(err, "加载文件详情失败"));
     } finally {
       setFileBusy(false);
     }
   }
 
   async function deleteFile(id: string) {
-    if (!window.confirm("确定删除该文件吗？删除后不可恢复。")) return;
     setError(null);
+    setDeletingFileId(null);
     try {
       await request(`/api/z-torque/files/${id}`, { method: "DELETE" });
       setAttachments((prev) => prev.filter((x) => x.id !== id));
       setFileDetail((prev) => (prev && prev.meta.id === id ? null : prev));
+      toast("success", "文件已删除");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "删除失败");
+      setError(errorText(err, "删除失败"));
     }
   }
 
@@ -540,31 +945,31 @@ export function ChatPage() {
     try {
       await request(`/api/z-torque/tasks/${task.id}/cancel`, { method: "POST" });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "取消失败");
+      setError(errorText(err, "取消失败"));
     }
   }
 
   async function resolveConfirm(approved: boolean) {
     setError(null);
+    // 目标任务：优先内联执行块，其次右栏当前任务
+    const targetTaskId = activeRun?.taskId ?? task?.id;
     try {
-      if (pendingConf?.confirmation_id) {
-        // 会话内审批：直接使用挂起的 confirmation_id（含工具名与参数的精确审批）
-        await request(`/api/z-torque/confirmations/${pendingConf.confirmation_id}/resolve`, { method: "POST", body: { approved } });
-      } else {
-        // 兜底（刷新后恢复的面板场景）：按任务查询 PENDING 确认项
+      // 异步任务链路：按任务查询 PENDING 确认项（approval 发生在 worker 内，无同步挂起信息）
+      let confId: string | null = null;
+      if (targetTaskId) {
         const list = await request<{ id: string; status: string; task_id: string | null }[]>("/api/z-torque/confirmations");
-        const target = list.find((c) => c.task_id === task?.id && c.status === "PENDING");
-        if (!target) {
-          setError("未找到待确认项");
-          return;
-        }
-        await request(`/api/z-torque/confirmations/${target.id}/resolve`, { method: "POST", body: { approved } });
+        confId = list.find((c) => c.task_id === targetTaskId && c.status === "PENDING")?.id ?? null;
       }
+      if (!confId) {
+        setError("未找到待确认项");
+        return;
+      }
+      await request(`/api/z-torque/confirmations/${confId}/resolve`, { method: "POST", body: { approved } });
       setWaitingConfirm(false);
-      setPendingConf(null);
-      // 审批后任务流会推送重放执行事件，无需额外轮询
+      // 内联执行块同步解除挂起（事件流随后推送批准/重放事件）
+      setActiveRun((prev) => (prev ? { ...prev, waiting: false } : prev));
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "操作失败");
+      setError(errorText(err, "操作失败"));
     }
   }
 
@@ -575,7 +980,7 @@ export function ChatPage() {
       setConfList(list);
       setConfListOpen(true);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载确认记录失败");
+      setError(errorText(err, "加载确认记录失败"));
     }
   }
 
@@ -585,7 +990,7 @@ export function ChatPage() {
       const c = await request<Confirmation>(`/api/z-torque/confirmations/${id}`);
       setConfRecord(c);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载确认详情失败");
+      setError(errorText(err, "加载确认详情失败"));
     }
   }
 
@@ -611,6 +1016,81 @@ export function ChatPage() {
     return "done";
   }
 
+  // 内联执行块整体状态 → 样式类与文案（run/wait/ok/fail）
+  const runStatusInfo = useMemo(() => {
+    if (!activeRun) return { cls: "run", label: "进行中" } as const;
+    if (activeRun.stopped) return { cls: "fail", label: "已停止" } as const;
+    if (activeRun.waiting || activeRun.status === "WAITING_HUMAN") return { cls: "wait", label: "等待确认" } as const;
+    if (activeRun.status === "SUCCESS") return { cls: "ok", label: "已完成" } as const;
+    if (TERMINAL.has(activeRun.status)) return { cls: "fail", label: "已结束" } as const;
+    return { cls: "run", label: "进行中" } as const;
+  }, [activeRun]);
+
+  // 内联单步状态：末步运行中高亮（active），已发生步骤 done，等待/失败单独着色
+  function runStepState(s: TaskStep, idx: number, total: number): "active" | "done" | "waiting" | "fail" {
+    if (s.eventType.includes("FAILED") || s.eventType.includes("ERROR") || s.eventType === "task.error") return "fail";
+    if (s.eventType === "LOCAL_STOPPED") return "fail";
+    if (s.eventType === "TASK_WAITING_HUMAN" || s.eventType === "task.waiting_human") return "waiting";
+    if (!activeRun) return "done";
+    if (activeRun.stopped || TERMINAL.has(activeRun.status)) return "done";
+    return idx === total - 1 ? "active" : "done";
+  }
+
+  // 内联步骤描述：工具类步骤的详情由工具卡片承载，此处只留简短提示
+  function runStepDesc(s: TaskStep): string {
+    const p = s.payload as Record<string, unknown> | null;
+    const toolName = p && typeof p.tool_name === "string" ? p.tool_name : null;
+    if ((s.eventType === "TASK_TOOL_CALL" || s.eventType === "task.tool_call") && toolName) return "正在请求能力，请稍候";
+    if ((s.eventType === "TASK_TOOL_RESULT" || s.eventType === "task.tool_result") && toolName) return "";
+    const label = eventLabel(s.eventType);
+    return s.summary && s.summary !== label ? s.summary : "";
+  }
+
+  // 工具卡片：调用步骤展示参数，返回步骤展示结果摘要（脱敏 + 截断，文档 6.5）
+  function toolCardOf(s: TaskStep): { name: string; args?: string | null; result?: string | null } | null {
+    const p = s.payload as Record<string, unknown> | null;
+    const toolName = p && typeof p.tool_name === "string" ? p.tool_name : null;
+    if (!toolName) return null;
+    if (s.eventType === "TASK_TOOL_CALL" || s.eventType === "task.tool_call") {
+      return { name: toolName, args: toDisplayText(p?.arguments, 600) };
+    }
+    if (s.eventType === "TASK_TOOL_RESULT" || s.eventType === "task.tool_result") {
+      const failed = String(p?.status ?? "SUCCEEDED") !== "SUCCEEDED";
+      const raw = toDisplayText(p?.result ?? p?.error, 600);
+      return { name: toolName, result: raw ?? (failed ? "执行失败" : "返回成功") };
+    }
+    return null;
+  }
+
+  // 等待审批时挂起的工具名：取最后一个「调用工具」步骤的 payload（TASK_WAITING_HUMAN 事件本身不带工具信息）
+  const waitingToolName = useMemo(() => {
+    if (!activeRun?.waiting) return null;
+    for (let i = activeRun.steps.length - 1; i >= 0; i--) {
+      const s = activeRun.steps[i];
+      if (s.eventType === "TASK_TOOL_CALL") {
+        const name = (s.payload as Record<string, unknown> | null)?.tool_name;
+        if (typeof name === "string") return name;
+      }
+    }
+    return null;
+  }, [activeRun]);
+
+  // 等待审批时的参数（截断展示，完整参数由后端确认记录留存）
+  const waitingConfirmArgs = useMemo(() => {
+    if (!activeRun?.waiting) return null;
+    for (let i = activeRun.steps.length - 1; i >= 0; i--) {
+      const s = activeRun.steps[i];
+      if (s.eventType === "TASK_TOOL_CALL") {
+        const args = toDisplayText((s.payload as Record<string, unknown> | null)?.arguments, 400);
+        if (args) return args;
+      }
+    }
+    return null;
+  }, [activeRun]);
+
+  // 是否有正在推进的执行链路（内联执行块运行中且未被停止）
+  const runLive = activeRun !== null && !TERMINAL.has(activeRun.status) && !activeRun.stopped;
+
   // Agent meta 标签：默认父 Agent / 官方 / 我的
   const agentMetaTag = currentAgent
     ? currentAgent.is_default_parent
@@ -624,25 +1104,28 @@ export function ChatPage() {
     <div className="chat-page">
       <AppTopbar nav={APP_NAV} />
       <div className="chat-shell">
+        {/* 窄屏遮罩：侧栏以抽屉形式覆盖（原实现直接隐藏，手机上无法切换会话/智能体） */}
+        {sidebarOpen && <div className="chat-sidebar-mask" onClick={() => setSidebarOpen(false)} />}
+
         {/* 左侧栏：Agent 选择 + 会话列表 */}
-        <aside className="chat-sidebar">
+        <aside className={`chat-sidebar${sidebarOpen ? " open" : ""}`}>
           <div className="chat-agent-picker">
             <label className="chat-agent-label">当前智能体</label>
             <select
               className="chat-agent-select"
               value={agentId}
-              onChange={(e) => {
-                setAgentId(e.target.value);
-                setConversationId(null);
-                setMessages([]);
-                setTask(null);
-                setAttachments([]);
-              }}
+              onChange={(e) => handleAgentChange(e.target.value)}
             >
-              {usableAgents.length === 0 && <option value="" disabled>暂无可用智能体（需先发布版本）</option>}
-              {usableAgents.map((a) => (
-                <option key={a.id} value={a.id}>{a.name}{a.is_default_parent ? "（默认）" : ""}</option>
-              ))}
+              {agents.length === 0 && <option value="" disabled>加载中…</option>}
+              {/* 未发布版本的智能体也列出（disabled），避免用户困惑"我建的智能体怎么不见了" */}
+              {agents.map((a) => {
+                const usable = Boolean(a.current_published_version_id);
+                return (
+                  <option key={a.id} value={a.id} disabled={!usable}>
+                    {a.name}{a.is_default_parent ? "（默认）" : ""}{usable ? "" : "（未发布）"}
+                  </option>
+                );
+              })}
             </select>
             {agentMetaTag && (
               <div className="chat-agent-meta">
@@ -650,31 +1133,61 @@ export function ChatPage() {
                 <span>{currentAgent?.current_published_version_id ? "已发布" : "未发布"}</span>
               </div>
             )}
+            {/* 死胡同兜底：没有任何可用智能体时，明确告知原因并给出去哪修 */}
+            {!loadingConv && usableAgents.length === 0 && (
+              <GuideCallout
+                compact
+                title={agents.length === 0 ? "还没有可用智能体" : `有 ${agents.length} 个智能体尚未发布`}
+                why={
+                  agents.length === 0
+                    ? "会话需要基于一个智能体才能开始。请先创建智能体，完成配置后发布版本。"
+                    : "只有已发布版本的智能体能用于对话。请到智能体管理发布一个版本。"
+                }
+                actionLabel={agents.length === 0 ? "去创建智能体" : "去发布版本"}
+                onAction={() => navigate("/agents")}
+                hint="也可以联系管理员为你发布一个智能体"
+              />
+            )}
           </div>
 
           <div className="chat-session-toolbar">
             <h3>会话</h3>
             <div style={{ display: "flex", gap: 6 }}>
-              <button className="chat-btn-new" type="button" onClick={() => void newConversation()} disabled={!agentId} title="新建会话">
+              <button
+                className="chat-btn-new"
+                type="button"
+                onClick={() => void newConversation()}
+                disabled={!agentId}
+                title={agentId ? "新建会话" : "需要先有一个已发布的智能体"}
+              >
                 + 新建
               </button>
               <button className="btn btn-secondary btn-sm" type="button" onClick={() => void openTaskHistory()} title="查看任务历史">任务</button>
             </div>
           </div>
 
+          {/* 归档可恢复：默认隐藏已归档会话，勾选后可见并支持恢复 */}
+          <label className="chat-archived-toggle">
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+            <span>显示已归档</span>
+          </label>
+
           <div className="chat-session-list">
             {conversations.length === 0 ? (
-              <div className="chat-session-empty">暂无会话</div>
+              <div className="chat-session-empty">
+                {showArchived ? "暂无会话（含已归档）" : agentId ? "暂无会话，点击「+ 新建」开始" : "请先发布一个智能体"}
+              </div>
             ) : (
               conversations.map((c) => {
                 const isActive = c.id === conversationId;
                 const showRunning = isActive && taskRunning;
                 const dotCls = waitingConfirm ? "waiting" : "running";
+                const archived = String(c.status || "").toUpperCase() === "ARCHIVED";
                 return (
                   <div
                     key={c.id}
-                    className={`chat-session-item${isActive ? " active" : ""}`}
-                    onClick={() => { if (renamingId !== c.id) selectConversation(c); }}
+                    className={`chat-session-item${isActive ? " active" : ""}${archived ? " archived" : ""}`}
+                    onClick={() => { if (renamingId !== c.id) { selectConversation(c); setSidebarOpen(false); } }}
                   >
                     {renamingId === c.id ? (
                       <div className="chat-session-rename-row" style={{ flex: 1 }}>
@@ -693,12 +1206,39 @@ export function ChatPage() {
                       <>
                         <span className={`chat-status-dot${showRunning ? " " + dotCls : ""}`} title={waitingConfirm ? "等待确认" : taskRunning ? "任务进行中" : undefined} />
                         <div className="chat-session-body">
-                          <div className="chat-session-name">{c.title ?? "未命名会话"}</div>
+                          <div className="chat-session-name">
+                            {c.title ?? "未命名会话"}
+                            {archived && <span className="chat-session-archived-tag">已归档</span>}
+                          </div>
                           <div className="chat-session-time">{c.last_message_at ? new Date(c.last_message_at).toLocaleString() : "—"}</div>
                         </div>
                         <div className="chat-session-actions">
-                          <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); startRename(c); }} title="重命名">重命名</button>
-                          <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); void archiveConversation(c.id); }} title="归档">归档</button>
+                          <button
+                            className="chat-session-more"
+                            onClick={(e) => { e.stopPropagation(); setMenuOpenId((prev) => (prev === c.id ? null : c.id)); }}
+                            title="更多操作"
+                          >
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></svg>
+                          </button>
+                          {menuOpenId === c.id && (
+                            <div className="chat-session-menu" onClick={(e) => e.stopPropagation()}>
+                              {archived ? (
+                                <button
+                                  type="button"
+                                  disabled={restoringId === c.id}
+                                  onClick={() => { setMenuOpenId(null); void restoreConversation(c.id); }}
+                                >
+                                  {restoringId === c.id ? "恢复中…" : "恢复会话"}
+                                </button>
+                              ) : (
+                                <>
+                                  <button type="button" onClick={() => { setMenuOpenId(null); void openMemoryModal(c.id); }}>记忆摘要</button>
+                                  <button type="button" onClick={() => { setMenuOpenId(null); startRename(c); }}>重命名</button>
+                                  <button type="button" className="danger" onClick={() => { setMenuOpenId(null); setArchiveTarget(c); }}>归档</button>
+                                </>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </>
                     )}
@@ -713,8 +1253,20 @@ export function ChatPage() {
         <section className="chat-main">
           <div className="chat-header">
             <div className="chat-header-title-area">
+              {/* 窄屏入口：侧栏抽屉（>768px 由 CSS 隐藏此按钮） */}
+              <button
+                className="chat-sidebar-toggle"
+                type="button"
+                onClick={() => setSidebarOpen(true)}
+                aria-label="打开会话与智能体列表"
+                title="会话与智能体"
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
+              </button>
               <span className="chat-header-title">{currentConversation?.title ?? "新会话"}</span>
               {currentAgent && <span className="chat-agent-chip">{currentAgent.name}</span>}
+              {/* 执行中实时指示（对齐 chat.html 的 live-pill） */}
+              {runLive && <span className="chat-live-pill"><span className="dot" />执行中</span>}
             </div>
             <div className="chat-header-actions">
               <button className="btn btn-ghost btn-sm" onClick={() => void loadConfirmations()} title="查看确认记录">确认记录</button>
@@ -731,72 +1283,166 @@ export function ChatPage() {
             </div>
           </div>
 
-          {conversationId && (
-            <div className="chat-memory-bar">
-              <span className="chat-memory-label">记忆摘要</span>
-              {loadingMemory ? (
-                <span className="chat-memory-text">加载中…</span>
-              ) : memory ? (
-                <span className="chat-memory-text" title={memory.summary}>{memory.summary}</span>
-              ) : (
-                <span className="chat-memory-text">暂无摘要</span>
-              )}
-              <button className="btn btn-ghost btn-sm" disabled={loadingMemory} onClick={() => void summarizeMemory()}>生成摘要</button>
-            </div>
-          )}
-
           <div className="chat-messages" ref={messagesScrollRef}>
             {loadingConv ? (
               <Loading />
-            ) : messages.length === 0 && streamingText === null ? (
+            ) : messages.length === 0 && streamingText === null && !activeRun && runAnswer === null ? (
               <div className="chat-welcome">
                 <h2>开始对话</h2>
-                <p>选择智能体后输入问题。需要执行技能时将自动创建任务，并在右侧展示执行过程。</p>
+                <p>选择智能体后输入问题。需要执行技能时将自动创建任务，并在对话中实时展示执行过程。</p>
+                {/* 无可用智能体：这是产品的第一道门，必须给出原因与出路 */}
+                {!agentId ? (
+                  <GuideCallout
+                    title={agents.length === 0 ? "还没有可用智能体" : "所选智能体尚未发布"}
+                    why={
+                      agents.length === 0
+                        ? "会话需要基于一个已发布版本的智能体。请先创建智能体并完成配置、发布版本，再回来对话。"
+                        : "当前没有可对话的已发布版本。请在智能体管理中发布一个版本。"
+                    }
+                    actionLabel={agents.length === 0 ? "去创建智能体" : "去发布版本"}
+                    onAction={() => navigate("/agents")}
+                    hint="也可以联系管理员为你发布一个智能体"
+                  />
+                ) : (
+                  <div className="chat-starter-list">
+                    <div className="chat-starter-title">试试这样问</div>
+                    {STARTER_PROMPTS.map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        className="chat-starter-chip"
+                        onClick={() => { setInput(p); inputRef.current?.focus(); }}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             ) : (
               <>
                 {messages.map((m) => {
                   const isUser = m.sender_type === "USER";
+                  const failed = !isUser && m.status === "FAILED";
+                  const files = Array.isArray(m.content_parts)
+                    ? (m.content_parts as { file_id?: string }[]).filter((p) => p?.file_id)
+                    : [];
                   return (
                     <div key={m.id} className={`chat-msg ${isUser ? "user" : "assistant"}`}>
                       <div className="chat-msg-avatar">{isUser ? "我" : "Z"}</div>
                       <div className="chat-msg-bubble">
-                        <div className="chat-msg-content">{m.content}</div>
+                        {isUser ? (
+                          <div className="chat-msg-content">{m.content}</div>
+                        ) : (
+                          <div className="chat-msg-content chat-md">
+                            <Markdown remarkPlugins={[remarkGfm]}>{m.content}</Markdown>
+                          </div>
+                        )}
+                        {files.length > 0 && (
+                          <div className="chat-msg-files">
+                            {files.map((p, i) => (
+                              <button
+                                key={i}
+                                className="chat-msg-file"
+                                type="button"
+                                onClick={() => openMessageFile(p.file_id as string)}
+                                title="查看文件详情"
+                              >
+                                附件 {String(p.file_id).slice(0, 8)}
+                              </button>
+                            ))}
+                          </div>
+                        )}
                         {!isUser && m.task_id && (
-                          <button className="chat-task-link" type="button" onClick={() => viewTaskFromMessage(m.task_id as string)} title="在右侧面板查看该任务执行过程">
+                          <button className="chat-task-link" type="button" onClick={() => viewTaskFromMessage(m.task_id as string)} title="查看该任务执行过程详情">
                             查看执行过程
                           </button>
                         )}
-                        <div className="chat-msg-meta">{new Date(m.created_at).toLocaleTimeString()}</div>
-                        {m.status === "FAILED" && (
+                        <div className="chat-msg-meta">
+                          {new Date(m.created_at).toLocaleTimeString()}
+                          {!isUser && !failed && m.content && (
+                            <button className="chat-copy-btn" type="button" onClick={() => void copyText(m.content, m.id)}>
+                              {copiedId === m.id ? "已复制" : "复制"}
+                            </button>
+                          )}
+                        </div>
+                        {failed && (
                           <div className="chat-msg-failed">发送失败{m.error_code ? `（${m.error_code}）` : ""}</div>
+                        )}
+                        {failed && (
+                          <button className="chat-msg-retry" type="button" disabled={sending} onClick={() => retryFailedMessage(m)}>
+                            重试
+                          </button>
                         )}
                       </div>
                     </div>
                   );
                 })}
-                {streamingText !== null && (
-                  <div className="chat-msg assistant streaming">
+                {/* 一轮助手回复（chat.md 定稿）：同一个头像下，过程在上实时追加、结论在下流式输出 */}
+                {(activeRun || runAnswer !== null || streamingText !== null) && (
+                  <div className={`chat-msg assistant${runAnswer !== null || streamingText !== null ? " streaming" : ""}`}>
                     <div className="chat-msg-avatar">Z</div>
-                    <div className="chat-msg-bubble">
-                      <div className="chat-msg-content chat-streaming-cursor">{streamingText || "…"}</div>
-                    </div>
-                  </div>
-                )}
-                {pendingConf && (
-                  <div className="chat-msg assistant">
-                    <div className="chat-msg-avatar">Z</div>
-                    <div className="chat-msg-bubble">
-                      <div className="chat-confirm-box">
-                        <p>工具「{pendingConf.tool_name ?? "未知工具"}」为写入操作，需人工审批后才会执行。</p>
-                        {Object.keys(pendingConf.arguments).length > 0 && (
-                          <pre className="chat-confirm-args">{JSON.stringify(pendingConf.arguments, null, 2)}</pre>
-                        )}
-                        <div className="chat-confirm-actions">
-                          <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>批准执行</button>
-                          <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
+                    <div className="chat-turn">
+                      {activeRun && (
+                        <div className={`chat-run-block ${runStatusInfo.cls}`}>
+                          <div className="chat-run-head">
+                            <span className="chat-run-title">执行过程</span>
+                            <span className={`chat-run-status ${runStatusInfo.cls}`}>{runStatusInfo.label}</span>
+                          </div>
+                          <div className="chat-run-steps">
+                            {activeRun.steps.length === 0 ? (
+                              <div className="chat-run-empty"><span className="spinner" /> 正在创建任务…</div>
+                            ) : (
+                              activeRun.steps.map((s, idx) => {
+                                const cls = runStepState(s, idx, activeRun.steps.length);
+                                const tool = toolCardOf(s);
+                                return (
+                                  <div key={s.seq} className={`chat-run-step ${cls}`}>
+                                    <div className="chat-run-rail"><span className="node" /><span className="line" /></div>
+                                    <div className="chat-run-body">
+                                      <div className="chat-run-label">{eventLabel(s.eventType)}</div>
+                                      {runStepDesc(s) && <div className="chat-run-desc">{runStepDesc(s)}</div>}
+                                      {/* 工具调用/返回内联卡片：参数与结果摘要 */}
+                                      {tool && (
+                                        <div className="chat-tool-card">
+                                          <div className="chat-tool-name"><span className="chat-tool-tag">工具</span>{tool.name}</div>
+                                          {tool.args && <pre className="chat-tool-args">{tool.args}</pre>}
+                                          {tool.result && <div className="chat-tool-result">{tool.result}</div>}
+                                        </div>
+                                      )}
+                                      <div className="chat-run-time">{s.time}</div>
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                          {/* 写入类工具等待审批：确认框内联在执行块中（批准/拒绝） */}
+                          {activeRun.waiting && (
+                            <div className="chat-run-confirm">
+                              <p>工具「{waitingToolName ?? "未知工具"}」为写入操作，需人工审批后才会执行。</p>
+                              {waitingConfirmArgs && <pre className="chat-confirm-args">{waitingConfirmArgs}</pre>}
+                              <div className="chat-confirm-actions">
+                                <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>批准执行</button>
+                                <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
+                              </div>
+                            </div>
+                          )}
+                          {task?.id === activeRun.taskId && task.error_message && (
+                            <div className="chat-run-error">{task.error_message}{task.error_code ? `（${task.error_code}）` : ""}</div>
+                          )}
                         </div>
-                      </div>
+                      )}
+                      {/* 最终结论：执行过程结束后才出现并逐字上屏 */}
+                      {(runAnswer !== null || streamingText !== null) && (
+                        <div className="chat-msg-bubble">
+                          {/* 光标仅在真正生成中显示（打字机定时器存活 / 普通流式进行中） */}
+                          <div className={`chat-msg-content chat-md${streamingText !== null || typeTimerRef.current !== null ? " chat-streaming-cursor" : ""}`}>
+                            <Markdown remarkPlugins={[remarkGfm]}>{runAnswer ?? streamingText ?? "…"}</Markdown>
+                          </div>
+                        </div>
+                      )}
+                      {turnTime && <div className="chat-msg-meta">{turnTime}</div>}
                     </div>
                   </div>
                 )}
@@ -815,8 +1461,8 @@ export function ChatPage() {
                       <button
                         className="remove"
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); void deleteFile(f.id); }}
-                        title="移除附件"
+                        onClick={(e) => { e.stopPropagation(); setAttachments((prev) => prev.filter((x) => x.id !== f.id)); }}
+                        title="从本次发送中移除（文件不会被删除）"
                       >×</button>
                     </div>
                   ))}
@@ -832,6 +1478,7 @@ export function ChatPage() {
                   <input type="file" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleUpload(f); e.target.value = ""; }} />
                 </label>
                 <textarea
+                  ref={inputRef}
                   placeholder="输入消息，Enter 发送，Shift+Enter 换行"
                   value={input}
                   rows={1}
@@ -840,11 +1487,15 @@ export function ChatPage() {
                     e.target.style.height = "auto";
                     e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
                   }}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendMessage(); } }}
+                  onKeyDown={(e) => {
+                    // IME 组合输入中的回车用于确认候选词，不应触发发送
+                    if (e.nativeEvent.isComposing) return;
+                    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendMessage(); }
+                  }}
                 />
                 <div className="chat-composer-actions">
-                  {(streamingText !== null || taskRunning) && (
-                    <button className="chat-btn-stop" type="button" onClick={stopStream} title="停止当前流式输出或任务流">
+                  {(streamingText !== null || taskRunning || (activeRun !== null && !TERMINAL.has(activeRun.status))) && (
+                    <button className="chat-btn-stop" type="button" onClick={() => void stopActive()} title="停止当前流式输出或任务">
                       <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1" /></svg>
                     </button>
                   )}
@@ -855,7 +1506,7 @@ export function ChatPage() {
               </div>
             </div>
             <div className="chat-composer-extra">
-              <span style={{ marginLeft: "auto" }}>支持 PDF/TXT/MD/CSV,单文件 ≤ 50MB</span>
+              <span style={{ marginLeft: "auto" }}>支持 PDF/TXT/MD/CSV/XLSX,单文件 ≤ 50MB</span>
             </div>
             {error && (
               <div style={{ maxWidth: "var(--chat-max-w)", margin: "8px auto 0" }}>
@@ -1028,7 +1679,7 @@ export function ChatPage() {
                 )}
               </div>
               <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-                <button className="btn btn-danger btn-sm" onClick={() => void deleteFile(fileDetail.meta.id)}>删除文件</button>
+                <button className="btn btn-danger btn-sm" onClick={() => setDeletingFileId(fileDetail.meta.id)}>删除文件</button>
                 <button className="btn btn-secondary btn-sm" onClick={() => setFileDetail(null)}>关闭</button>
               </div>
             </div>
@@ -1080,6 +1731,80 @@ export function ChatPage() {
           </div>
         </Modal>
       )}
+
+      {memoryModal && (
+        <Modal open title="记忆摘要" onClose={() => setMemoryModal(null)} width={560}>
+          {memoryLoading ? (
+            <Loading />
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="text-sm text-muted">
+                {conversations.find((c) => c.id === memoryModal.convId)?.title ?? "会话"}
+              </div>
+              {memoryError && <Alert kind="error">{memoryError}</Alert>}
+              {memoryData ? (
+                <>
+                  <div className="text-sm" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", lineHeight: 1.7, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, padding: 12 }}>
+                    {memoryData.summary}
+                  </div>
+                  <div className="text-muted text-sm">
+                    覆盖第 {memoryData.source_start}–{memoryData.source_end} 条消息 · 更新于 {new Date(memoryData.updated_at).toLocaleString()}
+                  </div>
+                </>
+              ) : !memoryError ? (
+                <div className="text-muted text-sm">暂无摘要。发送消息后可点击下方按钮，为本会话生成记忆摘要。</div>
+              ) : null}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button className="btn btn-primary btn-sm" disabled={memoryLoading} onClick={() => void summarizeMemory()}>
+                  {memoryData ? "重新生成" : "生成摘要"}
+                </button>
+                <button className="btn btn-secondary btn-sm" onClick={() => setMemoryModal(null)}>关闭</button>
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {/* 归档确认：明确告知"可恢复"，避免用户把归档当成删除而不敢点 */}
+      <ConfirmDialog
+        open={archiveTarget !== null}
+        title="归档该会话？"
+        confirmText="归档"
+        onCancel={() => setArchiveTarget(null)}
+        onConfirm={() => { if (archiveTarget) void archiveConversation(archiveTarget.id); }}
+      >
+        <p>
+          「{archiveTarget?.title ?? "未命名会话"}」将从默认列表中隐藏。
+          归档不是删除，消息与执行记录都会保留，你可以随时勾选「显示已归档」把它恢复回来。
+        </p>
+      </ConfirmDialog>
+
+      {/* 删除文件：不可恢复，走高危确认 */}
+      <ConfirmDialog
+        open={deletingFileId !== null}
+        title="删除该文件？"
+        confirmText="删除"
+        destructive
+        onCancel={() => setDeletingFileId(null)}
+        onConfirm={() => { if (deletingFileId) void deleteFile(deletingFileId); }}
+      >
+        <p>文件及其解析内容将被永久删除，且不可恢复。已发送给模型的消息内容不受影响。</p>
+      </ConfirmDialog>
+
+      {/* 切换智能体前确认：原本会静默清空正在进行的执行链路 */}
+      <ConfirmDialog
+        open={pendingAgentId !== null}
+        title="当前对话仍在执行中"
+        confirmText="放弃并切换"
+        destructive
+        onCancel={() => setPendingAgentId(null)}
+        onConfirm={() => { if (pendingAgentId) applyAgentSwitch(pendingAgentId); }}
+      >
+        <p>
+          切换智能体会清空当前会话视图，正在进行的任务与流式回答将不再展示（后端任务本身不会被取消）。
+          建议等本轮执行结束后再切换。
+        </p>
+      </ConfirmDialog>
     </div>
   );
 }

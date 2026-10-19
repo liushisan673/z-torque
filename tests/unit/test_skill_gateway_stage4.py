@@ -3,7 +3,9 @@ from pathlib import Path
 import pytest
 
 from app.core.errors import ApiError
-from app.kernel.skill_gateway import ExecutionResult, MdSkillInstructionLoader, SkillGateway
+from app.kernel.md_skill import MdSkillInstructionLoader
+from app.kernel.ports.skill_executor import ExecutionResult
+from app.kernel.skill_gateway import SkillGateway
 
 
 class FlakyExecutor:

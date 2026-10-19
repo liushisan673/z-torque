@@ -18,6 +18,8 @@ class ChatResult:
     mocked: bool = True
     # 写入类工具触发人工审批时的挂起信息（confirmation_id/tool_name/arguments/task_id）
     pending_confirmation: dict | None = None
+    # 无任务直答（无工具智能体）时的回复文本：随 POST /chat 响应直接返回，供前端流式渲染
+    response_content: str | None = None
 
 
 def handle_mock_chat(db: Session, *, tenant_id: UUID, user_id: UUID, conversation_id: UUID, content: str, requires_task: bool = False, idempotency_key: str | None = None, trace_id: str | None = None) -> ChatResult:

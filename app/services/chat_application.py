@@ -9,18 +9,61 @@ from app.config import get_settings
 from app.core.errors import ApiError
 from app.kernel.model_gateway import ModelGateway, ModelRequest, ModelGatewayError
 from app.kernel.skill_gateway import SkillGateway
-from app.kernel.task.runtime import TaskRuntime
-from app.kernel.task.service import create_task, transition_task
-from app.kernel.task.states import TaskStatus
-from app.models import Agent, AgentVersion, Conversation, Message, Task, Tool, ToolVersion
+from app.kernel.task.service import create_task
+from app.models import Agent, AgentVersion, Conversation, Message, Task
 from app.models.message import message_file
 from app.security.permissions import admin_owned_clause
 from app.services.chat_service import ChatResult
-from app.services.context_builder import build_context
-from app.services.execution_loop import AgentExecutionLoop
+from app.services.context_builder import build_agent_system_prompt, build_context
 from app.services.memory_service import summarize_conversation
+from app.services.tool_mapping_builder import build_tool_mappings
 
 logger = logging.getLogger("z_torque.chat")
+
+
+def create_chat_task(db: Session, *, tenant_id: UUID, user_id: UUID, conversation: Conversation, user_message: Message, idempotency_key: str, trace_id: str | None) -> Task:
+    """会话任务创建（POST /chat 任务链路与流式分流共用）：绑定会话当前发布版本。"""
+    agent_version = _published_agent_version(db, conversation.agent_id)
+    return create_task(
+        db,
+        tenant_id=tenant_id,
+        owner_user_id=user_id,
+        agent_id=conversation.agent_id,
+        agent_version_id=agent_version.id,
+        idempotency_key=idempotency_key,
+        request_summary=user_message.content or "",
+        conversation_id=conversation.id,
+        trigger_message_id=user_message.id,
+        trace_id=trace_id,
+    )
+
+
+CONVERSATION_TITLE_MAX_LEN = 30
+
+
+def ensure_conversation_title(conversation: Conversation, content: str | None) -> None:
+    """首条用户消息自动生成会话标题：仅在标题为空时生效（手动重命名后不覆盖）。
+
+    取消息首行文本、压缩连续空白，超长截断加省略号；内容为空则保持原状。
+    """
+    if conversation.title:
+        return
+    text = " ".join((content or "").split())
+    if not text:
+        return
+    conversation.title = text[:CONVERSATION_TITLE_MAX_LEN] + ("…" if len(text) > CONVERSATION_TITLE_MAX_LEN else "")
+
+
+def _published_agent_version(db: Session, agent_id: UUID | None) -> AgentVersion:
+    if agent_id is None:
+        raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent has no published version", 409)
+    agent = db.get(Agent, agent_id)
+    if agent is None or agent.current_published_version_id is None:
+        raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent has no published version", 409)
+    agent_version = db.get(AgentVersion, agent.current_published_version_id)
+    if agent_version is None:
+        raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent has no published version", 409)
+    return agent_version
 
 
 async def handle_chat(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None) -> ChatResult:
@@ -41,6 +84,7 @@ async def handle_chat(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: 
     user_message = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="USER", content=content, content_parts=content_parts, status="PROCESSING")
     db.add(user_message)
     db.flush()
+    ensure_conversation_title(conversation, content)
     attachment_ids = _attachment_ids(content_parts)
     if attachment_ids:
         _attach_files(db, user_message, conversation, attachment_ids)
@@ -53,111 +97,47 @@ async def handle_chat(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: 
             agent = db.get(Agent, conversation.agent_id)
             if agent is not None and agent.current_published_version_id is not None:
                 agent_version = db.get(AgentVersion, agent.current_published_version_id)
-        mappings, tools = TaskRuntime._build_tool_mappings(db, agent_version, tenant_id)
-        system_prompt = (agent_version.config_snapshot or {}).get("system_prompt") if agent_version is not None else None
-        # 注入已绑定 skill 的执行指令，让模型了解多工具协作流程（如「先城市搜索拿 LocationID 再查天气」）
-        if mappings:
-            from app.models import SkillVersion as _SV
-            seen_skill_ids: set[UUID] = set()
-            instructions: list[str] = []
-            for m in mappings.values():
-                if m.skill_version_id in seen_skill_ids:
-                    continue
-                seen_skill_ids.add(m.skill_version_id)
-                sv = db.get(_SV, m.skill_version_id)
-                if sv is not None and sv.instructions and sv.instructions.strip():
-                    instructions.append(sv.instructions.strip())
-            if instructions:
-                system_prompt = (system_prompt + "\n\n" if system_prompt else "") + "\n\n".join(instructions)
-        request = ModelRequest(
-            trace_id=trace_id or str(user_message.id), conversation_id=conversation.id,
-            model=getattr(model_gateway, "default_model", "mock"),
-            messages=build_context(db, conversation, system_prompt=system_prompt, attachment_ids=attachment_ids),
-            tools=tools, timeout_seconds=get_settings().model_timeout_seconds,
-        )
-        content: str | None = None
-        chat_task = None
-        try:
-            if tools and skill_gateway is not None:
-                # 工具型会话：创建 RUNNING 任务，支撑写入类工具"强制人工审批"的暂停/重放机制；
-                # 事务在路由层统一提交，任务对 worker 不可见，不存在并发抢占。
-                chat_task = create_task(
-                    db,
-                    tenant_id=tenant_id,
-                    owner_user_id=user_id,
-                    agent_id=conversation.agent_id,
-                    agent_version_id=agent_version.id,
-                    idempotency_key=idempotency_key,
-                    request_summary=content,
-                    conversation_id=conversation.id,
-                    trigger_message_id=user_message.id,
-                    trace_id=trace_id,
-                )
-                transition_task(db, chat_task, TaskStatus.QUEUED, "TASK_QUEUED", "chat task queued")
-                transition_task(db, chat_task, TaskStatus.RUNNING, "TASK_RUNNING", "chat task running")
-                loop = AgentExecutionLoop(model_gateway, skill_gateway)
-                result = await loop.run(request=request, mappings=mappings, db=db, tenant_id=tenant_id, user_id=user_id, task_id=chat_task.id)
-                if result.pending_confirmation is not None:
-                    pending_confirmation = _pending_confirmation_info(db, result.pending_confirmation, task_id=chat_task.id)
-                    return ChatResult(user_message=user_message, assistant_message=None, task_id=chat_task.id, mocked=False, pending_confirmation=pending_confirmation)
-                content = result.response.content
-                chat_task.result = {"content": content}
-                transition_task(db, chat_task, TaskStatus.SUCCESS, "TASK_SUCCEEDED", "chat task completed")
-            else:
+        mappings, tools = build_tool_mappings(db, agent_version, tenant_id)
+        if mappings and skill_gateway is not None and agent_version is not None:
+            # 工具型会话：只创建任务并入队（Outbox TASK_READY），执行由 worker 完成；
+            # POST /chat 立即返回 task_id，前端订阅任务事件流获得实时执行过程。
+            chat_task = create_chat_task(db, tenant_id=tenant_id, user_id=user_id, conversation=conversation, user_message=user_message, idempotency_key=idempotency_key, trace_id=trace_id)
+            return ChatResult(user_message=user_message, assistant_message=None, task_id=chat_task.id, mocked=False)
+        if agent_version is not None:
+            # 无工具智能体：同步直答（不建任务），回复随响应返回
+            system_prompt = build_agent_system_prompt(db, agent_version)
+            request = ModelRequest(
+                trace_id=trace_id or str(user_message.id), conversation_id=conversation.id,
+                model=getattr(model_gateway, "default_model", "mock"),
+                messages=build_context(db, conversation, system_prompt=system_prompt, attachment_ids=attachment_ids),
+                tools=[], timeout_seconds=get_settings().model_timeout_seconds,
+            )
+            try:
                 response = await model_gateway.generate(request)
-                if not response.tool_calls:
-                    content = response.content
-        except ModelGatewayError as exc:
-            _fail_chat_task(db, chat_task, exc.code, exc.message)
-            raise ApiError(exc.code, exc.message, 502) from exc
-        except Exception:
-            _fail_chat_task(db, chat_task, "AI_TASK_FAILED", "chat task failed")
-            raise
-        if content:
-            assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content=content, status="COMPLETED")
-            user_message.status = "COMPLETED"
+            except ModelGatewayError as exc:
+                user_message.status = "FAILED"
+                raise ApiError(exc.code, exc.message, 502) from exc
+            reply = response.content or ""
+            assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content=reply, status="COMPLETED")
             db.add(assistant)
             db.flush()
-            settings = get_settings()
-            message_count = db.scalar(select(Message.id).where(Message.conversation_id == conversation.id).order_by(Message.created_at.desc()).offset(settings.memory_short_summary_message_threshold - 1).limit(1))
-            if message_count is not None:
-                # 摘要属后台记忆维护：失败不能阻断本次回复（否则整个事务回滚，已生成的回复会丢失），下一条消息达到阈值时会自动重试
-                try:
-                    await summarize_conversation(db, conversation=conversation, user_id=user_id, trace_id=trace_id or str(user_message.id), model_gateway=model_gateway)
-                except Exception as exc:
-                    logger.warning("summarize failed for conversation %s: %s", conversation.id, exc)
-            return ChatResult(user_message=user_message, assistant_message=assistant, mocked=False)
+            user_message.status = "COMPLETED"
+            await _maybe_summarize(db, conversation=conversation, user_id=user_id, trace_id=trace_id, model_gateway=model_gateway, user_message_id=str(user_message.id))
+            return ChatResult(user_message=user_message, assistant_message=assistant, mocked=False, response_content=reply)
     task = create_task(db, tenant_id=tenant_id, owner_user_id=user_id, agent_id=conversation.agent_id, agent_version_id=_version_id(db, conversation.agent_id), idempotency_key=idempotency_key, request_summary=content, conversation_id=conversation.id, trigger_message_id=user_message.id, trace_id=trace_id)
     user_message.status = "COMPLETED"
     return ChatResult(user_message=user_message, assistant_message=None, task_id=task.id, mocked=False)
 
 
-def _pending_confirmation_info(db: Session, info: dict, *, task_id: UUID) -> dict:
-    """补全审批卡片信息：任务 ID + 工具名称（工具名需 ToolVersion → Tool 反查）。"""
-    result = {
-        "confirmation_id": str(info.get("confirmation_id") or ""),
-        "task_id": str(task_id),
-        "tool_version_id": info.get("tool_version_id"),
-        "arguments": info.get("arguments") or {},
-    }
-    tool_version_id = info.get("tool_version_id")
-    if tool_version_id:
+async def _maybe_summarize(db: Session, *, conversation: Conversation, user_id: UUID, trace_id: str | None, model_gateway: ModelGateway, user_message_id: str) -> None:
+    """会话记忆维护：失败不阻断回复（下一条消息达到阈值时会自动重试）。"""
+    settings = get_settings()
+    message_count = db.scalar(select(Message.id).where(Message.conversation_id == conversation.id).order_by(Message.created_at.desc()).offset(settings.memory_short_summary_message_threshold - 1).limit(1))
+    if message_count is not None:
         try:
-            version = db.get(ToolVersion, UUID(str(tool_version_id)))
-            tool = db.get(Tool, version.tool_id) if version else None
-            result["tool_name"] = tool.name if tool else None
-        except (TypeError, ValueError):
-            pass
-    return result
-
-
-def _fail_chat_task(db: Session, task: Task | None, code: str, message: str) -> None:
-    """chat 快路径异常收尾：仅当任务仍在 QUEUED/RUNNING 时置为 FAILED，避免覆盖审批挂起状态。"""
-    if task is None or task.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING):
-        return
-    task.error_code = code
-    task.error_message = message
-    transition_task(db, task, TaskStatus.FAILED, "TASK_CHAT_FAILED", "chat task failed")
+            await summarize_conversation(db, conversation=conversation, user_id=user_id, trace_id=trace_id or user_message_id, model_gateway=model_gateway)
+        except Exception as exc:
+            logger.warning("summarize failed for conversation %s: %s", conversation.id, exc)
 
 
 def _create_conversation(db: Session, tenant_id: UUID, user_id: UUID, agent_id: UUID | None) -> Conversation:

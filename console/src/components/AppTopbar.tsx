@@ -36,9 +36,9 @@ export function isAdminUser(user: UserInfo | null): boolean {
   return perms.some((p) => p.startsWith("user.") || p.startsWith("role.") || p.startsWith("system."));
 }
 
-/** 登录后的默认主页：管理员为用户管理，普通用户为会话 */
+/** 登录后的默认主页：管理员为模型配置（部署后第一件事），普通用户为会话 */
 export function homePath(user: UserInfo | null): string {
-  return isAdminUser(user) ? "/users" : "/chat";
+  return isAdminUser(user) ? "/models" : "/chat";
 }
 
 /** 按导航元数据与用户权限过滤可见入口 */

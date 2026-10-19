@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./stores/auth";
+import { ToastProvider, useToast } from "./components/Toast";
 import { LoginPage } from "./pages/Login";
 import { ChatPage } from "./pages/Chat";
 import { AgentsPage } from "./pages/Agents";
@@ -15,17 +16,24 @@ import { LoadingScreen } from "./components/Loading";
 
 /**
  * 认证 + 访问守卫：未登录跳登录页；已登录但无对应导航访问权限时
- * （adminOnly 或缺少 permission），跳回其角色默认主页。
+ * （adminOnly 或缺少 permission），跳回其角色默认主页并提示原因。
  * 访问规则取自 APP_NAV 单一数据源，保证导航显隐与路由守卫一致。
  */
 function RequireAccess({ navTo, children }: { navTo?: string; children: ReactElement }) {
   const { user, initializing } = useAuth();
+  const location = useLocation();
+  const { push: toast } = useToast();
   if (initializing) return <LoadingScreen />;
-  if (!user) return <Navigate to="/login" replace />;
+  // 登录态丢失时记住来源页，登录成功后回跳，避免用户上下文（如正在输入的对话）丢失
+  if (!user) return <Navigate to="/login" state={{ from: location.pathname }} replace />;
   if (navTo) {
     const item: NavItem | undefined = APP_NAV.find((n) => n.to === navTo);
     const allowed = visibleNav(item ? [item] : [], user).length > 0;
-    if (!allowed) return <Navigate to={homePath(user)} replace />;
+    if (!allowed) {
+      // 显式告知用户被静默弹回的原因（不暴露英文错误码）
+      toast("info", `没有访问该页面的权限，已返回主页`);
+      return <Navigate to={homePath(user)} replace />;
+    }
   }
   return children;
 }
@@ -51,7 +59,8 @@ function ConsoleShell({ children }: { children: ReactElement }) {
 
 export function App() {
   return (
-    <Routes>
+    <ToastProvider>
+      <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/chat" element={<RequireAccess><ChatPage /></RequireAccess>} />
       <Route path="/agents" element={<RequireAccess><ConsoleShell><AgentsPage /></ConsoleShell></RequireAccess>} />
@@ -61,7 +70,8 @@ export function App() {
       <Route path="/audit" element={<RequireAccess><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
       <Route path="/users" element={<RequireAccess navTo="/users"><ConsoleShell><UsersPage /></ConsoleShell></RequireAccess>} />
       <Route path="*" element={<HomeRedirect />} />
-    </Routes>
+      </Routes>
+    </ToastProvider>
   );
 }
 

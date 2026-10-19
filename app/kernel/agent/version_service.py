@@ -7,10 +7,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
-from app.models import Agent, AgentVersion, AgentVersionSkill, SkillVersion
+from app.models import Agent, AgentVersion, AgentVersionSkill, SkillVersion, Task
 from app.kernel.audit.service import record_audit
+from app.kernel.task.states import TERMINAL_STATES
 
 VERSION_NOT_FOUND = "version not found"
+
+# 归档阻断错误码（前端按 code 映射中文文案）
+ARCHIVE_ERR_CURRENT = "AI_AGENT_VERSION_IS_CURRENT"
+ARCHIVE_ERR_IN_USE = "AI_AGENT_VERSION_IN_USE"
+ARCHIVE_ERR_REFERENCED = "AI_AGENT_VERSION_REFERENCED"
+ARCHIVE_WARN_REFERENCED_BY_DRAFT = "AI_AGENT_VERSION_REFERENCED_BY_DRAFT"
 
 
 def _snapshot_hash(snapshot: dict) -> str:
@@ -93,12 +100,113 @@ def publish_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: 
     return version
 
 
+def _referrer_agent_name(db: Session, version: AgentVersion) -> str:
+    agent = db.get(Agent, version.agent_id)
+    return agent.name if agent else "未知智能体"
+
+
+def _version_label(db: Session, version: AgentVersion) -> str:
+    return f"{_referrer_agent_name(db, version)} v{version.version_number}"
+
+
+def _running_task_count(db: Session, tenant_id: UUID, version_id: UUID) -> int:
+    """引用该版本且未终态的任务数（含委派子任务）：运行中 = 不允许归档。"""
+    return (
+        db.scalar(
+            select(func.count(Task.id)).where(
+                Task.tenant_id == tenant_id,
+                Task.agent_version_id == version_id,
+                Task.status.notin_([str(s) for s in TERMINAL_STATES]),
+            )
+        )
+        or 0
+    )
+
+
+def _delegation_referrers(db: Session, tenant_id: UUID, version_id: UUID) -> list[AgentVersion]:
+    """其他版本中把该版本列入委派白名单的引用方（DRAFT / PUBLISHED）。"""
+    target = str(version_id)
+    rows = db.scalars(
+        select(AgentVersion).where(
+            AgentVersion.tenant_id == tenant_id,
+            AgentVersion.id != version_id,
+            AgentVersion.delegation_enabled.is_(True),
+            AgentVersion.status.in_(["DRAFT", "PUBLISHED"]),
+        )
+    ).all()
+    return [v for v in rows if target in [str(x) for x in (v.allowed_child_agent_versions or [])]]
+
+
+def _archive_blockers(db: Session, agent: Agent, version: AgentVersion) -> tuple[list[dict], list[dict], int, list[AgentVersion]]:
+    """归档阻断项与提示项：返回 (reasons, warnings, running_task_count, referrers)。
+
+    reasons 非空即不可归档；warnings 仅提示不阻断。
+    """
+    reasons: list[dict] = []
+    warnings: list[dict] = []
+    running = _running_task_count(db, version.tenant_id, version.id)
+    referrers = _delegation_referrers(db, version.tenant_id, version.id)
+
+    if version.id == agent.current_published_version_id:
+        reasons.append({"code": ARCHIVE_ERR_CURRENT, "message": "当前发布版本不可归档，请先发布其他版本"})
+    if running:
+        reasons.append({"code": ARCHIVE_ERR_IN_USE, "message": f"该版本有 {running} 个任务正在执行"})
+    published_refs = [v for v in referrers if v.status == "PUBLISHED"]
+    if published_refs:
+        shown = "、".join(_version_label(db, v) for v in published_refs[:3])
+        reasons.append({"code": ARCHIVE_ERR_REFERENCED, "message": f"该版本被已发布版本（{shown}{'等' if len(published_refs) > 3 else ''}）的委派白名单引用"})
+    draft_refs = [v for v in referrers if v.status != "PUBLISHED"]
+    if draft_refs:
+        shown = "、".join(_version_label(db, v) for v in draft_refs[:3])
+        warnings.append({"code": ARCHIVE_WARN_REFERENCED_BY_DRAFT, "message": f"草稿（{shown}{'等' if len(draft_refs) > 3 else ''}）的委派白名单引用了本版本，归档后其发布会失败"})
+    return reasons, warnings, running, referrers
+
+
+def archive_check(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UUID) -> dict:
+    """归档预检：前端点击归档前调用，用于给出精确的阻断原因（与 archive_version 同源判定）。"""
+    version = db.get(AgentVersion, version_id)
+    if not version or version.tenant_id != tenant_id:
+        raise ApiError("AI_AGENT_VERSION_NOT_FOUND", VERSION_NOT_FOUND, 404)
+    agent = _owned_agent(db, tenant_id, user_id, version.agent_id)
+    reasons, warnings, running, referrers = _archive_blockers(db, agent, version)
+    return {
+        "can_archive": not reasons,
+        "already_archived": version.status == "ARCHIVED",
+        "reasons": reasons,
+        "warnings": warnings,
+        "running_task_count": running,
+        "referenced_by": [
+            {
+                "version_id": str(v.id),
+                "agent_name": _referrer_agent_name(db, v),
+                "version_number": v.version_number,
+                "status": v.status,
+            }
+            for v in referrers
+        ],
+    }
+
+
 def archive_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UUID) -> AgentVersion:
     version = db.get(AgentVersion, version_id)
     if not version or version.tenant_id != tenant_id:
         raise ApiError("AI_AGENT_VERSION_NOT_FOUND", VERSION_NOT_FOUND, 404)
     agent = _owned_agent(db, tenant_id, user_id, version.agent_id)
-    if version.id == agent.current_published_version_id:
-        raise ApiError("AI_REQUEST_INVALID", "current version cannot be archived", 422)
+    # 幂等：已归档直接返回，重复点击/重试不报错
+    if version.status == "ARCHIVED":
+        return version
+    reasons, _warnings, _running, _referrers = _archive_blockers(db, agent, version)
+    if reasons:
+        raise ApiError(reasons[0]["code"], "；".join(r["message"] for r in reasons), 409)
     version.status = "ARCHIVED"
+    record_audit(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=user_id,
+        action="AGENT_VERSION_ARCHIVED",
+        resource_type="AGENT_VERSION",
+        resource_id=version.id,
+        summary="agent version archived",
+        detail={"agent_id": str(agent.id), "version_number": version.version_number},
+    )
     return version

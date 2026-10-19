@@ -1,3 +1,11 @@
+"""内置工具执行器插件（HTTP / DB_QUERY / MOCK / MCP 占位 / MD_SCRIPT）。
+
+自 app/kernel/builtin_executors.py 与 app/kernel/skill_gateway.py 迁移，逻辑不变；
+执行器契约见 app/kernel/ports/skill_executor.py。
+DB_SQL（连接器目标库执行）仍在 app/kernel/db_executor.py（含注册期 SQL 校验纯函数），
+由装配根直接引用。
+"""
+
 import ipaddress
 import re
 import socket
@@ -8,9 +16,24 @@ import httpx
 from sqlalchemy import Engine, text
 from sqlglot import exp, parse
 
-from app.kernel.skill_gateway import ExecutionResult
+from app.kernel.ports.skill_executor import ExecutionResult
+from app.kernel.md_skill_runtime import MdSkillRuntime
 
 _TEMPLATE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
+
+
+class MockExecutor:
+    tool_type = "MOCK"
+
+    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
+        return ExecutionResult(status="SUCCEEDED", data={"echo": arguments, "config": config})
+
+
+class McpExecutor:
+    tool_type = "MCP"
+
+    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
+        return ExecutionResult(status="FAILED", error_code="AI_MCP_UNAVAILABLE", error_message="MCP connector is not connected and negotiated")
 
 
 class HttpExecutor:
@@ -77,7 +100,7 @@ class DbQueryExecutor:
         dialect = self._dialect()
         try:
             statements = parse(query, read=dialect)
-        except Exception as exc:
+        except Exception:
             return ExecutionResult(status="FAILED", error_code="AI_REQUEST_INVALID", error_message="query parse failed")
         if len(statements) != 1 or not isinstance(statements[0], exp.Select):
             return ExecutionResult(status="FAILED", error_code="AI_REQUEST_INVALID", error_message="exactly one SELECT statement is required")
@@ -89,7 +112,7 @@ class DbQueryExecutor:
             with self.engine.connect() as connection:
                 rows = connection.execute(text(query), arguments).mappings().fetchmany(int(config.get("max_rows", 100)))
             return ExecutionResult(status="SUCCEEDED", data=[dict(row) for row in rows])
-        except Exception as exc:
+        except Exception:
             return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message="database query failed")
 
     def _dialect(self) -> str:
@@ -103,3 +126,15 @@ class DbQueryExecutor:
         tables = {table.name for table in statement.find_all(exp.Table)}
         columns = {column.name for column in statement.find_all(exp.Column)}
         return bool(tables) and tables.issubset(allowed_tables) and columns.issubset(allowed_columns)
+
+
+class MdSkillScriptExecutor:
+    tool_type = "MD_SCRIPT"
+
+    def __init__(self) -> None:
+        from app.config import get_settings
+        settings = get_settings()
+        self.runtime = MdSkillRuntime(settings.md_skills_dir, enabled=settings.md_skill_script_enabled, timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output)
+
+    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
+        return ExecutionResult(status="FAILED", error_code="AI_CAPABILITY_UNAVAILABLE", error_message="MD-Skill scripts require the controlled async runtime")

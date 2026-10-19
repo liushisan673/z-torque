@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../stores/auth";
 import { homePath } from "../components/AppTopbar";
 import { ApiRequestError } from "../services/api";
@@ -9,6 +9,7 @@ import { Alert } from "../components/ui";
 export function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -25,7 +26,10 @@ export function LoginPage() {
     setError(null);
     try {
       await login(username, password).then((u) => {
-        navigate(homePath(u), { replace: true });
+        // 会话过期被踢到登录页时回跳来源页；常规登录进入角色默认主页
+        const from = (location.state as { from?: string } | null)?.from;
+        const target = from && from.startsWith("/") && from !== "/login" ? from : homePath(u);
+        navigate(target, { replace: true });
       });
     } catch (err) {
       if (err instanceof ApiRequestError) {

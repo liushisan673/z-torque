@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 import json
 import httpx
-from app.kernel.model_gateway.contracts import ModelGatewayError, ModelMessage, ModelRequest, ModelResponse, ModelToolCall, ModelUsage
+from app.kernel.model_gateway.contracts import ModelGateway, ModelGatewayError, ModelMessage, ModelRequest, ModelResponse, ModelToolCall, ModelUsage
 
 from app.kernel.model_gateway.contracts import ModelGateway
 
@@ -64,6 +64,77 @@ class OpenAICompatibleGateway(ModelGateway):
             raise ModelGatewayError(code, _UPSTREAM_ERROR) from exc
         except httpx.HTTPError as exc:
             raise ModelGatewayError('AI_MODEL_UPSTREAM_ERROR', _UPSTREAM_ERROR) from exc
+
+    async def stream_response(self, request: ModelRequest) -> AsyncIterator[dict[str, Any]]:
+        """流式调用并聚合 tool_calls：执行中 yield {'type':'delta'}，结束 yield {'type':'final'}（含工具调用与 usage）。"""
+        payload = self._payload(request)
+        payload['stream'] = True
+        payload['stream_options'] = {'include_usage': True}
+        content_parts: list[str] = []
+        calls: dict[int, dict[str, str]] = {}
+        finish_reason: str | None = None
+        provider_id: str | None = None
+        usage = ModelUsage()
+        try:
+            async with self.client.stream('POST', f'{self.base_url}/chat/completions', headers={'Authorization': f'Bearer {self.api_key}', 'Accept': 'text/event-stream'}, json=payload, timeout=request.timeout_seconds) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith('data:'):
+                        continue
+                    data = line[5:].strip()
+                    if data == '[DONE]':
+                        break
+                    try:
+                        body = json.loads(data)
+                    except ValueError as exc:
+                        raise ModelGatewayError('AI_MODEL_RESPONSE_INVALID', 'model stream response is invalid') from exc
+                    if body.get('id'):
+                        provider_id = str(body['id'])
+                    if body.get('usage'):
+                        usage_data = body['usage']
+                        usage = ModelUsage(usage_data.get('prompt_tokens', 0), usage_data.get('completion_tokens', 0), usage_data.get('total_tokens', 0))
+                    choices = body.get('choices') or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if choice.get('finish_reason'):
+                        finish_reason = str(choice['finish_reason'])
+                    delta = choice.get('delta') or {}
+                    content = delta.get('content')
+                    if content:
+                        content_parts.append(content)
+                        yield {'type': 'delta', 'content': content}
+                    for tc in delta.get('tool_calls') or []:
+                        index = int(tc.get('index') or 0)
+                        slot = calls.setdefault(index, {'id': '', 'name': '', 'arguments': ''})
+                        if tc.get('id'):
+                            slot['id'] = str(tc['id'])
+                        function = tc.get('function') or {}
+                        if function.get('name'):
+                            slot['name'] = str(function['name'])
+                        if function.get('arguments'):
+                            slot['arguments'] += str(function['arguments'])
+        except httpx.TimeoutException as exc:
+            raise ModelGatewayError('AI_MODEL_TIMEOUT', 'model request timed out') from exc
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            code = 'AI_MODEL_RATE_LIMITED' if status == 429 else ('AI_MODEL_AUTH_ERROR' if status in (401, 403) else 'AI_MODEL_UPSTREAM_ERROR')
+            raise ModelGatewayError(code, _UPSTREAM_ERROR) from exc
+        except httpx.HTTPError as exc:
+            raise ModelGatewayError('AI_MODEL_UPSTREAM_ERROR', _UPSTREAM_ERROR) from exc
+        parsed_calls: list[ModelToolCall] = []
+        for index in sorted(calls):
+            slot = calls[index]
+            if not slot['name']:
+                continue
+            try:
+                arguments = json.loads(slot['arguments']) if slot['arguments'] else {}
+            except ValueError as exc:
+                raise ModelGatewayError('AI_MODEL_RESPONSE_INVALID', 'model stream response is invalid') from exc
+            if not isinstance(arguments, dict):
+                raise ModelGatewayError('AI_MODEL_RESPONSE_INVALID', 'model stream response is invalid')
+            parsed_calls.append(ModelToolCall(slot['id'] or f'call_{index}', slot['name'], arguments))
+        yield {'type': 'final', 'response': ModelResponse(''.join(content_parts), parsed_calls, finish_reason, provider_id, usage)}
 
     def _payload(self, request: ModelRequest) -> dict[str, Any]:
         payload: dict[str, Any] = {'model': request.model or self.default_model, 'messages': [self._message(m) for m in request.messages], 'stream': request.stream}

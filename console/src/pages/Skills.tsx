@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { request, uploadFile, ApiRequestError } from "../services/api";
+import { request, uploadFile } from "../services/api";
+import { errorText } from "../services/errorText";
 import type { SkillListItem, SkillDetail, SkillVersionDetail, SkillToolLink, SkillVersionRef, ToolListItem } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useToast } from "../components/Toast";
+import { GuideCallout } from "../components/GuideCallout";
+import { isAdminUser } from "../components/AppTopbar";
 import { useAuth } from "../stores/auth";
 
 type Tab = "overview" | "content" | "scripts" | "load" | "tools" | "versions";
@@ -100,6 +105,10 @@ function prettyJson(obj: unknown): string {
 
 export function SkillsPage() {
   const { user } = useAuth();
+  const { push: toast } = useToast();
+  // 危险操作（停用 / 级联删除）统一走 ConfirmDialog，避免 window.confirm
+  const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const meId = user?.id;
   const [skills, setSkills] = useState<SkillListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -128,6 +137,8 @@ export function SkillsPage() {
 
   // 创建 Skill
   const [createOpen, setCreateOpen] = useState(false);
+  // 发布预检：指令内容为空时提示（可强制跳过）
+  const [publishCheck, setPublishCheck] = useState<{ versionId: string; missing: string[] } | null>(null);
   const [createName, setCreateName] = useState("");
   const [createDesc, setCreateDesc] = useState("");
   const [createType, setCreateType] = useState("STANDARD");
@@ -161,7 +172,7 @@ export function SkillsPage() {
       const data = await request<SkillListItem[]>(`/api/z-torque/skills-tools/skills${showArchived ? "?include_archived=true" : ""}`);
       setSkills(data);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载失败");
+      setError(errorText(err, "加载失败"));
     } finally {
       setLoading(false);
     }
@@ -170,6 +181,13 @@ export function SkillsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 默认展示列表第一项，避免主区空白（仅当前无选中时生效；删除当前选中后自动补选）
+  useEffect(() => {
+    if (loading || selectedId) return;
+    if (skills.length > 0) void openDetail(skills[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, skills, selectedId]);
 
   // 进入「加载与生效」tab 时拉取 watchdog 实时扫描状态
   useEffect(() => {
@@ -216,7 +234,7 @@ export function SkillsPage() {
         await loadVersionDetail(ref.id);
       }
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载详情失败");
+      setError(errorText(err, "加载详情失败"));
     } finally {
       setLoadingDetail(false);
     }
@@ -242,7 +260,7 @@ export function SkillsPage() {
       await refreshTools(versionId);
       return v;
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载版本详情失败");
+      setError(errorText(err, "加载版本详情失败"));
       setVersionDetail(null);
       return null;
     } finally {
@@ -259,7 +277,7 @@ export function SkillsPage() {
       setScanResult(r);
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "同步失败");
+      setError(errorText(err, "同步失败"));
     } finally {
       setScanning(false);
     }
@@ -320,6 +338,7 @@ export function SkillsPage() {
       setCreateDesc("");
       setCreateType("STANDARD");
       setCreateFile(null);
+      toast("success", uploaded ? "MD-Skill 已上传并生成草稿" : "Skill 已创建");
       await load();
       if (uploaded) {
         setSelectedId(uploaded.skill_id);
@@ -328,7 +347,7 @@ export function SkillsPage() {
         }
       }
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建失败");
+      setError(errorText(err, "创建失败"));
     } finally {
       setBusy(false);
     }
@@ -358,7 +377,7 @@ export function SkillsPage() {
       if (detail) setDetail({ ...detail, name: editInfoName.trim(), description: editInfoDesc.trim() || null });
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "保存失败");
+      setError(errorText(err, "保存失败"));
     } finally {
       setBusy(false);
     }
@@ -371,37 +390,37 @@ export function SkillsPage() {
       await request(`/api/z-torque/skills-tools/skills/${id}/copy`, { method: "POST" });
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "复制失败");
+      setError(errorText(err, "复制失败"));
     } finally {
       setBusy(false);
     }
   }
 
   async function archiveSkill(id: string) {
-    if (!window.confirm("确定停用该技能吗？")) return;
     setBusy(true);
     setError(null);
     try {
       await request(`/api/z-torque/skills-tools/skills/${id}/archive`, { method: "POST" });
       if (selectedId === id) setSelectedId(null);
       await load();
+      toast("success", "已停用");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "停用失败");
+      setError(errorText(err, "停用失败"));
     } finally {
       setBusy(false);
     }
   }
 
   async function deleteSkill(id: string) {
-    if (!window.confirm("确定删除该技能吗？其全部版本与工具绑定将被级联删除，且不可恢复。")) return;
     setBusy(true);
     setError(null);
     try {
       await request(`/api/z-torque/skills-tools/skills/${id}`, { method: "DELETE" });
       if (selectedId === id) setSelectedId(null);
       await load();
+      toast("success", "已删除");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "删除失败");
+      setError(errorText(err, "删除失败"));
     } finally {
       setBusy(false);
     }
@@ -418,8 +437,9 @@ export function SkillsPage() {
       if (selected) await openDetail(selected);
       await loadVersionDetail(v.id);
       void load();
+      toast("success", "已创建草稿版本");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建版本失败");
+      setError(errorText(err, "创建版本失败"));
     } finally {
       setBusy(false);
     }
@@ -459,13 +479,27 @@ export function SkillsPage() {
       setVersionDetail(v);
       setError(null);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "保存失败");
+      setError(errorText(err, "保存失败"));
     } finally {
       setBusy(false);
     }
   }
 
-  async function publishVersion(versionId: string) {
+  // 发布前预检：指令内容为空时给出提示（可强制跳过）
+  function publishVersion(versionId: string) {
+    const vd = versionDetail && versionDetail.id === versionId ? versionDetail : null;
+    const missing: string[] = [];
+    if (vd && !(vd.instructions ?? "").trim()) {
+      missing.push("指令内容为空——技能被调用时将无法产生有效输出");
+    }
+    if (missing.length > 0) {
+      setPublishCheck({ versionId, missing });
+      return;
+    }
+    void doPublish(versionId);
+  }
+
+  async function doPublish(versionId: string) {
     setBusy(true);
     setError(null);
     try {
@@ -473,8 +507,9 @@ export function SkillsPage() {
       setEditing(null);
       if (selected) await openDetail(selected);
       await load();
+      toast("success", "技能版本已发布，可在「智能体管理」绑定使用");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "发布失败");
+      setError(errorText(err, "发布失败"));
     } finally {
       setBusy(false);
     }
@@ -502,7 +537,7 @@ export function SkillsPage() {
       const firstPub = bindable[0]?.versions.find((v) => v.status === "PUBLISHED");
       setSelectedToolVersionId(firstPub ? firstPub.id : null);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载可用工具失败");
+      setError(errorText(err, "加载可用工具失败"));
     } finally {
       setLoadingAvail(false);
     }
@@ -520,7 +555,7 @@ export function SkillsPage() {
       setBindOpen(false);
       await refreshTools(viewVersion.id);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "绑定失败");
+      setError(errorText(err, "绑定失败"));
     } finally {
       setBusy(false);
     }
@@ -535,7 +570,7 @@ export function SkillsPage() {
       await request(`/api/z-torque/skills-tools/skill-versions/${viewVersion.id}/tools/${toolVersionId}`, { method: "DELETE" });
       await refreshTools(viewVersion.id);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "解绑失败");
+      setError(errorText(err, "解绑失败"));
     } finally {
       setBusy(false);
       setUnbindingId(null);
@@ -566,16 +601,19 @@ export function SkillsPage() {
     if (isPendingEnable(selected)) {
       return (
         <>
-          <button
-            className="skill-btn-success"
-            disabled={busy || !selected.latest_version_id}
-            onClick={() => void publishVersion(selected.latest_version_id!)}
-            title="发布扫描草稿，完成首次启用确认"
-          >
-            确认启用（管理员）
-          </button>
+          {/* 首次启用确认仅管理员可见（后端有权限校验，前端不暴露无权限操作） */}
+          {isAdminUser(user) && (
+            <button
+              className="skill-btn-success"
+              disabled={busy || !selected.latest_version_id}
+              onClick={() => void publishVersion(selected.latest_version_id!)}
+              title="发布扫描草稿，完成首次启用确认"
+            >
+              确认启用（管理员）
+            </button>
+          )}
           <button className="btn btn-secondary btn-sm" onClick={() => setTab("load")}>查看扫描状态</button>
-          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => void archiveSkill(selected.id)}>忽略（停用）</button>
+          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>忽略（停用）</button>
         </>
       );
     }
@@ -595,7 +633,7 @@ export function SkillsPage() {
           {versionDetail && (
             <button className="btn btn-secondary btn-sm" onClick={() => void loadVersionDetail(versionDetail.id)}>查看快照</button>
           )}
-          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => void deleteSkill(selected.id)}>删除</button>
+          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => setConfirmDelete({ id: selected.id, name: selected.name })}>删除</button>
         </>
       );
     }
@@ -607,7 +645,7 @@ export function SkillsPage() {
             <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEditor(versionDetail)}>继续编辑</button>
           )}
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void publishVersion(selected.latest_version_id!)}>发布</button>
-          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => void archiveSkill(selected.id)}>停用</button>
+          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>停用</button>
         </>
       );
     }
@@ -615,12 +653,11 @@ export function SkillsPage() {
     return (
       <>
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>编辑信息</button>
-        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>编辑草稿</button>
-        <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>发布新版本</button>
+        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>
         <button className="skill-btn-danger-outline" disabled={busy} onClick={() => void archiveSkill(selected.id)}>停用</button>
       </>
     );
-  }, [selected, busy, versionDetail]);
+  }, [selected, busy, versionDetail, user]);
 
   // 详情面包屑与展示路径
   const detailRelativePath = viewVersion?.relative_path ?? selected?.relative_path ?? null;
@@ -720,8 +757,13 @@ export function SkillsPage() {
               <Loading />
             ) : filteredSkills.length === 0 ? (
               <div className="skill-detail-empty">
-                <h2>暂无技能</h2>
-                <span>可点击「同步 md-skills」扫描目录，或调整筛选条件</span>
+                <GuideCallout
+                  title="还没有技能"
+                  why="技能需创建并发布版本后，才能被智能体绑定使用"
+                  actionLabel="新建技能"
+                  onAction={() => { setCreateName(""); setCreateDesc(""); setCreateType("STANDARD"); setCreateFile(null); setCreateOpen(true); }}
+                  hint="推荐路径：新建技能 → 新建草稿版本 → 填写指令 → 发布 → 到智能体绑定"
+                />
               </div>
             ) : (
               filteredSkills.map((s) => {
@@ -1038,20 +1080,24 @@ export function SkillsPage() {
                 ) : tab === "load" ? (
                   <div className="tab-panel">
                     <div className="skill-section">
-                      <h3>加载与生效（规范）</h3>
-                      <div className="skill-load-steps">
-                        <strong>后端</strong>
-                        <ol>
-                          <li>启动时扫描 <code>md-skills/</code>；watchdog 监听变更（新增/修改 ≤ 30 秒生效，不重启）</li>
-                          <li>解析 front-matter → 校验 → 写 <code>zr_skill(skill_type=MD_SKILL)</code> + <code>zr_skill_version</code></li>
-                          <li>默认状态为已启用；<strong>首次启用需管理员一次确认</strong></li>
-                          <li>绑定到智能体版本后，下一轮对话即可被模型看到</li>
-                        </ol>
-                        <strong style={{ display: "block", marginTop: 10 }}>写操作</strong>
-                        <ol>
-                          <li>改数据、发邮件等：requires_confirmation: true 或全局策略 → 单人确认 + 审计</li>
-                        </ol>
-                      </div>
+                      <h3>加载与生效</h3>
+                      {/* 机制说明默认折叠：使用方只需要关心状态与入口，规范细节留给需要的人展开 */}
+                      <details className="skill-doc-details">
+                        <summary>展开查看加载机制说明（面向管理员 / 开发者）</summary>
+                        <div className="skill-load-steps">
+                          <strong>后端</strong>
+                          <ol>
+                            <li>启动时扫描 <code>md-skills/</code>；watchdog 监听变更（新增/修改 ≤ 30 秒生效，不重启）</li>
+                            <li>解析 front-matter → 校验 → 写 <code>zr_skill(skill_type=MD_SKILL)</code> + <code>zr_skill_version</code></li>
+                            <li>默认状态为已启用；<strong>首次启用需管理员一次确认</strong></li>
+                            <li>绑定到智能体版本后，下一轮对话即可被模型看到</li>
+                          </ol>
+                          <strong style={{ display: "block", marginTop: 10 }}>写操作</strong>
+                          <ol>
+                            <li>改数据、发邮件等：requires_confirmation: true 或全局策略 → 单人确认 + 审计</li>
+                          </ol>
+                        </div>
+                      </details>
                     </div>
                     <div className="skill-section">
                       <h3>
@@ -1258,6 +1304,22 @@ export function SkillsPage() {
             <span>{error}</span>
           </div>
         )}
+        {/* 类型放首位：先决定创建方式，再填写对应字段 */}
+        <div className="form-field">
+          <label>类型</label>
+          <select
+            className="select"
+            value={createType}
+            onChange={(e) => {
+              setCreateType(e.target.value);
+              setCreateFile(null);
+              setError(null);
+            }}
+          >
+            <option value="STANDARD">标准 Skill</option>
+            <option value="MD_SKILL">MD-Skill（上传 zip 或 SKILL.md 文件）</option>
+          </select>
+        </div>
         {createType === "MD_SKILL" ? (
           <>
             <div
@@ -1296,21 +1358,6 @@ export function SkillsPage() {
             </div>
           </>
         )}
-        <div className="form-field">
-          <label>类型</label>
-          <select
-            className="select"
-            value={createType}
-            onChange={(e) => {
-              setCreateType(e.target.value);
-              setCreateFile(null);
-              setError(null);
-            }}
-          >
-            <option value="STANDARD">标准 Skill</option>
-            <option value="MD_SKILL">MD-Skill（上传 zip 或 SKILL.md 文件）</option>
-          </select>
-        </div>
       </Modal>
 
       {/* 绑定 Tool 弹窗 */}
@@ -1434,6 +1481,58 @@ export function SkillsPage() {
           </div>
         </Modal>
       )}
+
+      {/* 停用：可逆操作，轻确认 */}
+      <ConfirmDialog
+        open={confirmArchive !== null}
+        title="停用该技能？"
+        confirmText="停用"
+        busy={busy}
+        onCancel={() => setConfirmArchive(null)}
+        onConfirm={() => { if (confirmArchive) void archiveSkill(confirmArchive.id); }}
+      >
+        <p>技能「{confirmArchive?.name ?? ""}」将进入「已停用」状态，不再被智能体调用。已发布版本与绑定关系保留，后续可在列表中重新启用。</p>
+      </ConfirmDialog>
+
+      {/* 删除（级联）：不可逆，高危确认 + 输名 */}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="删除该技能？"
+        confirmText="删除"
+        destructive
+        requireText={confirmDelete?.name ?? ""}
+        requireLabel="请输入技能名称以确认删除"
+        busy={busy}
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={() => { if (confirmDelete) void deleteSkill(confirmDelete.id); }}
+      >
+        <p>技能「{confirmDelete?.name ?? ""}」的<strong>全部版本与工具绑定将被级联删除</strong>，且不可恢复。如不再使用，建议改用「停用」。</p>
+      </ConfirmDialog>
+
+      {/* 发布预检确认：缺项清单 + 强制发布出口 */}
+      <ConfirmDialog
+        open={publishCheck !== null}
+        title="发布前检查未通过"
+        confirmText="仍要发布"
+        cancelText="返回修改"
+        busy={busy}
+        onCancel={() => setPublishCheck(null)}
+        onConfirm={() => {
+          if (publishCheck) {
+            const { versionId } = publishCheck;
+            setPublishCheck(null);
+            void doPublish(versionId);
+          }
+        }}
+      >
+        <p>以下配置项缺失，发布后技能可能无法正常工作：</p>
+        <ul style={{ margin: "8px 0", paddingLeft: 20 }}>
+          {publishCheck?.missing.map((m) => (
+            <li key={m}>{m}</li>
+          ))}
+        </ul>
+        <p style={{ color: "var(--text-muted)", fontSize: 13 }}>可先「返回修改」补全指令内容；确认无误也可仍按当前草稿发布。</p>
+      </ConfirmDialog>
     </div>
   );
 }

@@ -12,6 +12,7 @@ from app.db.session import get_db
 from app.kernel.agent.service import archive_agent, copy_agent, create_agent, delete_agent, update_agent
 from app.kernel.agent.skill_service import attach_skill_version, detach_skill_version
 from app.kernel.agent.version_service import (
+    archive_check,
     archive_version,
     create_version,
     publish_version,
@@ -22,6 +23,7 @@ from app.schemas.agent import (
     AgentCreate,
     AgentResponse,
     AgentUpdate,
+    AgentVersionArchiveCheck,
     AgentVersionResponse,
     VersionCreate,
 )
@@ -32,11 +34,24 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 def out(request, value):
     return success_response(request, value)
 
+def _with_has_tools(db, agents: list) -> list[dict]:
+    """附加 has_tools 标志（当前发布版本是否绑定 skill）：前端据此路由流式直答 or 任务链路。"""
+    version_ids = [a.current_published_version_id for a in agents if a.current_published_version_id]
+    bound: set[str] = set()
+    if version_ids:
+        bound = {str(v) for (v,) in db.query(AgentVersionSkill.agent_version_id).filter(AgentVersionSkill.agent_version_id.in_(version_ids)).all()}
+    items = []
+    for a in agents:
+        payload = AgentResponse.model_validate(a).model_dump(mode="json")
+        payload["has_tools"] = str(a.current_published_version_id) in bound if a.current_published_version_id else False
+        items.append(payload)
+    return items
+
 @router.get("")
 async def list_agents(request: Request, include_archived: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     status_filter = Agent.status.in_(["ACTIVE", "ARCHIVED"]) if include_archived else Agent.status == "ACTIVE"
     rows = db.scalars(select(Agent).where(Agent.tenant_id == user.tenant_id, (Agent.owner_user_id == user.id) | (Agent.source_type == "OFFICIAL") | admin_owned_clause(Agent.owner_user_id, user.tenant_id), status_filter).order_by(Agent.created_at.desc())).all()
-    return out(request, [AgentResponse.model_validate(x).model_dump(mode="json") for x in rows])
+    return out(request, _with_has_tools(db, rows))
 
 @router.post("")
 async def create(payload: AgentCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -50,7 +65,7 @@ def get_agent(db, user, agent_id):
 
 @router.get("/{agent_id}")
 async def detail(agent_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return out(request, AgentResponse.model_validate(get_agent(db, user, agent_id)).model_dump(mode="json"))
+    return out(request, _with_has_tools(db, [get_agent(db, user, agent_id)])[0])
 
 @router.patch("/{agent_id}")
 async def update(agent_id: UUID, payload: AgentUpdate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -107,6 +122,11 @@ async def edit_ver(agent_id: UUID, version_id: UUID, payload: VersionCreate, req
 async def publish(agent_id: UUID, version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = publish_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id); db.commit(); db.refresh(item)
     return out(request, AgentVersionResponse.model_validate(item).model_dump(mode="json"))
+
+@router.get("/{agent_id}/versions/{version_id}/archive-check")
+async def check_ver_archivable(agent_id: UUID, version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    get_agent(db, user, agent_id)
+    return out(request, AgentVersionArchiveCheck.model_validate(archive_check(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id)).model_dump(mode="json"))
 
 @router.post("/{agent_id}/versions/{version_id}/archive")
 async def archive_ver(agent_id: UUID, version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):

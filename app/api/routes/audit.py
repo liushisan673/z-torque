@@ -23,7 +23,7 @@ def _infer_result(item: AuditLog) -> str | None:
     status = detail.get("status")
     if isinstance(status, str):
         s = status.lower()
-        if s in ("completed", "success", "succeeded"):
+        if s in ("completed", "success", "succeeded", "ready"):
             return "success"
         if s in ("failed", "error"):
             return "failed"

@@ -4,14 +4,29 @@ from uuid import UUID
 from datetime import datetime, timezone
 import asyncio
 
+from sqlalchemy import select, update
+
 from app.core.errors import ApiError
 from app.kernel.model_gateway import ModelGateway, ModelMessage, ModelRequest, ModelResponse
-from app.kernel.skill_gateway import ExecutionResult, SkillGateway
+from app.kernel.ports.skill_executor import ExecutionResult
+from app.kernel.skill_gateway import SkillGateway
+from app.kernel.task.service import append_task_event
+from app.models import Task, TaskCheckpoint
 from app.services.function_calling import ToolMapping, map_tool_calls
+from app.services.tool_mapping_builder import build_tool_mappings
 
 MAX_ROUNDS = 5
 MAX_TOOL_CALLS_PER_ROUND = 8
 MAX_TOOL_RESULT_CHARS = 20_000
+
+
+def _serialize_message(m: ModelMessage) -> dict:
+    return {"role": m.role, "content": m.content, "tool_call_id": m.tool_call_id, "tool_calls": m.tool_calls}
+
+
+def _brief(value: Any, limit: int = 1000) -> str:
+    text = value if isinstance(value, str) else str(value)
+    return text[:limit]
 
 
 @dataclass(frozen=True)
@@ -40,8 +55,15 @@ class AgentExecutionLoop:
         cancellation_event: asyncio.Event | None = None,
         deadline_at: datetime | None = None,
         delegation_depth: int = 0,
+        resume: dict | None = None,
     ) -> LoopResult:
-        messages = list(request.messages)
+        task = db.get(Task, task_id) if task_id else None
+        if resume is not None:
+            # 审批恢复续跑：从挂起时的上下文快照重建消息，回填已重放的工具结果后继续循环
+            messages = [ModelMessage(**m) for m in resume.get("messages", [])]
+            messages.append(ModelMessage("tool", resume.get("tool_result") or "", tool_call_id=resume.get("tool_call_id")))
+        else:
+            messages = list(request.messages)
         for round_number in range(1, MAX_ROUNDS + 1):
             if cancellation_event is not None and cancellation_event.is_set():
                 raise ApiError("AI_TASK_NOT_CANCELABLE", "task cancellation requested", 409)
@@ -61,6 +83,8 @@ class AgentExecutionLoop:
                 raise ApiError("AI_FUNCTION_CALL_INVALID", "too many tool calls in one round", 422)
             messages.append(ModelMessage("assistant", response.content, tool_calls=[call.__dict__ for call in response.tool_calls]))
             for call, (mapping, arguments) in zip(response.tool_calls, map_tool_calls(response.tool_calls, mappings), strict=True):
+                if task is not None:
+                    append_task_event(db, task, "TASK_TOOL_CALL", f"calling tool {call.name}", trace_id=request.trace_id, payload_summary={"tool_name": call.name, "arguments": _brief(arguments)})
                 if mapping.child_agent_version_id is not None:
                     # 委派调用：把任务交给子智能体独立执行，其最终回答作为工具结果返回
                     child_content = await self._run_child_agent(
@@ -74,6 +98,8 @@ class AgentExecutionLoop:
                         deadline_at=deadline_at,
                     )
                     messages.append(ModelMessage("tool", child_content, tool_call_id=call.id))
+                    if task is not None:
+                        append_task_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload_summary={"tool_name": call.name, "status": "SUCCEEDED", "result": _brief(child_content)})
                     continue
                 result: ExecutionResult = await self.skill_gateway.execute_async(
                     db,
@@ -89,13 +115,30 @@ class AgentExecutionLoop:
                 if result.status == "WAITING_HUMAN":
                     # 写入类工具触发人工审批：任务已暂停（checkpoint 挂起），循环立即结束；
                     # 审批通过后由任务队列重放该次工具调用，调用方据此返回等待审批状态。
+                    # 持久化执行循环上下文（消息快照 + 挂起工具调用 id），恢复时回填结果续跑至最终回复。
                     info = dict(result.data or {})
                     info.setdefault("tool_version_id", str(mapping.tool_version_id))
                     info["arguments"] = arguments
                     info["task_id"] = str(task_id) if task_id else None
+                    if task is not None:
+                        checkpoint = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == task_id))
+                        if checkpoint is not None:
+                            context = dict(checkpoint.execution_context or {})
+                            context["chat_context"] = {
+                                "messages": [_serialize_message(m) for m in messages],
+                                "tool_call_id": call.id,
+                            }
+                            # JSON 列用 update 强制落库（ORM 实例属性赋值在部分场景不触发变更跟踪）
+                            db.execute(update(TaskCheckpoint).where(TaskCheckpoint.id == checkpoint.id).values(execution_context=context))
+                            db.flush()
                     return LoopResult(response, messages, round_number, pending_confirmation=info)
                 tool_content = self._tool_result(result)
                 messages.append(ModelMessage("tool", tool_content, tool_call_id=call.id))
+                if task is not None:
+                    if result.status == "SUCCEEDED":
+                        append_task_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload_summary={"tool_name": call.name, "status": result.status, "result": _brief(result.data)})
+                    else:
+                        append_task_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} failed: {result.error_code}", trace_id=request.trace_id, payload_summary={"tool_name": call.name, "status": result.status, "error": result.error_message})
         raise ApiError("AI_MAX_ROUNDS_EXCEEDED", "maximum model execution rounds exceeded", 422)
 
     async def _run_child_agent(
@@ -114,7 +157,6 @@ class AgentExecutionLoop:
         import json
 
         from app.config import get_settings
-        from app.kernel.task.runtime import TaskRuntime
         from app.models import Agent, AgentVersion
 
         def _error(message: str) -> str:
@@ -131,7 +173,7 @@ class AgentExecutionLoop:
         child_agent = db.get(Agent, child.agent_id)
         if child_agent is None or child_agent.status != "ACTIVE":
             return _error("child agent is not available")
-        mappings, tools = TaskRuntime._build_tool_mappings(db, child, tenant_id)
+        mappings, tools = build_tool_mappings(db, child, tenant_id)
         # 与 chat 主路径一致：注入子智能体绑定 skill 的执行指令
         system_prompt = (child.config_snapshot or {}).get("system_prompt")
         if mappings:

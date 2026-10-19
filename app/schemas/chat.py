@@ -21,3 +21,5 @@ class ChatResponse(BaseModel):
     status: str
     # status=WAITING_HUMAN 时的审批挂起信息（confirmation_id/tool_name/arguments/task_id）
     confirmation: dict | None = None
+    # response_type=CHAT 时的回复文本：随响应直接返回，供前端流式渲染，无需二次拉取
+    assistant_content: str | None = None

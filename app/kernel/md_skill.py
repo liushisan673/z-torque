@@ -40,6 +40,36 @@ def _safe_path(root: Path, path: Path) -> Path:
     return resolved
 
 
+class MdSkillInstructionLoader:
+    """Load declarative SKILL.md content without executing embedded scripts."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root).resolve()
+
+    def load(self, relative_path: str) -> dict[str, Any]:
+        path = (self.root / relative_path).resolve()
+        if path.parent != self.root and self.root not in path.parents:
+            raise ApiError("AI_SKILL_PATH_INVALID", "skill path escapes configured root", 422)
+        if path.name != "SKILL.md" or not path.is_file():
+            raise ApiError("AI_SKILL_NOT_FOUND", "SKILL.md not found", 404)
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md requires YAML front matter", 422)
+        marker = text.find("\n---\n", 4)
+        if marker < 0:
+            raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md front matter is not closed", 422)
+        try:
+            metadata = yaml.safe_load(text[4:marker]) or {}
+        except yaml.YAMLError as exc:
+            raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md front matter is invalid", 422) from exc
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("name"), str) or not isinstance(metadata.get("description"), str):
+            raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md requires name and description", 422)
+        instructions = text[marker + 5:].strip()
+        if not instructions:
+            raise ApiError("AI_SKILL_CONTENT_INVALID", "SKILL.md instructions are empty", 422)
+        return {"metadata": metadata, "instructions": instructions, "path": str(path)}
+
+
 def parse_skill(root: str | Path, skill_dir: str | Path) -> MdSkillManifest:
     root_path = Path(root).resolve()
     directory = _safe_path(root_path, root_path / skill_dir)

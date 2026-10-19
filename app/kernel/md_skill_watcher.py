@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from app.db.session import SessionLocal
+from sqlalchemy.orm import Session
+
 from app.kernel.md_skill_registry import ScanResult, scan_directory
 
 logger = logging.getLogger("z_torque.md_skill")
@@ -22,11 +24,13 @@ class MdSkillScanState:
 
 
 class MdSkillWatcher:
-    def __init__(self, root: str | Path, tenant_id: UUID, *, interval_seconds: float = 15.0, enabled: bool = True) -> None:
+    def __init__(self, root: str | Path, tenant_id: UUID, *, interval_seconds: float = 15.0, enabled: bool = True, session_factory: Callable[[], Session] | None = None) -> None:
         self.root = Path(root)
         self.tenant_id = tenant_id
         self.interval_seconds = interval_seconds
         self.enabled = enabled
+        # 会话工厂由装配根注入（阶段00 §3.8：内核不直接依赖具体 Session 实现）
+        self.session_factory = session_factory
         self.state = MdSkillScanState()
         self._task: asyncio.Task[None] | None = None
         self._fingerprint: tuple[tuple[str, int, int], ...] = ()
@@ -38,9 +42,11 @@ class MdSkillWatcher:
 
     async def scan(self) -> ScanResult:
         from datetime import datetime, timezone
+        if self.session_factory is None:
+            raise RuntimeError("MdSkillWatcher requires session_factory (injected from assembly)")
         self.state.running = True
         self.state.last_started_at = datetime.now(timezone.utc).isoformat()
-        db = SessionLocal()
+        db = self.session_factory()
         try:
             result = scan_directory(db, tenant_id=self.tenant_id, root=self.root)
             db.commit()

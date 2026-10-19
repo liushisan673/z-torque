@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { request, ApiRequestError } from "../services/api";
-import type { Agent, AgentVersion, BoundSkill } from "../types";
+import { request } from "../services/api";
+import { errorText } from "../services/errorText";
+import type { Agent, AgentVersion, AgentVersionArchiveCheck, BoundSkill } from "../types";
 import type { ModelResource } from "../types";
 import type { Task } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
+import { useToast } from "../components/Toast";
+import { GuideCallout } from "../components/GuideCallout";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useAuth } from "../stores/auth";
 
 // 已发布 SkillVersion（用于绑定下拉选项）
@@ -52,6 +56,17 @@ function skillMode(scriptSource: string | null) {
   return scriptSource && scriptSource.trim().length > 0 ? "script" : "instruction";
 }
 
+// 版本归档阻断原因：按后端错误码映射中文文案（避免英文 message 直接外露）
+const ARCHIVE_BLOCK_TEXT: Record<string, string> = {
+  AI_AGENT_VERSION_IS_CURRENT: "当前发布版本不可归档，请先发布其他版本",
+  AI_AGENT_VERSION_IN_USE: "该版本仍有任务在执行，请等待结束或取消后再归档",
+  AI_AGENT_VERSION_REFERENCED: "该版本仍被其他已发布版本的委派白名单引用",
+};
+
+function archiveBlockText(reason: { code: string; message: string }): string {
+  return ARCHIVE_BLOCK_TEXT[reason.code] ?? reason.message;
+}
+
 // 时间格式化（保持与 Chat 页一致）
 function fmtTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -77,6 +92,8 @@ export function AgentsPage() {
   const [loadingSkills, setLoadingSkills] = useState(false);
   const [latestTask, setLatestTask] = useState<Task | null>(null);
   const [models, setModels] = useState<ModelResource[]>([]);
+  // 发布预检：缺项时先展示检查结果，允许「仍要发布」强制跳过
+  const [publishCheck, setPublishCheck] = useState<{ agentId: string; version: AgentVersion; missing: string[] } | null>(null);
 
   const [filter, setFilter] = useState<Filter>("all");
   const [keyword, setKeyword] = useState("");
@@ -102,6 +119,13 @@ export function AgentsPage() {
   const [editMaxChild, setEditMaxChild] = useState("");
   const [editChildAgents, setEditChildAgents] = useState<string[]>([]);
   const [childOptions, setChildOptions] = useState<{ version_id: string; label: string }[]>([]);
+  // 委派白名单只读展示用：version_id → 「智能体名 · vN」可读标签
+  const [childLabels, setChildLabels] = useState<Record<string, string>>({});
+  const { push: toast } = useToast();
+  // 危险操作（归档 / 级联删除 / 版本归档）统一走 ConfirmDialog，避免 window.confirm
+  const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  const [confirmVersionArchive, setConfirmVersionArchive] = useState<{ agentId: string; versionId: string; versionLabel: string; warnings: string[] } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -110,7 +134,7 @@ export function AgentsPage() {
       const data = await request<Agent[]>(`/api/z-torque/agents${showArchived ? "?include_archived=true" : ""}`);
       setAgents(data);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载失败");
+      setError(errorText(err, "加载失败"));
     } finally {
       setLoading(false);
     }
@@ -119,6 +143,13 @@ export function AgentsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // 默认展示列表第一项，避免主区空白（仅当前无选中时生效；删除当前选中后自动补选）
+  useEffect(() => {
+    if (loading || selectedId) return;
+    if (agents.length > 0) void openDetail(agents[0]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, agents, selectedId]);
 
   // 加载模型列表（用于配置 Tab 模型绑定下拉）
   useEffect(() => {
@@ -174,7 +205,7 @@ export function AgentsPage() {
         setLatestTask(null);
       }
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载版本失败");
+      setError(errorText(err, "加载版本失败"));
     } finally {
       setLoadingVersions(false);
     }
@@ -186,7 +217,7 @@ export function AgentsPage() {
       const list = await request<BoundSkill[]>(`/api/z-torque/agents/${agentId}/versions/${versionId}/skills`);
       setBoundSkills(list);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载技能失败");
+      setError(errorText(err, "加载技能失败"));
       setBoundSkills([]);
     } finally {
       setLoadingSkills(false);
@@ -205,9 +236,10 @@ export function AgentsPage() {
       setCreateOpen(false);
       setName("");
       setDescription("");
+      toast("success", "智能体已创建");
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建失败");
+      setError(errorText(err, "创建失败"));
     } finally {
       setBusy(false);
     }
@@ -218,41 +250,46 @@ export function AgentsPage() {
     setError(null);
     try {
       await request(`/api/z-torque/agents/${id}/copy`, { method: "POST" });
+      toast("success", "已复制智能体");
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "复制失败");
+      setError(errorText(err, "复制失败"));
     } finally {
       setBusy(false);
     }
   }
 
   async function archiveAgent(id: string) {
-    if (!window.confirm("确定归档该智能体吗？")) return;
+    if (!confirmArchive || confirmArchive.id !== id) return;
     setBusy(true);
     setError(null);
     try {
       await request(`/api/z-torque/agents/${id}/archive`, { method: "POST" });
+      toast("success", "已归档");
       await load();
       if (selectedId === id) setSelectedId(null);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "归档失败");
+      setError(errorText(err, "归档失败"));
     } finally {
       setBusy(false);
+      setConfirmArchive(null);
     }
   }
 
   async function deleteAgent(id: string) {
-    if (!window.confirm("确定删除该智能体吗？其全部版本与技能绑定将被级联删除，且不可恢复。")) return;
+    if (!confirmDelete || confirmDelete.id !== id) return;
     setBusy(true);
     setError(null);
     try {
       await request(`/api/z-torque/agents/${id}`, { method: "DELETE" });
       if (selectedId === id) setSelectedId(null);
       await load();
+      toast("success", "已删除");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "删除失败");
+      setError(errorText(err, "删除失败"));
     } finally {
       setBusy(false);
+      setConfirmDelete(null);
     }
   }
 
@@ -274,24 +311,47 @@ export function AgentsPage() {
       setEditOpen(false);
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "保存失败");
+      setError(errorText(err, "保存失败"));
     } finally {
       setBusy(false);
     }
   }
 
+  // 版本归档：先预检（运行中任务 / 当前发布版本 / 委派引用）→ 阻断则顶部提示，通过则确认后归档
   async function archiveVersion(agentId: string, versionId: string) {
-    if (!window.confirm("确定归档该版本吗？")) return;
     setBusy(true);
     setError(null);
     try {
-      await request(`/api/z-torque/agents/${agentId}/versions/${versionId}/archive`, { method: "POST" });
+      const check = await request<AgentVersionArchiveCheck>(`/api/z-torque/agents/${agentId}/versions/${versionId}/archive-check`);
+      if (!check.can_archive) {
+        setError(check.reasons.map(archiveBlockText).join("；"));
+        return;
+      }
+      const warnings = check.warnings.map((w) => w.message);
+      const versionLabel = `v${check.referenced_by?.[0]?.version_number ?? ""}`;
+      setConfirmVersionArchive({ agentId, versionId, versionLabel, warnings });
+    } catch (err) {
+      setError(errorText(err, "归档版本预检失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 版本归档确认后的实际归档（与 archiveVersion 解耦，避免嵌套确认窗）
+  async function confirmArchiveVersion() {
+    if (!confirmVersionArchive) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/agents/${confirmVersionArchive.agentId}/versions/${confirmVersionArchive.versionId}/archive`, { method: "POST" });
+      toast("success", "版本已归档");
       if (selected) await openDetail(selected);
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "归档版本失败");
+      setError(errorText(err, "归档版本失败"));
     } finally {
       setBusy(false);
+      setConfirmVersionArchive(null);
     }
   }
 
@@ -305,8 +365,9 @@ export function AgentsPage() {
       });
       if (selected) await openDetail(selected);
       void openEditor(agentId, v);
+      toast("success", "已创建草稿版本，请编辑后发布");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "创建版本失败");
+      setError(errorText(err, "创建版本失败"));
     } finally {
       setBusy(false);
     }
@@ -349,6 +410,7 @@ export function AgentsPage() {
         }
       }
       setChildOptions(result);
+      setChildLabels(Object.fromEntries(result.map((o) => [o.version_id, o.label])));
     } catch {
       setChildOptions([]);
     }
@@ -375,7 +437,7 @@ export function AgentsPage() {
       await loadBoundSkills(agentId, version.id);
       void loadChildOptions(agentId);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "加载技能失败");
+      setError(errorText(err, "加载技能失败"));
       setPublishedSkills([]);
     }
   }
@@ -401,8 +463,9 @@ export function AgentsPage() {
       setEditing({ agentId: editing.agentId, version: v });
       if (selected) await openDetail(selected);
       setError(null);
+      toast("success", "配置已保存");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "保存失败");
+      setError(errorText(err, "保存失败"));
     } finally {
       setBusy(false);
     }
@@ -420,13 +483,28 @@ export function AgentsPage() {
       await loadBoundSkills(editing.agentId, editing.version.id);
       setPickSkillId("");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "绑定技能失败");
+setError(errorText(err, "绑定技能失败"));
     } finally {
       setBusy(false);
     }
   }
 
-  async function publishVersion(agentId: string, versionId: string) {
+  // 发布前预检：把"对话跑不起来"的问题拦在发布前（可强制跳过）
+  function publishVersion(agentId: string, version: AgentVersion) {
+    const snapshot = version.config_snapshot ?? {};
+    const missing: string[] = [];
+    const model = typeof snapshot.model === "string" ? snapshot.model.trim() : "";
+    if (!model) missing.push("未绑定模型——对话将无法调用大模型");
+    const sp = typeof snapshot.system_prompt === "string" ? snapshot.system_prompt.trim() : "";
+    if (!sp) missing.push("系统规则为空——智能体将缺少人设与行为约束");
+    if (missing.length > 0) {
+      setPublishCheck({ agentId, version, missing });
+      return;
+    }
+    void doPublish(agentId, version.id);
+  }
+
+  async function doPublish(agentId: string, versionId: string) {
     setBusy(true);
     setError(null);
     try {
@@ -434,8 +512,9 @@ export function AgentsPage() {
       setEditing(null);
       if (selected) await openDetail(selected);
       await load();
+      toast("success", "版本已发布，可到「会话」开始对话");
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "发布失败");
+      setError(errorText(err, "发布失败"));
     } finally {
       setBusy(false);
     }
@@ -473,7 +552,7 @@ export function AgentsPage() {
       return (
         <>
           <button className="btn btn-secondary btn-sm" onClick={() => void openDetail(selected)}>查看快照</button>
-          <button className="agent-btn-danger-outline" disabled={busy} onClick={() => void deleteAgent(selected.id)}>删除</button>
+          <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmDelete({ id: selected.id, name: selected.name })}>删除</button>
         </>
       );
     }
@@ -482,7 +561,7 @@ export function AgentsPage() {
         <>
           <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEdit(selected)}>继续编辑</button>
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建版本</button>
-          <button className="agent-btn-danger-outline" disabled={busy} onClick={() => void archiveAgent(selected.id)}>归档</button>
+          <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>归档</button>
         </>
       );
     }
@@ -490,8 +569,8 @@ export function AgentsPage() {
     return (
       <>
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEdit(selected)}>编辑信息</button>
-        <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>发布新版本</button>
-        <button className="agent-btn-danger-outline" disabled={busy} onClick={() => void archiveAgent(selected.id)}>归档</button>
+        <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>
+        <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>归档</button>
       </>
     );
   }, [selected, busy]);
@@ -552,8 +631,13 @@ export function AgentsPage() {
               <Loading />
             ) : filteredAgents.length === 0 ? (
               <div className="agent-detail-empty">
-                <h2>暂无智能体</h2>
-                <span>请先创建或调整筛选条件</span>
+                <GuideCallout
+                  title="还没有智能体"
+                  why="创建后需绑定模型并发布版本，才能在会话中使用"
+                  actionLabel="新建智能体"
+                  onAction={() => { setName(""); setDescription(""); setCreateOpen(true); }}
+                  hint="推荐路径：新建智能体 → 新建草稿版本 → 绑定模型 → 发布"
+                />
               </div>
             ) : (
               filteredAgents.map((a) => {
@@ -730,7 +814,7 @@ export function AgentsPage() {
                     ) : (
                       <div className="agent-alert agent-alert-warn">
                         <span>⚠</span>
-                        <span>当前查看的是已发布版本的只读快照。请先「发布新版本」创建草稿后再修改配置。</span>
+                        <span>当前查看的是已发布版本的只读快照。请先「新建草稿版本」创建草稿后再修改配置。</span>
                       </div>
                     )}
 
@@ -745,12 +829,17 @@ export function AgentsPage() {
                             disabled={!editing || busy}
                           >
                             <option value="">未指定</option>
-                            {models.map((m) => (
-                              <option key={m.id} value={m.model_identifier || m.id}>
-                                {m.name}{m.model_identifier ? `（${m.model_identifier}）` : ""}
-                              </option>
-                            ))}
+                            {models.map((m) => {
+                              // 健康标注：供应商缺密钥的模型选了也跑不通，直接在选项里提示
+                              const noSecret = m.provider ? m.provider.secret_configured === false : false;
+                              return (
+                                <option key={m.id} value={m.model_identifier || m.id}>
+                                  {m.name}{m.model_identifier ? `（${m.model_identifier}）` : ""}{noSecret ? " · 密钥未配置" : ""}
+                                </option>
+                              );
+                            })}
                           </select>
+                          <div className="field-help">带「密钥未配置」标记的模型暂不可用，请先到「模型管理」完成密钥配置。</div>
                         </div>
                         <div className="agent-field">
                           <label>接入点</label>
@@ -836,7 +925,11 @@ export function AgentsPage() {
                           ) : (
                             <input
                               type="text"
-                              value={(viewVersion?.allowed_child_agent_versions ?? []).join("、") || "—"}
+                              value={
+                                (viewVersion?.allowed_child_agent_versions ?? [])
+                                  .map((id) => childLabels[id] ?? id)
+                                  .join("、") || "—"
+                              }
                               disabled
                             />
                           )}
@@ -848,7 +941,7 @@ export function AgentsPage() {
                     {editing && (
                       <div className="agent-section" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                         <button className="btn btn-secondary" disabled={busy} onClick={() => void saveVersion()}>保存草稿</button>
-                        <button className="btn btn-primary" disabled={busy} onClick={() => void publishVersion(editing.agentId, editing.version.id)}>发布新版本</button>
+                        <button className="btn btn-primary" disabled={busy} onClick={() => publishVersion(editing.agentId, editing.version)}>发布新版本</button>
                         <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
                       </div>
                     )}
@@ -946,6 +1039,8 @@ export function AgentsPage() {
                         <div className="agent-version-list">
                           {versions.map((v) => {
                             const isCurrent = currentPublishedVersion?.id === v.id;
+                            const readOnly = sourceOf(selected, meId) === "official" || selected.status === "ARCHIVED";
+                            const archived = v.status === "ARCHIVED";
                             return (
                               <div key={v.id} className={`agent-version-item${isCurrent ? " current" : ""}`}>
                                 <div className="v-badge">v{v.version_number}</div>
@@ -963,14 +1058,21 @@ export function AgentsPage() {
                                   </div>
                                 </div>
                                 <div className="v-actions">
-                                  {v.status === "DRAFT" ? (
+                                  {v.status === "DRAFT" && (
                                     <>
                                       <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void openEditor(selected.id, v)}>编辑</button>
-                                      <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void publishVersion(selected.id, v.id)}>发布</button>
-                                      <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void archiveVersion(selected.id, v.id)}>归档</button>
+                                      <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => publishVersion(selected.id, v)}>发布</button>
                                     </>
-                                  ) : (
+                                  )}
+                                  {v.status !== "DRAFT" && (
                                     <button className="btn btn-secondary btn-sm" onClick={() => void openEditor(selected.id, v)}>查看快照</button>
+                                  )}
+                                  {!readOnly && !archived && (
+                                    isCurrent ? (
+                                      <button className="btn btn-secondary btn-sm" disabled title="当前发布版本不可归档，请先发布其他版本">归档</button>
+                                    ) : (
+                                      <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void archiveVersion(selected.id, v.id)}>归档</button>
+                                    )
                                   )}
                                 </div>
                               </div>
@@ -1034,6 +1136,75 @@ export function AgentsPage() {
           <textarea className="textarea" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
         </div>
       </Modal>
+
+      {/* 危险操作三连：归档 / 级联删除 / 版本归档（含告警） */}
+      <ConfirmDialog
+        open={confirmArchive !== null}
+        title="归档该智能体？"
+        confirmText="归档"
+        busy={busy}
+        onCancel={() => setConfirmArchive(null)}
+        onConfirm={() => { if (confirmArchive) void archiveAgent(confirmArchive.id); }}
+      >
+        <p>智能体「{confirmArchive?.name ?? ""}」将进入「已归档」状态，不再被会话选用，但已发布版本与配置都会保留。</p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title="删除该智能体？"
+        confirmText="删除"
+        destructive
+        requireText={confirmDelete?.name ?? ""}
+        requireLabel="请输入智能体名称以确认删除"
+        busy={busy}
+        onCancel={() => setConfirmDelete(null)}
+        onConfirm={() => { if (confirmDelete) void deleteAgent(confirmDelete.id); }}
+      >
+        <p>智能体「{confirmDelete?.name ?? ""}」的<strong>全部版本与技能绑定将被级联删除</strong>，且不可恢复。如不再使用，建议改用「归档」。</p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmVersionArchive !== null}
+        title="归档该版本？"
+        confirmText="归档"
+        busy={busy}
+        onCancel={() => setConfirmVersionArchive(null)}
+        onConfirm={() => void confirmArchiveVersion()}
+      >
+        <p>归档后该版本不再被任何智能体选用，但代码与配置保留。</p>
+        {confirmVersionArchive && confirmVersionArchive.warnings.length > 0 && (
+          <ul style={{ margin: "8px 0 0 18px", padding: 0, color: "var(--warning, #b45309)" }}>
+            {confirmVersionArchive.warnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        )}
+      </ConfirmDialog>
+
+      {/* 发布预检确认：缺项清单 + 强制发布出口 */}
+      <ConfirmDialog
+        open={publishCheck !== null}
+        title="发布前检查未通过"
+        confirmText="仍要发布"
+        cancelText="返回修改"
+        busy={busy}
+        onCancel={() => setPublishCheck(null)}
+        onConfirm={() => {
+          if (publishCheck) {
+            const { agentId, version } = publishCheck;
+            setPublishCheck(null);
+            void doPublish(agentId, version.id);
+          }
+        }}
+      >
+        <p>以下配置项缺失，发布后对话可能无法正常工作：</p>
+        <ul style={{ margin: "8px 0", paddingLeft: 20 }}>
+          {publishCheck?.missing.map((m) => (
+            <li key={m}>{m}</li>
+          ))}
+        </ul>
+        <p style={{ color: "var(--text-muted)", fontSize: 13 }}>可先「返回修改」补全配置；确认无误也可仍按当前草稿发布。</p>
+      </ConfirmDialog>
     </div>
   );
 }

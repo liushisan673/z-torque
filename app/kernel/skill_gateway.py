@@ -1,12 +1,7 @@
 import asyncio
-import json
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 from uuid import UUID
 
-import httpx
-import yaml
 from jsonschema import ValidationError, validate
 from sqlalchemy.orm import Session
 
@@ -15,6 +10,8 @@ from app.kernel.audit.service import record_audit
 from app.kernel.authz import PermissionChecker
 from app.kernel.md_skill import MdSkillManifest
 from app.kernel.md_skill_runtime import MdSkillRuntime
+from app.kernel.ports.connector import McpConnector
+from app.kernel.ports.skill_executor import ExecutionResult, ToolExecutor
 from app.kernel.skill_confirmation import pause_task_for_confirmation
 from app.models import (
     Connector,
@@ -30,88 +27,6 @@ from app.models import (
 _TOOL_TIMEOUT_MESSAGE = "tool execution timed out"
 _TOOL_FAILURE_MESSAGE = "tool execution failed"
 _PERMISSION_MESSAGE = "required permissions are missing"
-_MCP_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
-
-
-@dataclass(frozen=True)
-class ExecutionResult:
-    status: str
-    data: Any = None
-    error_code: str | None = None
-    error_message: str | None = None
-    requires_confirmation: bool = False
-
-
-class ToolExecutor(Protocol):
-    tool_type: str
-
-    def execute(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float) -> ExecutionResult: ...
-
-
-class AsyncToolExecutor(Protocol):
-    async def execute_async(self, config: dict[str, Any], arguments: dict[str, Any]) -> ExecutionResult: ...
-
-
-class MockExecutor:
-    tool_type = "MOCK"
-
-    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
-        return ExecutionResult(status="SUCCEEDED", data={"echo": arguments, "config": config})
-
-
-class McpExecutor:
-    tool_type = "MCP"
-
-    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
-        return ExecutionResult(status="FAILED", error_code="AI_MCP_UNAVAILABLE", error_message="MCP connector is not connected and negotiated")
-
-
-class MdSkillScriptExecutor:
-    tool_type = "MD_SCRIPT"
-
-    def __init__(self) -> None:
-        from app.config import get_settings
-        settings = get_settings()
-        self.runtime = MdSkillRuntime(settings.md_skills_dir, enabled=settings.md_skill_script_enabled, timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output)
-
-    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
-        return ExecutionResult(status="FAILED", error_code="AI_CAPABILITY_UNAVAILABLE", error_message="MD-Skill scripts require the controlled async runtime")
-
-
-class MdSkillInstructionLoader:
-    """Load declarative SKILL.md content without executing embedded scripts."""
-
-    def __init__(self, root: str | Path) -> None:
-        self.root = Path(root).resolve()
-
-    def load(self, relative_path: str) -> dict[str, Any]:
-        path = (self.root / relative_path).resolve()
-        if path.parent != self.root and self.root not in path.parents:
-            raise ApiError("AI_SKILL_PATH_INVALID", "skill path escapes configured root", 422)
-        if path.name != "SKILL.md" or not path.is_file():
-            raise ApiError("AI_SKILL_NOT_FOUND", "SKILL.md not found", 404)
-        text = path.read_text(encoding="utf-8")
-        if not text.startswith("---\n"):
-            raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md requires YAML front matter", 422)
-        marker = text.find("\n---\n", 4)
-        if marker < 0:
-            raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md front matter is not closed", 422)
-        try:
-            metadata = yaml.safe_load(text[4:marker]) or {}
-        except yaml.YAMLError as exc:
-            raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md front matter is invalid", 422) from exc
-        if not isinstance(metadata, dict) or not isinstance(metadata.get("name"), str) or not isinstance(metadata.get("description"), str):
-            raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md requires name and description", 422)
-        instructions = text[marker + 5:].strip()
-        if not instructions:
-            raise ApiError("AI_SKILL_CONTENT_INVALID", "SKILL.md instructions are empty", 422)
-        return {"metadata": metadata, "instructions": instructions, "path": str(path)}
-
-
-class McpConnector(Protocol):
-    async def negotiate(self) -> None: ...
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any: ...
-    async def close(self) -> None: ...
 
 
 class NegotiatedMcpExecutor:
@@ -140,104 +55,13 @@ class NegotiatedMcpExecutor:
             return ExecutionResult(status="FAILED", error_code="AI_MCP_TOOL_CALL_FAILED", error_message=str(exc))
 
 
-class StreamableHttpMcpConnector:
-    protocol_version = "2025-06-18"
-
-    def __init__(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float = 30, max_response_bytes: int = 1_000_000, transport: httpx.AsyncBaseTransport | None = None) -> None:
-        self.endpoint = endpoint
-        self.allowed_hosts = set(allowed_hosts)
-        self.timeout_seconds = timeout_seconds
-        self.max_response_bytes = max_response_bytes
-        self.session_id: str | None = None
-        self._request_id = 0
-        self.client = httpx.AsyncClient(follow_redirects=False, timeout=timeout_seconds, transport=transport)
-
-    async def negotiate(self) -> None:
-        result = await self._request("initialize", {"protocolVersion": self.protocol_version, "capabilities": {}, "clientInfo": {"name": "z-torque", "version": "0.1.0"}}, include_session=False)
-        version = result.get("protocolVersion")
-        if version != self.protocol_version:
-            raise McpProtocolError(f"unsupported MCP protocol version: {version}")
-        await self._notification("notifications/initialized")
-
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        return await self._request("tools/call", {"name": name, "arguments": arguments})
-
-    async def list_tools(self) -> Any:
-        return await self._request("tools/list", {})
-
-    async def close(self) -> None:
-        if self.session_id:
-            try:
-                await self.client.delete(self.endpoint, headers={"Mcp-Session-Id": self.session_id})
-            finally:
-                self.session_id = None
-        await self.client.aclose()
-
-    async def _notification(self, method: str) -> None:
-        await self._send({"jsonrpc": "2.0", "method": method}, expect_response=False)
-
-    async def _request(self, method: str, params: dict[str, Any], include_session: bool = True) -> dict[str, Any]:
-        self._request_id += 1
-        response = await self._send({"jsonrpc": "2.0", "id": self._request_id, "method": method, "params": params}, expect_response=True, include_session=include_session)
-        if "error" in response:
-            raise McpProtocolError(str(response["error"]))
-        return response.get("result", {})
-
-    async def _send(self, payload: dict[str, Any], *, expect_response: bool, include_session: bool = True) -> dict[str, Any]:
-        from urllib.parse import urlparse
-        parsed = urlparse(self.endpoint)
-        # 回环地址允许 http（本地联调）；其余目标强制 https 且必须在 allowed_hosts 白名单内
-        if parsed.hostname in _MCP_LOOPBACK_HOSTS:
-            if parsed.scheme not in ("https", "http"):
-                raise McpTransportError("MCP endpoint is not allowed")
-        elif parsed.scheme != "https" or parsed.hostname not in self.allowed_hosts:
-            raise McpTransportError("MCP endpoint is not allowed")
-        headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json", "MCP-Protocol-Version": self.protocol_version}
-        if include_session and self.session_id:
-            headers["Mcp-Session-Id"] = self.session_id
-        try:
-            response = await self.client.post(self.endpoint, headers=headers, json=payload)
-            if response.status_code >= 400:
-                raise McpTransportError(f"MCP HTTP status {response.status_code}")
-            session_id = response.headers.get("Mcp-Session-Id")
-            if session_id:
-                self.session_id = session_id
-            if not expect_response:
-                return {}
-            if len(response.content) > self.max_response_bytes:
-                raise McpTransportError("MCP response exceeds configured limit")
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-            if content_type == "application/json":
-                return response.json()
-            if content_type == "text/event-stream":
-                return self._parse_sse(response.text)
-            raise McpTransportError("unsupported MCP response content type")
-        except asyncio.CancelledError:
-            raise
-        except (httpx.TimeoutException, httpx.HTTPError, json.JSONDecodeError) as exc:
-            raise McpTransportError(str(exc)) from exc
-
-    @staticmethod
-    def _parse_sse(body: str) -> dict[str, Any]:
-        for block in body.split("\n\n"):
-            data = "\n".join(line[5:].lstrip() for line in block.splitlines() if line.startswith("data:"))
-            if data:
-                return json.loads(data)
-        raise McpTransportError("MCP SSE response did not contain JSON-RPC data")
-
-
-class McpTransportError(Exception):
-    pass
-
-
-class McpProtocolError(Exception):
-    pass
-
-
 class SkillGateway:
-    def __init__(self, permission_checker: PermissionChecker | None = None) -> None:
+    def __init__(self, permission_checker: PermissionChecker | None = None, *, http_connector_factory: Any = None, stdio_registry: Any = None) -> None:
         self.permission_checker = permission_checker or PermissionChecker()
         self._executors: dict[str, ToolExecutor] = {}
+        # 连接器传输由 connector Port 插件注入（内核不感知实现，阶段00 §3.8 约束 1）
+        self.http_connector_factory = http_connector_factory
+        self.stdio_registry = stdio_registry
         from app.config import get_settings
         settings = get_settings()
         self._md_runtime = MdSkillRuntime(settings.md_skills_dir, enabled=settings.md_skill_script_enabled, timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output)
@@ -245,7 +69,19 @@ class SkillGateway:
     def register(self, executor: ToolExecutor) -> None:
         self._executors[executor.tool_type] = executor
 
-    async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float) -> ExecutionResult:
+    @staticmethod
+    def _resolve_secret_token(secret_ref: str | None) -> str | None | ExecutionResult:
+        """解密 Secret URI 为连接器凭证；失败返回 FAILED 结果（含 503 语义错误码）。"""
+        if not secret_ref:
+            return None
+        from app.security.secret_store import SecretStore, SecretStoreError
+
+        try:
+            return SecretStore().decrypt(secret_ref.removeprefix("secret://"))
+        except SecretStoreError:
+            return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_SECRET_INVALID", error_message="连接器凭证无法解密")
+
+    async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float, *, secret_ref: str | None = None) -> ExecutionResult:
         from app.config import get_settings
 
         transport = str(config.get("transport", "http")).lower()
@@ -254,10 +90,15 @@ class SkillGateway:
             endpoint = config.get("endpoint")
             if not isinstance(endpoint, str):
                 return ExecutionResult(status="FAILED", error_code="AI_MCP_CONFIG_INVALID", error_message="MCP endpoint is required")
+            if self.http_connector_factory is None:
+                return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message="MCP HTTP connector is unavailable")
             settings = get_settings()
-            connector = StreamableHttpMcpConnector(endpoint, allowed_hosts=settings.mcp_allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes)
+            auth_token = self._resolve_secret_token(secret_ref)
+            if isinstance(auth_token, ExecutionResult):
+                return auth_token
+            connector = self.http_connector_factory(endpoint, allowed_hosts=settings.mcp_allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token)
         elif transport == "stdio":
-            registry = getattr(self, "stdio_registry", None)
+            registry = self.stdio_registry
             server_name = config.get("server_name")
             if registry is None or not isinstance(server_name, str):
                 return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message="MCP stdio server is not registered")
@@ -488,7 +329,7 @@ class SkillGateway:
                 return result
             executor = self._executors.get(owner.tool_type)
             if owner.tool_type == "MCP":
-                result = await self._execute_mcp(tool.config_snapshot, arguments, self._remaining_timeout(timeout_seconds, deadline_at))
+                result = await self._execute_mcp(tool.config_snapshot, arguments, self._remaining_timeout(timeout_seconds, deadline_at), secret_ref=connector.secret_ref if connector else None)
                 self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
                 if result.status != "SUCCEEDED":
                     return result

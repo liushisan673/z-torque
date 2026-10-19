@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import delete
 
 from app.db.session import SessionLocal
-from app.kernel.ports.queue_driver import QueueDriver
+from app.kernel.ports.queue_driver import InMemoryQueueDriver
 from app.kernel.task.dispatcher import OutboxDispatcher
 from app.kernel.task.runtime import TaskRuntime
 from app.kernel.task.service import create_task, transition_task
@@ -53,7 +53,7 @@ def setup_task():
 @pytest.mark.asyncio
 async def test_outbox_dispatch_marks_sent_and_queues_task():
     task_id = setup_task()
-    queue = QueueDriver()
+    queue = InMemoryQueueDriver()
     dispatcher = OutboxDispatcher(queue)
     with SessionLocal() as db:
         assert await dispatcher.dispatch_once(db)
@@ -86,7 +86,7 @@ def test_recovery_requeues_running_task_and_writes_outbox():
         transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
         transition_task(db, task, TaskStatus.RUNNING, "TASK_STARTED", "started")
     import asyncio
-    asyncio.run(TaskRuntime().recover())
+    asyncio.run(TaskRuntime(session_factory=SessionLocal).recover())
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         assert task.status == TaskStatus.QUEUED
