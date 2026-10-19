@@ -371,7 +371,8 @@ export interface Connector {
   created_at?: string | null;
 }
 
-// POST /connectors/{id}/test 返回（DB 类型额外返回 database 与库内表清单；MCP 类型额外返回 endpoint 与发现的工具）
+// POST /connectors/{id}/test 返回
+// DB 额外返回 database + tables；MCP 额外返回 endpoint + tools；REST 额外返回真实 HTTP 探测结果
 export interface ConnectorTestResult {
   connector_id: string;
   status: string;
@@ -383,6 +384,34 @@ export interface ConnectorTestResult {
   tables?: string[];
   endpoint?: string;
   tools?: ConnectorDiscoveredToolSummary[];
+  // REST 真实探测结果：有 http_status 才代表真的发起了网络请求
+  http_status?: number;
+  response_method?: string;
+  auth_used?: boolean;
+  server?: string;
+  content_type?: string;
+  // partial=true 表示"部分成功"：要么没发请求（缺 base_url），要么被鉴权拒绝
+  partial?: boolean;
+  warning?: string;
+  // 内网地址探测会强制绕过本机 http_proxy，否则代理会回一个误导性的 502
+  proxy_bypassed?: boolean;
+}
+
+// POST /connectors/{id}/tools/import-openapi 返回（OpenAPI 3.x 批量导入）
+export interface ConnectorOpenapiImportResult {
+  connector_id: string;
+  registered: ConnectorOpenapiImportedTool[];
+  skipped: { name: string; reason: string }[];
+  total: number;
+}
+
+export interface ConnectorOpenapiImportedTool {
+  tool_id: string;
+  tool_version_id: string;
+  operation_id: string;
+  method: string;
+  path: string;
+  name: string;
 }
 
 // MCP /test 与 /discover 返回的工具摘要

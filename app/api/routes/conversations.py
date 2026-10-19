@@ -23,7 +23,7 @@ def conv(db, user, ident):
     if not value: raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
     return value
 
-@router.post("")
+@router.post("", summary="创建会话")
 async def create(payload: ConversationCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = select(Agent).where(
         Agent.tenant_id == user.tenant_id,
@@ -41,7 +41,7 @@ async def create(payload: ConversationCreate, request: Request, user: User = Dep
     db.add(item); db.commit(); db.refresh(item)
     return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
 
-@router.get("")
+@router.get("", summary="获取会话列表")
 async def list_all(
     request: Request,
     include_archived: bool = Query(default=False),
@@ -55,34 +55,34 @@ async def list_all(
     rows = db.scalars(query.order_by(Conversation.created_at.desc())).all()
     return success_response(request, [ConversationResponse.model_validate(x).model_dump(mode="json") for x in rows])
 
-@router.get("/{conversation_id}")
+@router.get("/{conversation_id}", summary="获取会话详情")
 async def detail(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return success_response(request, ConversationResponse.model_validate(conv(db, user, conversation_id)).model_dump(mode="json"))
 
-@router.patch("/{conversation_id}")
+@router.patch("/{conversation_id}", summary="重命名会话")
 async def update(conversation_id: UUID, payload: ConversationUpdate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = conv(db, user, conversation_id); item.title = payload.title; db.commit(); db.refresh(item)
     return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
 
-@router.post("/{conversation_id}/archive")
+@router.post("/{conversation_id}/archive", summary="归档会话")
 async def archive(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = conv(db, user, conversation_id); item.status = "ARCHIVED"; item.archived_at = datetime.now(timezone.utc); db.commit()
     return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
 
-@router.post("/{conversation_id}/restore")
+@router.post("/{conversation_id}/restore", summary="恢复会话")
 async def restore(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # 归档可恢复：与智能体/技能不同，会话是用户的"工作现场"，误归档必须能找回
     item = conv(db, user, conversation_id); item.status = "ACTIVE"; item.archived_at = None; db.commit()
     return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
 
-@router.get("/{conversation_id}/messages")
+@router.get("/{conversation_id}/messages", summary="获取会话消息列表")
 async def messages(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     conv(db, user, conversation_id)
     rows = db.scalars(select(Message).where(Message.tenant_id == user.tenant_id, Message.conversation_id == conversation_id).order_by(Message.created_at, Message.id)).all()
     return success_response(request, [MessageResponse.model_validate(x).model_dump(mode="json") for x in rows])
 
 
-@router.get("/{conversation_id}/memory")
+@router.get("/{conversation_id}/memory", summary="获取会话记忆")
 async def memory(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     conversation = conv(db, user, conversation_id)
     if should_summarize_for_idle(conversation) and getattr(request.app.state, "model_gateway", None) is not None:
@@ -91,7 +91,7 @@ async def memory(conversation_id: UUID, request: Request, user: User = Depends(g
     return success_response(request, {"summary": item.summary, "source_start": item.source_start, "source_end": item.source_end, "updated_at": iso_utc(item.updated_at)} if item else None)
 
 
-@router.post("/{conversation_id}/memory/summarize")
+@router.post("/{conversation_id}/memory/summarize", summary="生成会话记忆摘要")
 async def summarize(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     conversation = conv(db, user, conversation_id)
     gateway = getattr(request.app.state, "model_gateway", None)

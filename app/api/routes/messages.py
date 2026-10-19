@@ -14,7 +14,7 @@ from app.schemas.message import MessageResponse
 router = APIRouter(prefix="/messages", tags=["messages"])
 
 
-@router.get("/{message_id}")
+@router.get("/{message_id}", summary="获取消息详情")
 async def detail(message_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     message = db.scalar(
         select(Message).join(Conversation, Conversation.id == Message.conversation_id).where(

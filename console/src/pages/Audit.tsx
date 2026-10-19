@@ -7,7 +7,7 @@ import { Loading } from "../components/Loading";
 import { useAuth } from "../stores/auth";
 
 const API = "/api/z-torque/audit";
-const PAGE_SIZE = 20;
+const PAGE_SIZE_OPTIONS = [20, 50, 100];
 
 // 类型筛选：映射到项目实际写入审计的 action 前缀（真实事件族）
 const TYPE_OPTIONS: { value: string; label: string }[] = [
@@ -204,7 +204,12 @@ export function AuditPage() {
   // 智能体筛选下拉数据源（替代手输 UUID）
   const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
   const [traceInput, setTraceInput] = useState("");
+  const [keyword, setKeyword] = useState("");
   const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
+  const [pageJump, setPageJump] = useState("");
+  // 用户名下拉数据源（管理员专用；普通用户该项禁用）
+  const [users, setUsers] = useState<string[]>([]);
 
   // 详情抽屉
   const [detail, setDetail] = useState<AuditEvent | null>(null);
@@ -215,7 +220,7 @@ export function AuditPage() {
   const buildQuery = useCallback((offset: number) => {
     const qs = new URLSearchParams();
     qs.set("offset", String(offset));
-    qs.set("limit", String(PAGE_SIZE));
+    qs.set("limit", String(pageSize));
     if (range === "custom") {
       if (startCustom) qs.set("start_time", new Date(startCustom).toISOString());
       if (endCustom) qs.set("end_time", new Date(endCustom).toISOString());
@@ -233,8 +238,9 @@ export function AuditPage() {
       qs.set("resource_id", agentId.trim());
     }
     if (traceInput.trim()) qs.set("trace_id", traceInput.trim());
+    if (keyword.trim()) qs.set("keyword", keyword.trim());
     return qs.toString();
-  }, [range, startCustom, endCustom, typePrefix, username, agentId, traceInput]);
+  }, [range, startCustom, endCustom, typePrefix, username, agentId, traceInput, keyword, pageSize]);
 
   const load = useCallback(async (offset: number) => {
     setLoading(true);
@@ -262,6 +268,14 @@ export function AuditPage() {
       .catch(() => setAgents([]));
   }, []);
 
+  // 用户下拉选项：管理员加载（供"执行用户"筛选），普通用户不请求
+  useEffect(() => {
+    if (!canReadAll) return;
+    request<{ items: { username: string }[] }>("/api/z-torque/users")
+      .then((r) => setUsers(r.items.map((u) => u.username)))
+      .catch(() => setUsers([]));
+  }, [canReadAll]);
+
   // 详情抽屉支持 Esc 关闭，与 Modal 行为一致
   useEffect(() => {
     if (!detail) return;
@@ -277,8 +291,18 @@ export function AuditPage() {
 
   function resetFilters() {
     setRange("7d"); setStartCustom(""); setEndCustom(""); setTypePrefix("");
-    setUsername(""); setAgentId(""); setTraceInput(""); setPage(0);
+    setUsername(""); setAgentId(""); setTraceInput(""); setKeyword("");
+    setPage(0); setPageJump("");
     void load(0);
+  }
+
+  // 跳页：夹在有效页码范围内
+  function jumpToPage() {
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const target = Math.min(Math.max(1, Number(pageJump) || 1), totalPages);
+    setPage(target - 1);
+    setPageJump(String(target));
+    void load((target - 1) * pageSize);
   }
 
   // 智能体资源 ID → 名称（复用筛选下拉已加载的缓存；无法解析时返回 null 不显示该行）
@@ -365,13 +389,32 @@ export function AuditPage() {
           </div>
           <div className="audit-field">
             <label>执行用户{scope === "self" ? "（仅自己）" : ""}</label>
+            {scope === "all" && users.length > 0 ? (
+              <select value={username} onChange={(e) => setUsername(e.target.value)} style={{ width: 130 }}>
+                <option value="">全部用户</option>
+                {users.map((u) => (
+                  <option key={u} value={u}>{u}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                placeholder="用户名"
+                value={username}
+                disabled={scope === "self"}
+                onChange={(e) => setUsername(e.target.value)}
+                style={{ width: 130 }}
+              />
+            )}
+          </div>
+          <div className="audit-field">
+            <label>关键字</label>
             <input
               type="text"
-              placeholder="用户名"
-              value={username}
-              disabled={scope === "self"}
-              onChange={(e) => setUsername(e.target.value)}
-              style={{ width: 130 }}
+              placeholder="摘要全文检索"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              style={{ width: 150 }}
             />
           </div>
           <div className="audit-field">
@@ -476,11 +519,27 @@ export function AuditPage() {
             )}
           </div>
           <div className="audit-pager">
-            <span>共 {total} 条</span>
+            <span>共 {total} 条 · 第 {Math.floor(offset / pageSize) + 1} / {Math.max(1, Math.ceil(total / pageSize))} 页</span>
             <div className="spacer" />
-            <button className="btn btn-secondary btn-sm" disabled={loading || offset <= 0} onClick={() => { const p = Math.max(0, page - 1); setPage(p); void load(p * PAGE_SIZE); }}>上一页</button>
-            <span>第 {Math.floor(offset / PAGE_SIZE) + 1} 页</span>
-            <button className="btn btn-secondary btn-sm" disabled={loading || offset + PAGE_SIZE >= total} onClick={() => { const p = page + 1; setPage(p); void load(p * PAGE_SIZE); }}>下一页</button>
+            <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))} title="每页条数">
+              {PAGE_SIZE_OPTIONS.map((s) => (
+                <option key={s} value={s}>{s} 条/页</option>
+              ))}
+            </select>
+            <button className="btn btn-secondary btn-sm" disabled={loading || offset <= 0} onClick={() => { const p = Math.max(0, page - 1); setPage(p); setPageJump(String(p + 1)); void load(p * pageSize); }}>上一页</button>
+            <input
+              className="input"
+              style={{ width: 64 }}
+              type="number"
+              min={1}
+              max={Math.max(1, Math.ceil(total / pageSize))}
+              value={pageJump}
+              placeholder="页码"
+              onChange={(e) => setPageJump(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") jumpToPage(); }}
+            />
+            <button className="btn btn-secondary btn-sm" disabled={loading} onClick={() => jumpToPage()}>跳转</button>
+            <button className="btn btn-secondary btn-sm" disabled={loading || offset + pageSize >= total} onClick={() => { const p = page + 1; setPage(p); setPageJump(String(p + 1)); void load(p * pageSize); }}>下一页</button>
           </div>
         </div>
 

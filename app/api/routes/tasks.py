@@ -20,7 +20,7 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 _TASK_NOT_FOUND = "task not found"
 
 
-@router.post("", response_model=None)
+@router.post("", summary="创建任务", response_model=None)
 async def create(payload: TaskCreateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     task = create_task(db, tenant_id=user.tenant_id, owner_user_id=user.id, trace_id=request.state.trace_id, **payload.model_dump())
     db.commit()
@@ -28,7 +28,7 @@ async def create(payload: TaskCreateRequest, request: Request, user: User = Depe
     return success_response(request, TaskResponse.model_validate(task).model_dump(mode="json"))
 
 
-@router.get("")
+@router.get("", summary="获取任务列表")
 async def list_tasks(request: Request, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100), agent_id: UUID | None = Query(default=None), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = select(Task).where(Task.owner_user_id == user.id)
     if agent_id is not None:
@@ -38,7 +38,7 @@ async def list_tasks(request: Request, offset: int = Query(0, ge=0), limit: int 
     return success_response(request, {"items": [TaskResponse.model_validate(task).model_dump(mode="json") for task in tasks], "offset": offset, "limit": limit, "total": total})
 
 
-@router.get("/{task_id}")
+@router.get("/{task_id}", summary="获取任务详情")
 async def get_task(task_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_user_id == user.id))
     if task is None:
@@ -46,7 +46,7 @@ async def get_task(task_id: str, request: Request, user: User = Depends(get_curr
     return success_response(request, TaskResponse.model_validate(task).model_dump(mode="json"))
 
 
-@router.get("/{task_id}/events")
+@router.get("/{task_id}/events", summary="获取任务事件列表")
 async def events(task_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_user_id == user.id))
     if task is None:
@@ -55,7 +55,7 @@ async def events(task_id: str, request: Request, user: User = Depends(get_curren
     return success_response(request, {"items": [TaskEventResponse.model_validate(row).model_dump(mode="json") for row in rows]})
 
 
-@router.get("/{task_id}/stream")
+@router.get("/{task_id}/stream", summary="订阅任务事件流（SSE流式）")
 async def stream(task_id: str, request: Request, last_event_id: str | None = Header(None, alias="Last-Event-ID"), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_user_id == user.id, Task.tenant_id == user.tenant_id))
     if task is None:
@@ -63,7 +63,7 @@ async def stream(task_id: str, request: Request, last_event_id: str | None = Hea
     return StreamingResponse(task_event_stream(db, task_id=task.id, tenant_id=user.tenant_id, last_event_id=last_event_id), media_type="text/event-stream")
 
 
-@router.post("/{task_id}/cancel")
+@router.post("/{task_id}/cancel", summary="取消任务")
 async def cancel(task_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     task = db.scalar(select(Task).where(Task.id == task_id, Task.owner_user_id == user.id))
     if task is None:

@@ -133,13 +133,13 @@ def get_owned_endpoint(db: Session, user: User, endpoint_id: UUID) -> ModelEndpo
 # --- Provider routes ---
 
 
-@router.get("/providers")
+@router.get("/providers", summary="获取模型供应商列表")
 async def list_providers(request: Request, user: CurrentUser, db: DbSession):
     items = db.scalars(select(ModelProvider).where(ModelProvider.tenant_id == user.tenant_id).order_by(ModelProvider.created_at)).all()
     return success_response(request, [serialize_provider(x) for x in items])
 
 
-@router.post("/providers")
+@router.post("/providers", summary="创建模型供应商")
 async def create_provider(payload: ModelProviderCreate, request: Request, user: ModelManageUser, db: DbSession):
     _validate_secret_ref(payload.secret_ref)
     item = ModelProvider(
@@ -159,12 +159,12 @@ async def create_provider(payload: ModelProviderCreate, request: Request, user: 
     return success_response(request, serialize_provider(item))
 
 
-@router.get("/providers/{provider_id}")
+@router.get("/providers/{provider_id}", summary="获取模型供应商详情")
 async def get_provider(provider_id: UUID, request: Request, user: CurrentUser, db: DbSession):
     return success_response(request, serialize_provider(get_owned_provider(db, user, provider_id)))
 
 
-@router.patch("/providers/{provider_id}")
+@router.patch("/providers/{provider_id}", summary="更新模型供应商")
 async def patch_provider(provider_id: UUID, payload: ModelProviderPatch, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_provider(db, user, provider_id)
     values = payload.model_dump(exclude_unset=True)
@@ -176,7 +176,7 @@ async def patch_provider(provider_id: UUID, payload: ModelProviderPatch, request
     return success_response(request, serialize_provider(item))
 
 
-@router.post("/providers/{provider_id}/disable")
+@router.post("/providers/{provider_id}/disable", summary="停用模型供应商")
 async def disable_provider(provider_id: UUID, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_provider(db, user, provider_id); item.status = "DISABLED"
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="MODEL_PROVIDER_DISABLED", resource_type="MODEL_PROVIDER", resource_id=item.id, summary="model provider disabled", trace_id=request.state.trace_id)
@@ -184,7 +184,7 @@ async def disable_provider(provider_id: UUID, request: Request, user: ModelManag
     return success_response(request, serialize_provider(item))
 
 
-@router.post("/providers/{provider_id}/enable")
+@router.post("/providers/{provider_id}/enable", summary="启用模型供应商")
 async def enable_provider(provider_id: UUID, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_provider(db, user, provider_id); item.status = "ENABLED"
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="MODEL_PROVIDER_ENABLED", resource_type="MODEL_PROVIDER", resource_id=item.id, summary="model provider enabled", trace_id=request.state.trace_id)
@@ -195,7 +195,7 @@ async def enable_provider(provider_id: UUID, request: Request, user: ModelManage
 # --- Endpoint routes ---
 
 
-@router.get("/endpoints")
+@router.get("/endpoints", summary="获取接入点列表")
 async def list_endpoints(request: Request, user: CurrentUser, db: DbSession, model_id: UUID | None = Query(default=None)):
     query = select(ModelEndpoint).where(ModelEndpoint.tenant_id == user.tenant_id)
     if model_id is not None:
@@ -204,7 +204,7 @@ async def list_endpoints(request: Request, user: CurrentUser, db: DbSession, mod
     return success_response(request, [serialize_endpoint(x) for x in items])
 
 
-@router.post("/endpoints")
+@router.post("/endpoints", summary="创建接入点")
 async def create_endpoint(payload: ModelEndpointCreate, request: Request, user: ModelManageUser, db: DbSession):
     provider = get_owned_provider(db, user, UUID(payload.provider_id))
     model = get_owned_model(db, user, UUID(payload.model_id))
@@ -227,12 +227,12 @@ async def create_endpoint(payload: ModelEndpointCreate, request: Request, user: 
     return success_response(request, serialize_endpoint(item))
 
 
-@router.get("/endpoints/{endpoint_id}")
+@router.get("/endpoints/{endpoint_id}", summary="获取接入点详情")
 async def get_endpoint(endpoint_id: UUID, request: Request, user: CurrentUser, db: DbSession):
     return success_response(request, serialize_endpoint(get_owned_endpoint(db, user, endpoint_id)))
 
 
-@router.patch("/endpoints/{endpoint_id}")
+@router.patch("/endpoints/{endpoint_id}", summary="更新接入点")
 async def patch_endpoint(endpoint_id: UUID, payload: ModelEndpointPatch, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_endpoint(db, user, endpoint_id)
     values = payload.model_dump(exclude_unset=True)
@@ -248,7 +248,7 @@ async def patch_endpoint(endpoint_id: UUID, payload: ModelEndpointPatch, request
     return success_response(request, serialize_endpoint(item))
 
 
-@router.post("/endpoints/{endpoint_id}/disable")
+@router.post("/endpoints/{endpoint_id}/disable", summary="停用接入点")
 async def disable_endpoint(endpoint_id: UUID, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_endpoint(db, user, endpoint_id); item.status = "DISABLED"
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="MODEL_ENDPOINT_DISABLED", resource_type="MODEL_ENDPOINT", resource_id=item.id, summary="model endpoint disabled", trace_id=request.state.trace_id)
@@ -256,7 +256,7 @@ async def disable_endpoint(endpoint_id: UUID, request: Request, user: ModelManag
     return success_response(request, serialize_endpoint(item))
 
 
-@router.post("/endpoints/{endpoint_id}/enable")
+@router.post("/endpoints/{endpoint_id}/enable", summary="启用接入点")
 async def enable_endpoint(endpoint_id: UUID, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_endpoint(db, user, endpoint_id); item.status = "ENABLED"
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="MODEL_ENDPOINT_ENABLED", resource_type="MODEL_ENDPOINT", resource_id=item.id, summary="model endpoint enabled", trace_id=request.state.trace_id)
@@ -267,7 +267,7 @@ async def enable_endpoint(endpoint_id: UUID, request: Request, user: ModelManage
 # --- Model resource routes ---
 
 
-@router.get("")
+@router.get("", summary="获取模型列表")
 async def list_models(request: Request, user: CurrentUser, db: DbSession, provider_id: UUID | None = Query(default=None)):
     query = select(ModelResource).where(ModelResource.tenant_id == user.tenant_id)
     if provider_id is not None:
@@ -286,7 +286,7 @@ async def list_models(request: Request, user: CurrentUser, db: DbSession, provid
     return success_response(request, [serialize_model(x, endpoints=grouped.get(str(x.id), [])) for x in items])
 
 
-@router.post("")
+@router.post("", summary="创建模型")
 async def create_model(payload: ModelResourceCreate, request: Request, user: ModelManageUser, db: DbSession):
     _validate_interface_type(payload.interface_type)
     provider = get_owned_provider(db, user, UUID(payload.provider_id))
@@ -315,7 +315,7 @@ async def create_model(payload: ModelResourceCreate, request: Request, user: Mod
     return success_response(request, serialize_model(item))
 
 
-@router.get("/{model_id}")
+@router.get("/{model_id}", summary="获取模型详情")
 async def get_model(model_id: UUID, request: Request, user: CurrentUser, db: DbSession):
     item = get_owned_model(db, user, model_id)
     provider = db.scalar(select(ModelProvider).where(ModelProvider.id == item.provider_id))
@@ -323,7 +323,7 @@ async def get_model(model_id: UUID, request: Request, user: CurrentUser, db: DbS
     return success_response(request, serialize_model(item, provider=provider, endpoints=endpoints))
 
 
-@router.patch("/{model_id}")
+@router.patch("/{model_id}", summary="更新模型")
 async def patch_model(model_id: UUID, payload: ModelResourcePatch, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_model(db, user, model_id)
     values = payload.model_dump(exclude_unset=True)
@@ -348,7 +348,7 @@ async def patch_model(model_id: UUID, payload: ModelResourcePatch, request: Requ
     return success_response(request, serialize_model(item))
 
 
-@router.post("/{model_id}/disable")
+@router.post("/{model_id}/disable", summary="停用模型")
 async def disable_model(model_id: UUID, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_model(db, user, model_id); item.status = "DISABLED"
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="MODEL_RESOURCE_DISABLED", resource_type="MODEL_RESOURCE", resource_id=item.id, summary="model resource disabled", trace_id=request.state.trace_id)
@@ -356,7 +356,7 @@ async def disable_model(model_id: UUID, request: Request, user: ModelManageUser,
     return success_response(request, serialize_model(item))
 
 
-@router.post("/{model_id}/enable")
+@router.post("/{model_id}/enable", summary="启用模型")
 async def enable_model(model_id: UUID, request: Request, user: ModelManageUser, db: DbSession):
     item = get_owned_model(db, user, model_id); item.status = "ENABLED"
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="MODEL_RESOURCE_ENABLED", resource_type="MODEL_RESOURCE", resource_id=item.id, summary="model resource enabled", trace_id=request.state.trace_id)
@@ -364,7 +364,7 @@ async def enable_model(model_id: UUID, request: Request, user: ModelManageUser, 
     return success_response(request, serialize_model(item))
 
 
-@router.post("/{model_id}/test")
+@router.post("/{model_id}/test", summary="测试模型连接")
 async def test_model(
     model_id: UUID,
     request: Request,

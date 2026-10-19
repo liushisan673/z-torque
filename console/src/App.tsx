@@ -1,18 +1,21 @@
+import { lazy, Suspense } from "react";
 import type { ReactElement } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./stores/auth";
 import { ToastProvider, useToast } from "./components/Toast";
 import { LoginPage } from "./pages/Login";
-import { ChatPage } from "./pages/Chat";
-import { AgentsPage } from "./pages/Agents";
-import { SkillsPage } from "./pages/Skills";
-import { ModelsPage } from "./pages/Models";
-import { ConnectorsPage } from "./pages/Connectors";
-import { AuditPage } from "./pages/Audit";
-import { UsersPage } from "./pages/Users";
 import { AppTopbar, APP_NAV, visibleNav, homePath } from "./components/AppTopbar";
 import type { NavItem } from "./components/AppTopbar";
 import { LoadingScreen } from "./components/Loading";
+
+// 路由级代码分割：首屏只加载登录页，其余页面按需加载（主 chunk 从 ~528KB 显著下降）
+const ChatPage = lazy(() => import("./pages/Chat").then((m) => ({ default: m.ChatPage })));
+const AgentsPage = lazy(() => import("./pages/Agents").then((m) => ({ default: m.AgentsPage })));
+const SkillsPage = lazy(() => import("./pages/Skills").then((m) => ({ default: m.SkillsPage })));
+const ModelsPage = lazy(() => import("./pages/Models").then((m) => ({ default: m.ModelsPage })));
+const ConnectorsPage = lazy(() => import("./pages/Connectors").then((m) => ({ default: m.ConnectorsPage })));
+const AuditPage = lazy(() => import("./pages/Audit").then((m) => ({ default: m.AuditPage })));
+const UsersPage = lazy(() => import("./pages/Users").then((m) => ({ default: m.UsersPage })));
 
 /**
  * 认证 + 访问守卫：未登录跳登录页；已登录但无对应导航访问权限时
@@ -60,17 +63,19 @@ function ConsoleShell({ children }: { children: ReactElement }) {
 export function App() {
   return (
     <ToastProvider>
-      <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/chat" element={<RequireAccess><ChatPage /></RequireAccess>} />
-      <Route path="/agents" element={<RequireAccess><ConsoleShell><AgentsPage /></ConsoleShell></RequireAccess>} />
-      <Route path="/skills" element={<RequireAccess><ConsoleShell><SkillsPage /></ConsoleShell></RequireAccess>} />
-      <Route path="/models" element={<RequireAccess navTo="/models"><ConsoleShell><ModelsPage /></ConsoleShell></RequireAccess>} />
-      <Route path="/connectors" element={<RequireAccess navTo="/connectors"><ConsoleShell><ConnectorsPage /></ConsoleShell></RequireAccess>} />
-      <Route path="/audit" element={<RequireAccess><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
-      <Route path="/users" element={<RequireAccess navTo="/users"><ConsoleShell><UsersPage /></ConsoleShell></RequireAccess>} />
-      <Route path="*" element={<HomeRedirect />} />
-      </Routes>
+      <Suspense fallback={<LoadingScreen />}>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/chat" element={<RequireAccess><ChatPage /></RequireAccess>} />
+          <Route path="/agents" element={<RequireAccess><ConsoleShell><AgentsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/skills" element={<RequireAccess><ConsoleShell><SkillsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/models" element={<RequireAccess navTo="/models"><ConsoleShell><ModelsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/connectors" element={<RequireAccess navTo="/connectors"><ConsoleShell><ConnectorsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/audit" element={<RequireAccess><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/users" element={<RequireAccess navTo="/users"><ConsoleShell><UsersPage /></ConsoleShell></RequireAccess>} />
+          <Route path="*" element={<HomeRedirect />} />
+        </Routes>
+      </Suspense>
     </ToastProvider>
   );
 }

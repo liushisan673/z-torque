@@ -19,7 +19,7 @@ class SecretConvertRequest(BaseModel):
     value: str = Field(min_length=1, max_length=4096)
 
 
-@router.post("/convert")
+@router.post("/convert", summary="生成密钥引用")
 async def convert_secret(payload: SecretConvertRequest, request: Request, user: CurrentUser):
     """明文密钥 → Secret URI（Fernet 密文引用）。明文不落库，仅返回加密引用。"""
     value = payload.value.strip()

@@ -135,6 +135,15 @@ const STARTER_PROMPTS = [
 export function ChatPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  // 会话标题客户端过滤（服务端分页/摘要能力待后端支持后再升级）
+  const [convFilter, setConvFilter] = useState("");
+  const filteredConvs = useMemo(
+    () =>
+      convFilter.trim()
+        ? conversations.filter((c) => (c.title ?? "").toLowerCase().includes(convFilter.trim().toLowerCase()))
+        : conversations,
+    [conversations, convFilter],
+  );
   const [agentId, setAgentId] = useState<string>("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -1172,13 +1181,27 @@ export function ChatPage() {
             <span>显示已归档</span>
           </label>
 
+          <input
+            className="input"
+            placeholder="搜索会话标题"
+            value={convFilter}
+            onChange={(e) => setConvFilter(e.target.value)}
+            style={{ marginBottom: 8 }}
+          />
+
           <div className="chat-session-list">
-            {conversations.length === 0 ? (
+            {filteredConvs.length === 0 ? (
               <div className="chat-session-empty">
-                {showArchived ? "暂无会话（含已归档）" : agentId ? "暂无会话，点击「+ 新建」开始" : "请先发布一个智能体"}
+                {convFilter.trim()
+                  ? "没有匹配的会话"
+                  : showArchived
+                    ? "暂无会话（含已归档）"
+                    : agentId
+                      ? "暂无会话，点击「+ 新建」开始"
+                      : "请先发布一个智能体"}
               </div>
             ) : (
-              conversations.map((c) => {
+              filteredConvs.map((c) => {
                 const isActive = c.id === conversationId;
                 const showRunning = isActive && taskRunning;
                 const dotCls = waitingConfirm ? "waiting" : "running";

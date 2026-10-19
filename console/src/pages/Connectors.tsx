@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
-import type { Connector, ConnectorDiscoveredToolSummary, ConnectorTestResult, ConnectorToolLink } from "../types";
+import type {
+  Connector,
+  ConnectorDiscoveredToolSummary,
+  ConnectorOpenapiImportResult,
+  ConnectorTestResult,
+  ConnectorToolLink,
+} from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { SecretRefInput } from "../components/SecretRefInput";
@@ -112,6 +118,17 @@ function toolTypeLabel(t: string | null | undefined): string {
   return t;
 }
 
+// REST 测试结果标题：把"真的连上了 / 被鉴权拒了 / 压根没发请求"说清楚，
+// 避免原来那种"只要 ENABLED 就显示连接就绪"的误导
+function restTestHeadline(r: ConnectorTestResult): string {
+  if (r.http_status === undefined || r.http_status === null) {
+    return "配置就绪（未发起网络请求）";
+  }
+  if (r.status === "auth_required") return "远端可达，鉴权被拒";
+  if (r.status === "ready") return "连接就绪（已真实请求）";
+  return `响应 ${r.http_status}`;
+}
+
 export function ConnectorsPage() {
   const { user } = useAuth();
   const { push: toast } = useToast();
@@ -150,6 +167,15 @@ export function ConnectorsPage() {
   // MCP 工具发现（/discover 结果，切换连接时重置）
   const [discovering, setDiscovering] = useState(false);
   const [discovered, setDiscovered] = useState<ConnectorDiscoveredToolSummary[] | null>(null);
+
+  // OpenAPI 批量导入（REST 专用）：REST 没有自动发现协议，靠 spec 一次性录入 N 个接口
+  const [oaOpen, setOaOpen] = useState(false);
+  const [oaSource, setOaSource] = useState<"url" | "json">("url");
+  const [oaUrl, setOaUrl] = useState("");
+  const [oaSpec, setOaSpec] = useState("");
+  const [oaPrefix, setOaPrefix] = useState("");
+  const [oaImporting, setOaImporting] = useState(false);
+  const [oaResult, setOaResult] = useState<ConnectorOpenapiImportResult | null>(null);
 
   // 新建连接
   const [createOpen, setCreateOpen] = useState(false);
@@ -448,6 +474,44 @@ export function ConnectorsPage() {
       setError(errorText(err, "发现工具失败"));
     } finally {
       setDiscovering(false);
+    }
+  }
+
+  // OpenAPI 批量导入：把 spec 里每个 path+method 转成一个 HTTP 工具
+  async function importOpenapi() {
+    if (!detail) return;
+    setError(null);
+    let spec: Record<string, unknown> | null = null;
+    if (oaSource === "json") {
+      if (!oaSpec.trim()) {
+        setError("请粘贴 OpenAPI 文档内容");
+        return;
+      }
+      try {
+        const parsed = JSON.parse(oaSpec);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+        spec = parsed as Record<string, unknown>;
+      } catch {
+        setError("OpenAPI 文档必须是合法的 JSON 对象");
+        return;
+      }
+    }
+    setOaImporting(true);
+    try {
+      const body: Record<string, unknown> = {
+        source: oaSource,
+        name_prefix: oaPrefix.trim(),
+      };
+      if (oaSource === "url") body["url"] = oaUrl.trim();
+      else body["spec"] = spec;
+      const r = await request<ConnectorOpenapiImportResult>(`${API}/${detail.id}/tools/import-openapi`, { method: "POST", body });
+      setOaResult(r);
+      await loadTools(detail.id);
+      toast("success", `已导入 ${r.registered.length} 个工具`);
+    } catch (err) {
+      setError(errorText(err, "导入失败"));
+    } finally {
+      setOaImporting(false);
     }
   }
 
@@ -1112,6 +1176,16 @@ export function ConnectorsPage() {
                       {canManage && enabled && (
                         <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
                           <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setRegType(selected.connector_type === "DB" ? "DB_SQL" : "HTTP"); setRegOpen(true); }}>登记新操作为工具</button>
+                          {selected.connector_type === "REST" && (
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              disabled={busy}
+                              onClick={() => { setOaResult(null); setOaOpen(true); }}
+                              title="上传或拉取 OpenAPI 3.x 文档，一次性把 N 个接口登记为工具"
+                            >
+                              从 OpenAPI 导入
+                            </button>
+                          )}
                           {selected.connector_type === "MCP" && (
                             <button className="btn btn-secondary btn-sm" disabled={busy || discovering} onClick={() => void runDiscover()}>
                               {discovering ? "发现中…" : "从 MCP 服务发现工具"}
@@ -1186,6 +1260,7 @@ export function ConnectorsPage() {
                       <h3>健康检查 / 测试连接</h3>
                       <p style={{ fontSize: 13, color: "var(--text-muted)", margin: "0 0 14px" }}>
                         由后端按连接类型探测，结果写入状态与审计。停用的连接无法执行检查。
+                        {selected?.connector_type === "REST" && " REST 连接会真实发起一次 HTTP 请求并回报状态码。"}
                       </p>
                       <button className="btn btn-primary" disabled={busy || testing || !enabled} onClick={() => void runTest()}>
                         {testing ? "检查中…" : "运行检查"}
@@ -1194,16 +1269,37 @@ export function ConnectorsPage() {
                         <p className="connector-foot-hint">连接已停用，启用后才能运行检查。</p>
                       )}
                       {lastTest && (
-                        <div className="connector-test-result ok">
-                          <strong>连接就绪</strong>
-                          <div className="meta">
-                            {typeLabel} · 状态 {lastTest.status} · 检查耗时 {lastTest.latency_ms} ms · {fmtTime(lastTest.checked_at)}
-                          </div>
-                          {selected.connector_type === "DB" && (
-                            <div className="meta">数据库 {lastTest.database || "—"} · 发现 {lastTest.tables?.length ?? 0} 张表</div>
-                          )}
-                          {selected.connector_type === "MCP" && (
-                            <div className="meta">端点 {lastTest.endpoint || "—"} · 握手成功 · 发现 {lastTest.tools?.length ?? 0} 个工具</div>
+                        <div className={`connector-test-result ${lastTest.partial ? "warn" : "ok"}`}>
+                          {/* REST：区分「真的连上了」「被鉴权拒了」「压根没发请求」三种情况 */}
+                          {selected?.connector_type === "REST" ? (
+                            <>
+                              <strong>{restTestHeadline(lastTest)}</strong>
+                              <div className="meta">
+                                {typeLabel} · HTTP {lastTest.http_status ?? "—"} · {lastTest.response_method ?? "—"} · 耗时 {lastTest.latency_ms} ms · {fmtTime(lastTest.checked_at)}
+                              </div>
+                              {lastTest.endpoint && <div className="meta">目标 {lastTest.endpoint}{lastTest.server ? ` · server=${lastTest.server}` : ""}</div>}
+                              <div className="meta">
+                                凭证 {lastTest.auth_used === false ? "未携带（未配置 Secret URI 或选择了匿名）" : "已按认证方式携带"}
+                              </div>
+                              {/* 内网地址直连探测，避免本机 http_proxy 返回误导性的 502 */}
+                              {lastTest.proxy_bypassed && (
+                                <div className="meta">已绕过本机代理直连（内网地址，不经 http_proxy）</div>
+                              )}
+                              {lastTest.warning && <div className="meta">{lastTest.warning}</div>}
+                            </>
+                          ) : (
+                            <>
+                              <strong>连接就绪</strong>
+                              <div className="meta">
+                                {typeLabel} · 状态 {lastTest.status} · 检查耗时 {lastTest.latency_ms} ms · {fmtTime(lastTest.checked_at)}
+                              </div>
+                              {selected?.connector_type === "DB" && (
+                                <div className="meta">数据库 {lastTest.database || "—"} · 发现 {lastTest.tables?.length ?? 0} 张表</div>
+                              )}
+                              {selected?.connector_type === "MCP" && (
+                                <div className="meta">端点 {lastTest.endpoint || "—"} · 握手成功 · 发现 {lastTest.tools?.length ?? 0} 个工具</div>
+                              )}
+                            </>
                           )}
                           {lastTest.trace_id && <div className="trace">trace_id: {lastTest.trace_id}</div>}
                         </div>
@@ -1480,6 +1576,80 @@ export function ConnectorsPage() {
       >
         <p>连接「{confirmDelete?.name ?? ""}」将被永久删除。若仍注册有工具，后端会拒绝删除，请先删除对应工具。</p>
       </ConfirmDialog>
+
+      {/* OpenAPI 批量导入：REST 没有自动发现协议，只能靠 spec 一次性录入 */}
+      <Modal
+        open={oaOpen}
+        title="从 OpenAPI 导入工具"
+        onClose={() => setOaOpen(false)}
+        footer={
+          <>
+            <button className="btn btn-secondary" onClick={() => setOaOpen(false)}>关闭</button>
+            <button
+              className="btn btn-primary"
+              disabled={oaImporting || busy || (oaSource === "url" ? !oaUrl.trim() : !oaSpec.trim())}
+              onClick={() => void importOpenapi()}
+            >
+              {oaImporting ? "导入中…" : "解析并导入"}
+            </button>
+          </>
+        }
+      >
+        <div className="form-field">
+          <label>来源</label>
+          <select className="select" value={oaSource} onChange={(e) => { setOaSource(e.target.value as "url" | "json"); setOaResult(null); }}>
+            <option value="url">从 URL 拉取（https）</option>
+            <option value="json">粘贴 JSON</option>
+          </select>
+        </div>
+        {oaSource === "url" ? (
+          <div className="form-field">
+            <label>OpenAPI 文档地址</label>
+            <input
+              className="input"
+              value={oaUrl}
+              onChange={(e) => setOaUrl(e.target.value)}
+              placeholder="https://petstore.example.com/openapi.json"
+            />
+          </div>
+        ) : (
+          <div className="form-field">
+            <label>OpenAPI 文档（JSON）</label>
+            <textarea
+              className="textarea"
+              rows={10}
+              value={oaSpec}
+              onChange={(e) => setOaSpec(e.target.value)}
+              placeholder='{"openapi":"3.0.3","paths":{"/users":{"get":{"operationId":"listUsers"}}}}'
+            />
+          </div>
+        )}
+        <div className="form-field">
+          <label>工具名前缀（可选）</label>
+          <input className="input" value={oaPrefix} onChange={(e) => setOaPrefix(e.target.value)} placeholder="例如：crm_（避免与其它连接重名）" />
+        </div>
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "6px 0 0" }}>
+          每个 <code>path × method</code> 会生成一个 HTTP 工具；重复名称自动加后缀。单次上限 200 个。
+        </p>
+        {oaResult && (
+          <div className="connector-test-result ok" style={{ marginTop: 12 }}>
+            <strong>导入完成：已注册 {oaResult.registered.length} 个</strong>
+            {oaResult.skipped.length > 0 && (
+              <div className="meta">跳过 {oaResult.skipped.length} 个</div>
+            )}
+            <div className="connector-table-grid" style={{ marginTop: 8 }}>
+              {oaResult.registered.slice(0, 24).map((t) => (
+                <div key={t.tool_id} className="connector-table-item checked" title={`${t.method} ${t.path}`}>
+                  <code>{t.method} {t.path}</code>
+                </div>
+              ))}
+            </div>
+            {oaResult.registered.length > 24 && (
+              <div className="meta">…等共 {oaResult.registered.length} 个</div>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

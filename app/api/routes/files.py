@@ -38,7 +38,7 @@ def metadata(item: File) -> dict:
     return {"id": str(item.id), "name": item.original_name, "media_type": item.media_type, "size_bytes": item.size_bytes, "status": item.status, "created_at": iso_utc(item.created_at)}
 
 
-@router.post("")
+@router.post("", summary="上传文件")
 async def upload(request: Request, upload: UploadFile = UploadFileParam(...), conversation_id: UUID | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     settings = get_settings()
     suffix = Path(upload.filename or "").suffix.lower()
@@ -81,18 +81,18 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
     return success_response(request, metadata(item))
 
 
-@router.get("/{file_id}")
+@router.get("/{file_id}", summary="获取文件详情")
 async def detail(file_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return success_response(request, metadata(owned_file(db, user, file_id)))
 
 
-@router.get("/{file_id}/status")
+@router.get("/{file_id}/status", summary="获取文件状态")
 async def status(file_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = owned_file(db, user, file_id)
     return success_response(request, {"id": str(item.id), "status": item.status, "error": item.parse_error})
 
 
-@router.get("/{file_id}/content")
+@router.get("/{file_id}/content", summary="获取文件内容")
 async def content(file_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = owned_file(db, user, file_id)
     if item.status != "PARSED":
@@ -102,7 +102,7 @@ async def content(file_id: UUID, request: Request, user: User = Depends(get_curr
     return success_response(request, {"id": str(item.id), "content": item.extracted_text or ""})
 
 
-@router.delete("/{file_id}")
+@router.delete("/{file_id}", summary="删除文件")
 async def remove(file_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = owned_file(db, user, file_id)
     if db.scalar(select(message_file.c.message_id).where(message_file.c.file_id == item.id).limit(1)) is not None:

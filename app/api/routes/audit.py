@@ -64,7 +64,7 @@ def _apply_scope(db: Session, user: User) -> bool:
     return False
 
 
-@router.get("")
+@router.get("", summary="查询审计事件")
 async def list_events(
     request: Request,
     action: str | None = Query(default=None),
@@ -126,7 +126,7 @@ async def list_events(
     })
 
 
-@router.get("/{event_id}")
+@router.get("/{event_id}", summary="获取审计详情")
 async def get_event(event_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.scalar(select(AuditLog).where(AuditLog.id == event_id, AuditLog.tenant_id == user.tenant_id))
     if item is None:
@@ -140,7 +140,7 @@ async def get_event(event_id: UUID, request: Request, user: User = Depends(get_c
     return success_response(request, serialize_event(item, actor_name))
 
 
-@router.get("/by-trace/{trace_id}")
+@router.get("/by-trace/{trace_id}", summary="查询Trace链路")
 async def list_by_trace(trace_id: str, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = select(AuditLog).where(AuditLog.tenant_id == user.tenant_id, AuditLog.trace_id == trace_id).order_by(AuditLog.created_at)
     if not _apply_scope(db, user):

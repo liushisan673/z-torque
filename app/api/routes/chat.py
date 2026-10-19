@@ -16,7 +16,7 @@ from app.services.tool_mapping_builder import build_tool_mappings
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-@router.post("")
+@router.post("", summary="发送对话消息")
 async def chat(payload: ChatRequest, request: Request, idempotency_key: str | None = Header(None, alias="Idempotency-Key"), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     result = await handle_chat(db, tenant_id=user.tenant_id, user_id=user.id, agent_id=payload.agent_id, conversation_id=payload.conversation_id, content=payload.message, content_parts=payload.content_parts, idempotency_key=idempotency_key, trace_id=request.state.trace_id, model_gateway=getattr(request.app.state, "model_gateway", None), skill_gateway=getattr(request.app.state, "skill_gateway", None))
     db.commit()
@@ -35,7 +35,7 @@ async def chat(payload: ChatRequest, request: Request, idempotency_key: str | No
     return success_response(request, response.model_dump(mode="json"))
 
 
-@router.post("/stream")
+@router.post("/stream", summary="发送对话消息（SSE流式）")
 async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: str | None = Header(None, alias="Idempotency-Key"), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if payload.stream is not True:
         raise ValueError("stream must be true")

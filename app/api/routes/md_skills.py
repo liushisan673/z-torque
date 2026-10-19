@@ -24,7 +24,7 @@ def out(request: Request, value):
     return success_response(request, value)
 
 
-@router.post("/scan")
+@router.post("/scan", summary="扫描技能目录")
 async def scan(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     result = scan_directory(db, tenant_id=user.tenant_id, root=get_settings().md_skills_dir, owner_user_id=user.id)
     db.commit()
@@ -37,7 +37,7 @@ async def scan(request: Request, user: User = Depends(get_current_user), db: Ses
     return out(request, {"discovered": result.discovered, "drafts_created": result.drafts_created, "unchanged": result.unchanged, "issues": [issue.__dict__ for issue in result.issues]})
 
 
-@router.post("/upload")
+@router.post("/upload", summary="上传技能包")
 async def upload_md_skill(request: Request, upload: UploadFile = UploadFileParam(...), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """上传 MD-Skill 技能包（zip 或 SKILL.md），解析 front matter 并创建 Skill + 草稿版本。"""
     suffix = Path(upload.filename or "").suffix.lower()
@@ -59,7 +59,7 @@ async def upload_md_skill(request: Request, upload: UploadFile = UploadFileParam
     return out(request, result)
 
 
-@router.get("/scan/status")
+@router.get("/scan/status", summary="获取扫描状态")
 async def scan_status(request: Request, user: User = Depends(get_current_user)):
     watchers = getattr(request.app.state, "md_skill_watchers", {})
     watcher = watchers.get(str(user.tenant_id))
@@ -69,13 +69,13 @@ async def scan_status(request: Request, user: User = Depends(get_current_user)):
     return out(request, {"running": state.running, "last_started_at": state.last_started_at, "last_finished_at": state.last_finished_at, "last_error": state.last_error, "last_result": None if state.last_result is None else {"discovered": state.last_result.discovered, "drafts_created": state.last_result.drafts_created, "unchanged": state.last_result.unchanged, "issues": [issue.__dict__ for issue in state.last_result.issues]}})
 
 
-@router.get("")
+@router.get("", summary="获取技能列表")
 async def list_md_skills(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     items = db.scalars(select(Skill).where(Skill.tenant_id == user.tenant_id, Skill.skill_type == "MD_SKILL", Skill.status == "ACTIVE")).all()
     return out(request, [{"id": str(item.id), "name": item.name, "description": item.description, "skill_type": item.skill_type} for item in items])
 
 
-@router.get("/{skill_id}/versions")
+@router.get("/{skill_id}/versions", summary="获取技能版本列表")
 async def list_versions(skill_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     skill = db.scalar(select(Skill).where(Skill.id == skill_id, Skill.tenant_id == user.tenant_id, Skill.status == "ACTIVE"))
     if skill is None:
@@ -84,7 +84,7 @@ async def list_versions(skill_id: UUID, request: Request, user: User = Depends(g
     return out(request, [{"id": str(item.id), "version_number": item.version_number, "status": item.status, "fingerprint": item.config_snapshot.get("file_fingerprint"), "snapshot_hash": item.snapshot_hash} for item in versions])
 
 
-@router.get("/{skill_id}/versions/{version_id}")
+@router.get("/{skill_id}/versions/{version_id}", summary="获取技能版本详情")
 async def get_version(skill_id: UUID, version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     skill = db.scalar(select(Skill).where(Skill.id == skill_id, Skill.tenant_id == user.tenant_id, Skill.status == "ACTIVE"))
     if skill is None:

@@ -131,7 +131,7 @@ def _apply_role_ids(db: Session, admin: User, user: User, role_ids: list[UUID]) 
             db.execute(user_role.insert().values(user_id=user.id, role_id=rid))
 
 
-@router.get("/users")
+@router.get("/users", summary="获取用户列表")
 async def list_users(request: Request, _: User = Depends(require_admin), db: Session = Depends(get_db)):
     rows = db.scalars(select(User).order_by(User.created_at.desc())).all()
 
@@ -195,7 +195,7 @@ async def list_users(request: Request, _: User = Depends(require_admin), db: Ses
     )
 
 
-@router.post("/users")
+@router.post("/users", summary="创建用户")
 async def create_user(payload: UserCreateRequest, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     exists = db.scalar(select(func.count(User.id)).where(User.username == payload.username)) or 0
     if exists:
@@ -226,7 +226,7 @@ async def create_user(payload: UserCreateRequest, request: Request, admin: User 
     return success_response(request, {"id": str(user.id)})
 
 
-@router.patch("/users/{user_id}")
+@router.patch("/users/{user_id}", summary="更新用户")
 async def patch_user(user_id: UUID, payload: UserPatchRequest, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if user is None or user.tenant_id != admin.tenant_id:
@@ -258,7 +258,7 @@ async def patch_user(user_id: UUID, payload: UserPatchRequest, request: Request,
     return success_response(request, {"updated": True})
 
 
-@router.post("/users/{user_id}/reset-password")
+@router.post("/users/{user_id}/reset-password", summary="重置用户密码")
 async def reset_password(user_id: UUID, payload: ResetPasswordRequest, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if user is None or user.tenant_id != admin.tenant_id:
@@ -281,7 +281,7 @@ async def reset_password(user_id: UUID, payload: ResetPasswordRequest, request: 
     return success_response(request, {"updated": True})
 
 
-@router.post("/users/{user_id}/unlock")
+@router.post("/users/{user_id}/unlock", summary="解锁用户")
 async def unlock_user(user_id: UUID, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if user is None or user.tenant_id != admin.tenant_id:
@@ -341,7 +341,7 @@ def _purge_user_data(db: Session, user_id: UUID, takeover_admin_id: UUID) -> Non
     db.execute(update(AuditLog).where(AuditLog.actor_user_id == user_id).values(actor_user_id=None))
 
 
-@router.delete("/users/{user_id}")
+@router.delete("/users/{user_id}", summary="删除用户")
 async def delete_user(user_id: UUID, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     """硬删除用户：级联清理该用户的业务数据并解除全部引用。
 
@@ -375,7 +375,7 @@ async def delete_user(user_id: UUID, request: Request, admin: User = Depends(req
     return success_response(request, {"deleted": True})
 
 
-@router.get("/roles")
+@router.get("/roles", summary="获取角色列表")
 async def list_roles(request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     roles = db.scalars(select(Role).where(Role.tenant_id == admin.tenant_id).order_by(Role.created_at.desc())).all()
     items: list[dict] = []
@@ -390,7 +390,7 @@ async def list_roles(request: Request, admin: User = Depends(require_admin), db:
     return success_response(request, {"items": items})
 
 
-@router.post("/roles")
+@router.post("/roles", summary="创建角色")
 async def create_role(payload: RoleCreateRequest, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     exists = db.scalar(select(func.count(Role.id)).where(Role.tenant_id == admin.tenant_id, Role.name == payload.name)) or 0
     if exists:
@@ -402,7 +402,7 @@ async def create_role(payload: RoleCreateRequest, request: Request, admin: User 
     return success_response(request, {"id": str(role.id)})
 
 
-@router.delete("/roles/{role_id}")
+@router.delete("/roles/{role_id}", summary="删除角色")
 async def delete_role(role_id: UUID, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     role = db.get(Role, role_id)
     if role is None or role.tenant_id != admin.tenant_id:
@@ -414,13 +414,13 @@ async def delete_role(role_id: UUID, request: Request, admin: User = Depends(req
     return success_response(request, {"deleted": True})
 
 
-@router.get("/permissions")
+@router.get("/permissions", summary="获取权限列表")
 async def list_permissions(request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     perms = db.scalars(select(Permission).where(Permission.tenant_id == admin.tenant_id).order_by(Permission.created_at.desc())).all()
     return success_response(request, {"items": [{"id": str(p.id), "name": p.name} for p in perms]})
 
 
-@router.post("/permissions")
+@router.post("/permissions", summary="创建权限")
 async def create_permission(payload: PermissionCreateRequest, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     exists = db.scalar(select(func.count(Permission.id)).where(Permission.tenant_id == admin.tenant_id, Permission.name == payload.name)) or 0
     if exists:
@@ -432,7 +432,7 @@ async def create_permission(payload: PermissionCreateRequest, request: Request, 
     return success_response(request, {"id": str(perm.id)})
 
 
-@router.post("/roles/{role_id}/permissions")
+@router.post("/roles/{role_id}/permissions", summary="设置角色权限")
 async def set_role_permissions(role_id: UUID, payload: SetRolePermissionsRequest, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     role = db.get(Role, role_id)
     if role is None or role.tenant_id != admin.tenant_id:
@@ -453,7 +453,7 @@ async def set_role_permissions(role_id: UUID, payload: SetRolePermissionsRequest
     return success_response(request, {"updated": True})
 
 
-@router.get("/users/{user_id}/roles")
+@router.get("/users/{user_id}/roles", summary="获取用户角色")
 async def get_user_roles(user_id: UUID, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if user is None or user.tenant_id != admin.tenant_id:
@@ -462,7 +462,7 @@ async def get_user_roles(user_id: UUID, request: Request, admin: User = Depends(
     return success_response(request, {"role_ids": [str(r[0]) for r in role_ids]})
 
 
-@router.post("/users/{user_id}/roles")
+@router.post("/users/{user_id}/roles", summary="设置用户角色")
 async def set_user_roles(user_id: UUID, payload: SetUserRolesRequest, request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     user = db.get(User, user_id)
     if user is None or user.tenant_id != admin.tenant_id:

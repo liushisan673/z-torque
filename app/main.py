@@ -52,7 +52,39 @@ async def lifespan(app: FastAPI):
         await runtime.stop()
 
 
-app = FastAPI(title="Z-Torque", version="0.1.0", lifespan=lifespan)
+# OpenAPI 文档中文分组说明：/docs 左侧 tag 树按此展示（name 必须与各路由文件的 tags=[...] 完全一致）
+OPENAPI_TAG_DESCRIPTIONS = [
+    {"name": "auth", "description": "认证与令牌：登录、刷新令牌、登出、当前用户信息"},
+    {"name": "chat", "description": "对话发起：发送消息并触发智能体执行（含 SSE 流式接口）"},
+    {"name": "messages", "description": "消息查询：会话内消息历史与消息详情"},
+    {"name": "conversations", "description": "会话管理：创建、查询、重命名、归档与恢复、记忆摘要"},
+    {"name": "agents", "description": "智能体管理：智能体与版本的创建、发布、归档、委派配置、技能绑定"},
+    {"name": "tasks", "description": "任务与执行：任务状态、事件时间线、取消（含 SSE 事件订阅）"},
+    {"name": "confirmations", "description": "人工确认：工具执行等敏感操作的批准与拒绝"},
+    {"name": "skills-tools", "description": "技能与工具：技能/工具版本、指令内容、绑定关系与发布"},
+    {"name": "md-skills", "description": "MD 技能包：SKILL.md / zip 上传解析与目录扫描导入"},
+    {"name": "models", "description": "模型接入：供应商、模型与接入点三层管理及连通性测试"},
+    {"name": "connectors", "description": "连接器：MCP / REST / 数据库连接管理、工具发现注册、连通性测试"},
+    {"name": "files", "description": "文件管理：上传、状态查询、内容下载与删除"},
+    {"name": "secrets", "description": "密钥存储：明文转 Secret 加密引用（明文不落库）"},
+    {"name": "audit", "description": "审计日志：事件检索、详情与 Trace 链路查询（只读）"},
+    {"name": "admin-iam", "description": "身份与权限管理：用户、角色与授权（仅管理员）"},
+    {"name": "users", "description": "用户兼容接口：旧版用户查询与维护"},
+    {"name": "roles", "description": "角色兼容接口：旧版角色与权限查询"},
+]
+
+app = FastAPI(
+    title="Z-Torque 社区版 API",
+    version="0.1.0",
+    description=(
+        "Z-Torque AI 能力开放平台。所有业务接口挂载在 `/api/z-torque` 前缀下，"
+        "除登录/刷新外均需 `Authorization: Bearer <token>` 认证。"
+        "响应统一为 `{ code, message, data }` 结构；"
+        "SSE 流式接口（对话流、任务事件流）返回 `text/event-stream`。"
+    ),
+    openapi_tags=OPENAPI_TAG_DESCRIPTIONS,
+    lifespan=lifespan,
+)
 
 # Dev CORS: allow console(vite) to call API with cookies/Authorization headers.
 app.add_middleware(

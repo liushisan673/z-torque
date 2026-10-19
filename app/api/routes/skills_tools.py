@@ -20,13 +20,13 @@ def out(request: Request, value):
     return success_response(request, value)
 
 
-@router.post("/tools")
+@router.post("/tools", summary="创建工具")
 async def new_tool(payload: ToolCreateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = create_tool(db, tenant_id=user.tenant_id, user_id=user.id, **payload.model_dump()); db.commit(); db.refresh(item)
     return out(request, {"id": str(item.id), "name": item.name, "tool_type": item.tool_type})
 
 
-@router.get("/tools")
+@router.get("/tools", summary="获取工具列表")
 async def list_tools(request: Request, include_archived: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     status_filter = Tool.status.in_(["ACTIVE", "ARCHIVED"]) if include_archived else Tool.status == "ACTIVE"
     items = db.scalars(
@@ -48,7 +48,7 @@ async def list_tools(request: Request, include_archived: bool = False, user: Use
     return out(request, result)
 
 
-@router.get("/tools/{tool_id}")
+@router.get("/tools/{tool_id}", summary="获取工具详情")
 async def get_tool(tool_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.scalar(select(Tool).where(Tool.id == tool_id, Tool.tenant_id == user.tenant_id, Tool.status.in_(["ACTIVE", "ARCHIVED"]), or_(Tool.owner_user_id == user.id, Tool.official.is_(True), admin_owned_clause(Tool.owner_user_id, user.tenant_id))))
     if item is None:
@@ -58,7 +58,7 @@ async def get_tool(tool_id: UUID, request: Request, user: User = Depends(get_cur
     return out(request, {"id": str(item.id), "name": item.name, "description": item.description, "tool_type": item.tool_type, "official": item.official, "versions": [{"id": str(v.id), "version_number": v.version_number, "status": v.status, "snapshot_hash": v.snapshot_hash} for v in versions]})
 
 
-@router.get("/tool-versions/{version_id}")
+@router.get("/tool-versions/{version_id}", summary="获取工具版本详情")
 async def get_tool_version(version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.scalar(select(ToolVersion).where(ToolVersion.id == version_id, ToolVersion.tenant_id == user.tenant_id))
     if item is None:
@@ -67,43 +67,43 @@ async def get_tool_version(version_id: UUID, request: Request, user: User = Depe
     return out(request, {"id": str(item.id), "tool_id": str(item.tool_id), "version_number": item.version_number, "status": item.status, "config_snapshot": item.config_snapshot, "input_schema": item.input_schema, "output_schema": item.output_schema, "required_permissions": item.required_permissions, "requires_confirmation": item.requires_confirmation, "snapshot_hash": item.snapshot_hash})
 
 
-@router.post("/tools/{tool_id}/archive")
+@router.post("/tools/{tool_id}/archive", summary="归档工具")
 async def archive_tool(tool_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = archive_resource(db, tenant_id=user.tenant_id, user_id=user.id, resource_type="TOOL", resource_id=tool_id); db.commit()
     return out(request, {"id": str(item.id), "status": item.status})
 
 
-@router.delete("/tools/{tool_id}")
+@router.delete("/tools/{tool_id}", summary="删除工具")
 async def remove_tool(tool_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     delete_resource(db, tenant_id=user.tenant_id, user_id=user.id, resource_type="TOOL", resource_id=tool_id); db.commit()
     return out(request, {"id": str(tool_id), "deleted": True})
 
 
-@router.post("/tools/{tool_id}/copy")
+@router.post("/tools/{tool_id}/copy", summary="复制工具")
 async def duplicate_tool(tool_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = copy_tool(db, tenant_id=user.tenant_id, user_id=user.id, tool_id=tool_id); db.commit(); db.refresh(item)
     return out(request, {"id": str(item.id), "name": item.name, "status": item.status})
 
 
-@router.post("/tools/{tool_id}/versions")
+@router.post("/tools/{tool_id}/versions", summary="创建工具版本")
 async def new_tool_version(tool_id: UUID, payload: ToolVersionCreateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = create_tool_version(db, tenant_id=user.tenant_id, user_id=user.id, tool_id=tool_id, **payload.model_dump()); db.commit(); db.refresh(item)
     return out(request, {"id": str(item.id), "version_number": item.version_number, "status": item.status})
 
 
-@router.post("/tool-versions/{version_id}/publish")
+@router.post("/tool-versions/{version_id}/publish", summary="发布工具版本")
 async def publish_tool(version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = publish_tool_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id); db.commit()
     return out(request, {"id": str(item.id), "status": item.status, "snapshot_hash": item.snapshot_hash})
 
 
-@router.post("/skills")
+@router.post("/skills", summary="创建技能")
 async def new_skill(payload: SkillCreateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = create_skill(db, tenant_id=user.tenant_id, user_id=user.id, **payload.model_dump()); db.commit(); db.refresh(item)
     return out(request, {"id": str(item.id), "name": item.name, "skill_type": item.skill_type})
 
 
-@router.get("/skills")
+@router.get("/skills", summary="获取技能列表")
 async def list_skills(request: Request, include_archived: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     status_filter = Skill.status.in_(["ACTIVE", "ARCHIVED"]) if include_archived else Skill.status == "ACTIVE"
     items = db.scalars(
@@ -137,7 +137,7 @@ async def list_skills(request: Request, include_archived: bool = False, user: Us
     return out(request, result)
 
 
-@router.get("/skills/{skill_id}")
+@router.get("/skills/{skill_id}", summary="获取技能详情")
 async def get_skill(skill_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.scalar(select(Skill).where(Skill.id == skill_id, Skill.tenant_id == user.tenant_id, Skill.status.in_(["ACTIVE", "ARCHIVED"]), or_(Skill.owner_user_id == user.id, Skill.official.is_(True), admin_owned_clause(Skill.owner_user_id, user.tenant_id))))
     if item is None:
@@ -147,7 +147,7 @@ async def get_skill(skill_id: UUID, request: Request, user: User = Depends(get_c
     return out(request, {"id": str(item.id), "name": item.name, "description": item.description, "skill_type": item.skill_type, "official": item.official, "source_type": item.source_type, "owner_user_id": str(item.owner_user_id) if item.owner_user_id else None, "status": item.status, "created_at": iso_utc(item.created_at), "current_published_version_id": str(item.current_published_version_id) if item.current_published_version_id else None, "versions": [{"id": str(v.id), "version_number": v.version_number, "status": v.status, "snapshot_hash": v.snapshot_hash, "published_at": iso_utc(v.published_at)} for v in versions]})
 
 
-@router.patch("/skills/{skill_id}")
+@router.patch("/skills/{skill_id}", summary="更新技能")
 async def patch_skill(skill_id: UUID, payload: SkillUpdateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     values = payload.model_dump(exclude_unset=True)
     # 显式传 description: null 表示清空描述（服务层把 "" 归一化为 None）
@@ -157,7 +157,7 @@ async def patch_skill(skill_id: UUID, payload: SkillUpdateRequest, request: Requ
     return out(request, {"id": str(item.id), "name": item.name, "description": item.description, "skill_type": item.skill_type, "status": item.status})
 
 
-@router.get("/skill-versions/{version_id}")
+@router.get("/skill-versions/{version_id}", summary="获取技能版本详情")
 async def get_skill_version(version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = db.scalar(select(SkillVersion).where(SkillVersion.id == version_id, SkillVersion.tenant_id == user.tenant_id))
     if item is None:
@@ -168,55 +168,55 @@ async def get_skill_version(version_id: UUID, request: Request, user: User = Dep
     return out(request, {"id": str(item.id), "skill_id": str(item.skill_id), "version_number": item.version_number, "status": item.status, "instructions": item.instructions, "script_source": item.script_source, "required_permissions": item.required_permissions, "requires_confirmation": item.requires_confirmation, "tool_version_ids": [str(link.tool_version_id) for link in links], "snapshot_hash": item.snapshot_hash, "published_at": iso_utc(item.published_at), "implementation": cfg.get("implementation"), "allow_scripts": cfg.get("allow_scripts"), "input_schema": cfg.get("input_schema"), "output_schema": cfg.get("output_schema"), "script_files": cfg.get("script_files"), "declared_version": cfg.get("declared_version"), "relative_path": cfg.get("relative_path")})
 
 
-@router.post("/skills/{skill_id}/archive")
+@router.post("/skills/{skill_id}/archive", summary="归档技能")
 async def archive_skill(skill_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = archive_resource(db, tenant_id=user.tenant_id, user_id=user.id, resource_type="SKILL", resource_id=skill_id); db.commit()
     return out(request, {"id": str(item.id), "status": item.status})
 
 
-@router.delete("/skills/{skill_id}")
+@router.delete("/skills/{skill_id}", summary="删除技能")
 async def remove_skill(skill_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     delete_resource(db, tenant_id=user.tenant_id, user_id=user.id, resource_type="SKILL", resource_id=skill_id); db.commit()
     return out(request, {"id": str(skill_id), "deleted": True})
 
 
-@router.post("/skills/{skill_id}/copy")
+@router.post("/skills/{skill_id}/copy", summary="复制技能")
 async def duplicate_skill(skill_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = copy_skill(db, tenant_id=user.tenant_id, user_id=user.id, skill_id=skill_id); db.commit(); db.refresh(item)
     return out(request, {"id": str(item.id), "name": item.name, "status": item.status})
 
 
-@router.post("/skills/{skill_id}/versions")
+@router.post("/skills/{skill_id}/versions", summary="创建技能版本")
 async def new_skill_version(skill_id: UUID, payload: SkillVersionCreateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = create_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, skill_id=skill_id, **payload.model_dump()); db.commit(); db.refresh(item)
     return out(request, {"id": str(item.id), "version_number": item.version_number, "status": item.status})
 
 
-@router.post("/skill-versions/{version_id}/tools")
+@router.post("/skill-versions/{version_id}/tools", summary="为技能版本绑定工具")
 async def link_tool(version_id: UUID, payload: AttachToolRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = attach_tool(db, tenant_id=user.tenant_id, user_id=user.id, skill_version_id=version_id, tool_version_id=payload.tool_version_id); db.commit()
     return out(request, {"id": str(item.id), "tool_version_id": str(item.tool_version_id)})
 
 
-@router.delete("/skill-versions/{version_id}/tools/{tool_version_id}")
+@router.delete("/skill-versions/{version_id}/tools/{tool_version_id}", summary="为技能版本解绑工具")
 async def unlink_tool(version_id: UUID, tool_version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = detach_tool(db, tenant_id=user.tenant_id, user_id=user.id, skill_version_id=version_id, tool_version_id=tool_version_id); db.commit()
     return out(request, {"id": str(item.id), "tool_version_id": str(item.tool_version_id)})
 
 
-@router.post("/skill-versions/{version_id}/publish")
+@router.post("/skill-versions/{version_id}/publish", summary="发布技能版本")
 async def publish_skill(version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = publish_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id); db.commit()
     return out(request, {"id": str(item.id), "status": item.status, "snapshot_hash": item.snapshot_hash})
 
 
-@router.patch("/skill-versions/{version_id}")
+@router.patch("/skill-versions/{version_id}", summary="更新技能版本")
 async def patch_skill_version(version_id: UUID, payload: SkillVersionUpdateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = update_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id, **payload.model_dump(exclude_unset=True)); db.commit(); db.refresh(item)
     return out(request, {"id": str(item.id), "version_number": item.version_number, "status": item.status, "instructions": item.instructions, "required_permissions": item.required_permissions, "requires_confirmation": item.requires_confirmation})
 
 
-@router.get("/skill-versions/{version_id}/tools")
+@router.get("/skill-versions/{version_id}/tools", summary="获取技能版本工具列表")
 async def list_skill_tools(version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.execute(
         select(SkillVersionTool, ToolVersion, Tool)

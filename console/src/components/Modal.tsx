@@ -15,11 +15,32 @@ interface ModalProps {
 export function Modal({ open, title, onClose, footer, children, width = 560, closeOnBackdrop = true }: ModalProps) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const titleId = useId();
-  // Esc 关闭：弹窗打开期间全局监听（open 变化时挂载/卸载）
+  // Esc 关闭 + Tab 焦点圈定：键盘用户的焦点始终留在弹窗内，不会穿透到背景页面
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key === "Tab" && bodyRef.current) {
+        const focusables = Array.from(
+          bodyRef.current.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        ).filter((el) => el.offsetParent !== null);
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (e.shiftKey && (active === first || !bodyRef.current.contains(active))) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && (active === last || !bodyRef.current.contains(active))) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

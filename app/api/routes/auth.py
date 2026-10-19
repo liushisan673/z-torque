@@ -16,14 +16,14 @@ from app.services.auth_service import authenticate
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/login")
+@router.post("/login", summary="登录")
 async def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     access, refresh, _ = authenticate(db, payload.username, payload.password)
     response.set_cookie("access_token", access, httponly=True, samesite="lax")
     return success_response(request, {"access_token": access, "refresh_token": refresh, "token_type": "bearer"})
 
 
-@router.post("/refresh")
+@router.post("/refresh", summary="刷新令牌")
 async def refresh(payload: RefreshRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     session = get_session(db, payload.refresh_token)
     user = db.get(User, session.user_id)
@@ -38,7 +38,7 @@ async def refresh(payload: RefreshRequest, request: Request, response: Response,
     return success_response(request, {"access_token": access, "refresh_token": new_refresh, "token_type": "bearer"})
 
 
-@router.post("/logout")
+@router.post("/logout", summary="登出")
 async def logout(request: Request, response: Response, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     token = request.cookies.get("access_token")
     authorization = request.headers.get("Authorization", "")
@@ -55,7 +55,7 @@ async def logout(request: Request, response: Response, user: User = Depends(get_
     return success_response(request, {"logged_out": True})
 
 
-@router.get("/me")
+@router.get("/me", summary="获取当前用户信息")
 async def me(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     role_names = [
         r[0]
