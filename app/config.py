@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     app_debug: bool = False
     database_url: str = 'sqlite:///./data/z_torque.db'
-    access_token_ttl_minutes: int = 30
+    access_token_ttl_minutes: int = 60
     refresh_token_ttl_days: int = 7
     login_failure_limit: int = 5
     login_lock_minutes: int = 15
@@ -50,7 +50,17 @@ class Settings(BaseSettings):
     model_base_url: str | None = None
     model_api_key: SecretStr | None = None
     model_name: str = 'mock'
+    # model.selector 白名单：空 = 不限制；非空时 AgentVersion 快照绑定须命中，否则回退默认模型
+    model_allowed_names: list[str] = Field(default_factory=list)
+    # 全局兜底模型参数（AgentVersion 快照绑定的 temperature/max_tokens 优先，无绑定或快照未设置时生效）
+    model_temperature: float | None = None
+    model_max_tokens: int | None = None
     model_timeout_seconds: float = 60.0
+    # 插件级熔断与配额（契约 §5.5）：threshold=连续失败熔断阈值；cooldown=熔断冷却秒（半开探测等待）；
+    # quota=组件每分钟调用上限（0=不限）
+    plugin_breaker_failure_threshold: int = 8
+    plugin_breaker_cooldown_seconds: float = 30.0
+    plugin_quota_per_minute: int = 0
     worker_concurrency: int = 10
     task_default_timeout: int = 600
     task_max_timeout: int = 3600

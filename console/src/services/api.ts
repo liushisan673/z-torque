@@ -223,48 +223,82 @@ async function safeEnvelope(resp: Response): Promise<Partial<ApiEnvelope<unknown
   }
 }
 
-/** 文件上传（multipart），返回已解包 data。 */
+/** 文件上传（multipart），返回已解包 data。
+ * 用 XHR 而非 fetch：fetch 不支持上传方向的进度事件，无法实现真实上传进度条。
+ * 认证/错误处理与 request() 对齐：401 先刷新凭证重试一次，仍失败走认证失效回调。 */
 export async function uploadFile<T>(
   path: string,
   file: File,
-  extra?: { conversationId?: string; signal?: AbortSignal },
+  extra?: { conversationId?: string; signal?: AbortSignal; onProgress?: (percent: number) => void },
 ): Promise<T> {
   const form = new FormData();
   form.append("upload", file);
   const url = buildUrl(path, { conversation_id: extra?.conversationId });
-  const token = getAccessToken();
-  // 与 request() 一致携带 Bearer 头：跨源场景（dev 直连后端端口）下 cookie 不可用，必须依赖 Authorization
-  const resp = await fetchWithAuth(url, {
-    method: "POST",
-    credentials: "same-origin",
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: form,
-    signal: extra?.signal,
-  });
-  const traceId = resp.headers.get("X-Trace-ID") ?? undefined;
-  if (resp.status === 401) {
+
+  // 单次上传：完成后 resolve xhr（错误处理需要 status / 响应头 / 响应体）
+  const sendOnce = () =>
+    new Promise<XMLHttpRequest>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      // 与 request() 一致携带 Bearer 头：跨源场景（dev 直连后端端口）下 cookie 不可用，必须依赖 Authorization
+      const token = getAccessToken();
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) extra?.onProgress?.(Math.round((e.loaded / e.total) * 100));
+      };
+      xhr.onload = () => resolve(xhr);
+      xhr.onerror = () => reject(new ApiRequestError("AI_SERVICE_UNAVAILABLE", "无法连接到后端服务", 503));
+      xhr.onabort = () => reject(new DOMException("上传已取消", "AbortError"));
+      if (extra?.signal) {
+        if (extra.signal.aborted) {
+          xhr.abort();
+        } else {
+          extra.signal.addEventListener("abort", () => xhr.abort(), { once: true });
+        }
+      }
+      xhr.send(form);
+    });
+
+  let xhr = await sendOnce();
+  if (xhr.status === 401 && (await refreshAccessToken())) {
+    xhr = await sendOnce();
+  }
+
+  const traceId = xhr.getResponseHeader("X-Trace-ID") ?? undefined;
+  const ok = xhr.status >= 200 && xhr.status < 300;
+  const contentType = xhr.getResponseHeader("Content-Type") ?? "";
+  const envelope = contentType.includes("application/json") ? safeEnvelopeText(xhr.responseText) : null;
+
+  if (xhr.status === 401) {
     authFailureHandler?.();
     setAccessToken(null);
     setRefreshToken(null);
-    const envelope = await safeEnvelope(resp);
     throw new ApiRequestError(
       String(envelope?.code ?? "AI_AUTH_FAILED"),
       envelope?.message ?? "上传失败",
-      resp.status,
+      xhr.status,
       envelope?.trace_id ?? traceId,
     );
   }
-  if (!resp.ok) {
-    const envelope = await safeEnvelope(resp);
+  if (!ok) {
     throw new ApiRequestError(
       String(envelope?.code ?? "AI_INTERNAL_ERROR"),
       envelope?.message ?? "上传失败",
-      resp.status,
+      xhr.status,
       envelope?.trace_id ?? traceId,
     );
   }
-  const envelope = await parseEnvelope<T>(resp);
-  return envelope.data;
+  if (!contentType.includes("application/json")) {
+    throw new ApiRequestError("AI_INTERNAL_ERROR", "服务返回了非预期内容", xhr.status, traceId);
+  }
+  return envelope?.data as T;
+}
+
+// XHR 场景的响应体解包（对应 safeEnvelope 的 Response 版本）
+function safeEnvelopeText(text: string): Partial<ApiEnvelope<unknown>> | null {
+  try {
+    return JSON.parse(text) as Partial<ApiEnvelope<unknown>>;
+  } catch {
+    return null;
+  }
 }

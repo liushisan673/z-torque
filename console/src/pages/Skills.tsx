@@ -1205,7 +1205,7 @@ export function SkillsPage() {
                       <p className="skill-tool-foot">
                         {canEditTools
                           ? "仅草稿版本可绑定/解绑；发布后随快照固化，不可原地修改。"
-                          : "所有工具执行必须经过 SkillGateway；前端不能直接调用外部能力。"}
+                          : "所有工具执行必须经过 SkillGateway；前端不能直接调用外部工具。"}
                       </p>
                     </div>
                   </div>

@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.kernel.ports.lock_provider import LockProvider
 from app.kernel.task.service import transition_task
 from app.kernel.task.states import TaskStatus
 from app.models import Confirmation, Conversation, Message, Outbox, Task, TaskCheckpoint, TaskEvent
@@ -19,36 +20,21 @@ def _aware(value: datetime | None) -> datetime | None:
 
 
 class OutboxDispatcher:
-    def __init__(self, queue) -> None:
+    def __init__(self, queue, lock_provider: LockProvider | None = None) -> None:
         self.queue = queue
+        # lock.provider Port 解析结果由装配根注入（P1-4）：认领段加互斥防多实例重复认领；
+        # 单进程下语义不变。None 时退化为原行为（测试/直构场景）。
+        self._lock_provider = lock_provider
 
     async def dispatch_once(self, db: Session) -> bool:
         now = datetime.now(timezone.utc)
-        row = db.scalar(
-            select(Outbox)
-            .where(
-                Outbox.status.in_(["PENDING", "PROCESSING"]),
-                (Outbox.next_retry_at.is_(None)) | (Outbox.next_retry_at <= now),
-            )
-            .order_by(Outbox.created_at)
-            .with_for_update()
-            .limit(1)
-        )
+        if self._lock_provider is not None:
+            async with self._lock_provider.acquire("outbox.dispatch"):
+                row = self._claim(db, now)
+        else:
+            row = self._claim(db, now)
         if row is None:
             return False
-        claimed = db.execute(
-            update(Outbox)
-            .where(Outbox.id == row.id, Outbox.status.in_(["PENDING", "PROCESSING"]))
-            .values(
-                status="PROCESSING",
-                attempt_count=Outbox.attempt_count + 1,
-                next_retry_at=now + timedelta(seconds=30),
-            )
-        )
-        if claimed.rowcount != 1:
-            db.rollback()
-            return False
-        db.commit()
         try:
             if row.event_type == "TASK_READY":
                 task = db.get(Task, row.aggregate_id)
@@ -75,6 +61,35 @@ class OutboxDispatcher:
             )
             db.commit()
         return True
+
+    def _claim(self, db: Session, now: datetime) -> Outbox | None:
+        """认领一条到期 Outbox（with_for_update 保留：生产 PG 行锁仍有效）。"""
+        row = db.scalar(
+            select(Outbox)
+            .where(
+                Outbox.status.in_(["PENDING", "PROCESSING"]),
+                (Outbox.next_retry_at.is_(None)) | (Outbox.next_retry_at <= now),
+            )
+            .order_by(Outbox.created_at)
+            .with_for_update()
+            .limit(1)
+        )
+        if row is None:
+            return None
+        claimed = db.execute(
+            update(Outbox)
+            .where(Outbox.id == row.id, Outbox.status.in_(["PENDING", "PROCESSING"]))
+            .values(
+                status="PROCESSING",
+                attempt_count=Outbox.attempt_count + 1,
+                next_retry_at=now + timedelta(seconds=30),
+            )
+        )
+        if claimed.rowcount != 1:
+            db.rollback()
+            return None
+        db.commit()
+        return row
 
 
 def execute_simulated(db: Session, task_id: UUID) -> None:

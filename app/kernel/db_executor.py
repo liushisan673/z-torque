@@ -1,11 +1,19 @@
-"""连接器目标数据库执行器（只读查询 + 需人工审批的写入语句）。
+"""连接器目标库契约策略层（注册期 SQL 校验 + 连接探测）。
 
-与 builtin_executors.DbQueryExecutor（应用自身 Engine）不同，本执行器直连"连接器配置的目标库"：
+运行时执行器 `ConnectorDbExecutor`（tool_type=DB_SQL）已按「能力实现归插件」原则
+迁入 app/builtin_plugins/db_executors.py（G2a），并反向引用本模块的策略函数。
+本模块保留内核契约层：
+- render_sql / validate_sql_statement：注册期与执行期共用的 SQL 校验（绑定变量化、
+  单条语句、DDL/管理命令黑名单、表白名单、参数一致性），由 API 注册路由直接调用；
+- probe_database：DB 连接器真实探测（SELECT 1 + 表清单）；
+- 下列内部辅助（_conn_params / _open_connection / _json_safe / _named_to_mysql /
+  _short_error / 行数常量）为本模块策略的实现细节，插件执行器按需引用。
+
+行为规则（校验与执行共同遵守）：
 - SQL 模板中 {{参数}} 一律转换为数据库【绑定变量】（:name），参数值永不拼接进 SQL，防注入；
 - 只读查询支持 SELECT（含 JOIN / UNION / 子查询 / WITH CTE）；写入仅允许单条 INSERT/UPDATE/DELETE
   （UPDATE/DELETE 必须带 WHERE）；任何语句都禁止 DDL / 管理命令节点（黑名单校验，注册期与执行期共用）；
 - 所有语句引用的表必须落在 allowed_tables 白名单内（CTE 别名除外），行数上限默认 100（上限 1000）；
-- 写入语句返回受影响行数，执行后提交，由注册路由强制 requires_confirmation 走人工审批；
 - 支持 postgresql / mysql / sqlite 驱动；连接信息取自连接器 config，密码取自解密后的 secret_value。
 """
 
@@ -20,8 +28,6 @@ from sqlglot import exp, parse
 
 # 本进程内 pg8000 仅由本模块使用：统一 named 参数风格（:name 绑定变量）
 pg8000.dbapi.paramstyle = "named"
-
-from app.kernel.ports.skill_executor import ExecutionResult
 
 # 模板占位符：{{参数名}}（与 HTTP executor 外观一致，但语义是绑定变量而非字符串替换）
 _TEMPLATE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
@@ -231,98 +237,6 @@ def _short_error(exc: Exception) -> str:
     """压缩连接/查询错误信息，避免内部细节全量外泄。"""
     text = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
     return text[:200]
-
-
-class ConnectorDbExecutor:
-    """连接器 DB 工具执行器（tool_type=DB_SQL）：绑定变量直连目标库，支持只读查询与受审批的写入。"""
-
-    tool_type = "DB_SQL"
-
-    def execute(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float) -> ExecutionResult:
-        template = str(config.get("sql_template") or "").strip()
-        if not template:
-            return ExecutionResult(status="FAILED", error_code="AI_DB_CONFIG_INVALID", error_message="SQL template is missing")
-        allowed = {str(table) for table in (config.get("allowed_tables") or [])}
-        connector_allowed = config.get("connector_allowed_tables")
-        if isinstance(connector_allowed, list):
-            # 连接器当前白名单与工具注册快照取交集，双向收紧（fail-closed）
-            allowed &= {str(table) for table in connector_allowed}
-        if not allowed:
-            return ExecutionResult(status="FAILED", error_code="AI_DB_FORBIDDEN", error_message="no allowed tables configured")
-        driver = str(config.get("driver") or "postgresql").lower()
-        try:
-            sql, params, is_write = validate_sql_statement(template, allowed, driver=driver, allow_write=True)
-            missing = [name for name in params if name not in arguments]
-            if missing:
-                return ExecutionResult(status="FAILED", error_code="AI_PARAM_INVALID", error_message=f"缺少绑定参数：{', '.join(missing)}")
-            bind = {name: arguments[name] for name in params}
-            if driver == "mysql":
-                sql = _named_to_mysql(sql)
-        except ValueError as exc:
-            return ExecutionResult(status="FAILED", error_code="AI_DB_QUERY_INVALID", error_message=str(exc))
-        max_rows = _DEFAULT_MAX_ROWS
-        if not is_write:
-            try:
-                max_rows = int(config.get("max_rows") or _DEFAULT_MAX_ROWS)
-            except (TypeError, ValueError):
-                max_rows = _DEFAULT_MAX_ROWS
-            max_rows = min(max(max_rows, 1), _MAX_ROWS_CAP)
-        try:
-            resolved_driver, conn_params = _conn_params(config, config.get("secret_value"), timeout_seconds)
-        except ValueError as exc:
-            return ExecutionResult(status="FAILED", error_code="AI_DB_CONFIG_INVALID", error_message=str(exc))
-        try:
-            if is_write:
-                affected = self._run_write(resolved_driver, conn_params, sql, bind)
-                return ExecutionResult(status="SUCCEEDED", data={"write": True, "rows_affected": affected})
-            rows = self._run_read(resolved_driver, conn_params, sql, bind, max_rows + 1)
-        except ValueError as exc:
-            return ExecutionResult(status="FAILED", error_code="AI_DB_CONFIG_INVALID", error_message=str(exc))
-        except Exception as exc:
-            return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message=f"数据库执行失败：{_short_error(exc)}")
-        truncated = len(rows) > max_rows
-        rows = rows[:max_rows]
-        return ExecutionResult(
-            status="SUCCEEDED",
-            data={
-                "rows": [_json_safe(row) for row in rows],
-                "row_count": len(rows),
-                "truncated": truncated,
-                "columns": list(rows[0].keys()) if rows else [],
-            },
-        )
-
-    @staticmethod
-    def _run_read(driver: str, params: dict[str, Any], sql: str, bind: dict[str, Any], limit: int) -> list[dict[str, Any]]:
-        """建立连接执行查询，返回原始行（dict）。"""
-        connection = _open_connection(driver, params)
-        try:
-            cursor = connection.cursor()
-            cursor.execute(sql, bind)
-            columns = [item[0] for item in cursor.description] if cursor.description else []
-            rows = cursor.fetchmany(limit)
-            return [dict(zip(columns, row)) for row in rows]
-        finally:
-            connection.close()
-
-    @staticmethod
-    def _run_write(driver: str, params: dict[str, Any], sql: str, bind: dict[str, Any]) -> int:
-        """执行写入语句：提交事务并返回受影响行数；失败回滚。"""
-        connection = _open_connection(driver, params)
-        try:
-            cursor = connection.cursor()
-            cursor.execute(sql, bind)
-            affected = cursor.rowcount
-            connection.commit()
-            return int(affected) if affected is not None and int(affected) > 0 else 0
-        except Exception:
-            try:
-                connection.rollback()
-            except Exception:
-                pass
-            raise
-        finally:
-            connection.close()
 
 
 def probe_database(config: dict[str, Any], password: str | None, timeout_seconds: float = _PROBE_TIMEOUT_SECONDS) -> list[str]:

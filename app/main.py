@@ -12,6 +12,7 @@ from app.core.errors import ApiError
 from app.core.responses import error_response, success_response
 from app.db.session import check_database
 from app.api.router import router as api_router
+from app.kernel.capabilities import derive_stage
 from app.kernel.task.runtime import TaskRuntime
 from app.kernel.md_skill_watcher import MdSkillWatcher
 from app.db.session import SessionLocal, engine
@@ -39,7 +40,7 @@ async def lifespan(app: FastAPI):
             watcher = MdSkillWatcher(settings.md_skills_dir, tenant.id, interval_seconds=settings.md_skill_scan_interval, enabled=settings.md_skill_watch_enabled, session_factory=SessionLocal)
             app.state.md_skill_watchers[str(tenant.id)] = watcher
             await watcher.start()
-    runtime = TaskRuntime(result.skill_gateway, result.model_gateway, queue=result.registry.get("queue.driver"), session_factory=SessionLocal)
+    runtime = TaskRuntime(result.skill_gateway, result.model_gateway, queue=result.registry.get("queue.driver"), session_factory=SessionLocal, model_selector=result.registry.try_get("model.selector"), lock_provider=result.registry.try_get("lock.provider"), short_memory=result.registry.get("memory.short"))
     await runtime.start()
     app.state.task_runtime = runtime
     try:
@@ -134,9 +135,10 @@ async def health(request: Request):
 @app.get("/api/z-torque/capabilities")
 async def capabilities(request: Request):
     settings = get_settings()
-    # Port 能力来自注册表真实解析状态（阶段00 §3.5），不再是静态清单
+    # Port 能力来自注册表真实解析状态（阶段00 §3.5），不再是静态清单；
+    # stage 由装配状态推导（P2-5），不再硬编码
     registry = getattr(request.app.state, "port_registry", None)
     ports = registry.status() if registry is not None else []
     model_resolution = registry.resolution("model.provider") if registry is not None else None
     model_implementation = model_resolution.label if model_resolution is not None else None
-    return success_response(request, {"stage": "09", "features": ["health", "configuration", "chat", "model_gateway", "function_calling", "task_sse", "md_skill_discovery", "md_skill_versions", "connectors", "rest_connector", "readonly_db_connector", "mcp_connector", "working_memory", "short_term_memory", "file_upload", "file_parsing"], "ports": ports, "md_skill": {"directory": str(settings.md_skills_dir), "script_enabled": settings.md_skill_script_enabled}, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled}, "files": {"storage_dir": str(settings.file_storage_dir), "max_upload_mb": settings.max_upload_size_mb}, "connectors": {"allowed_targets": settings.connector_allowed_targets, "max_response_bytes": settings.connector_max_response_bytes}})
+    return success_response(request, {"stage": derive_stage(registry), "features": ["health", "configuration", "chat", "model_gateway", "function_calling", "model_selector", "task_sse", "task_recovery_and_cancel", "delegation", "md_skill_discovery", "md_skill_versions", "md_skill_watch", "connectors", "rest_connector", "readonly_db_connector", "mcp_connector", "secret_provider", "working_memory", "short_term_memory", "file_upload", "file_parsing", "audit_query", "admin_iam", "plugin_circuit_breaker", "plugin_sdk", "module_assembly"], "ports": ports, "md_skill": {"directory": str(settings.md_skills_dir), "script_enabled": settings.md_skill_script_enabled}, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled}, "files": {"storage_dir": str(settings.file_storage_dir), "max_upload_mb": settings.max_upload_size_mb}, "connectors": {"allowed_targets": settings.connector_allowed_targets, "max_response_bytes": settings.connector_max_response_bytes}})

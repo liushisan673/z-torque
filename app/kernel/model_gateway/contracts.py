@@ -9,6 +9,8 @@ class ModelMessage:
     content: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    # 思考模型（如 deepseek-flash）的思考过程：多轮回传时官方要求必须携带，否则上游 400
+    reasoning_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class ModelResponse:
     finish_reason: str | None = None
     provider_request_id: str | None = None
     usage: ModelUsage | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass(frozen=True)

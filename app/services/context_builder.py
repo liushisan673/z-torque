@@ -1,4 +1,5 @@
 from uuid import UUID
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -34,6 +35,20 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
     return system_prompt
 
 
+def assistant_reasoning_parts(reasoning_content: str | None) -> list[dict[str, Any]] | None:
+    """assistant 回复的思考过程落库载体（content_parts 复用）：None 表示无思考内容。"""
+    if not reasoning_content:
+        return None
+    return [{"type": "reasoning", "text": reasoning_content}]
+
+
+def _reasoning_of(message: Message) -> str | None:
+    for part in (message.content_parts or []):
+        if isinstance(part, dict) and part.get("type") == "reasoning":
+            return str(part.get("text") or "") or None
+    return None
+
+
 def build_context(db: Session, conversation: Conversation, *, system_prompt: str | None = None, limit: int = 5, max_chars: int = 48000, attachment_ids: list | None = None) -> list[ModelMessage]:
     messages = db.scalars(select(Message).where(Message.tenant_id == conversation.tenant_id, Message.conversation_id == conversation.id).order_by(Message.created_at.desc(), Message.id.desc()).limit(limit)).all()
     context = [ModelMessage('system', system_prompt)] if system_prompt else []
@@ -42,7 +57,7 @@ def build_context(db: Session, conversation: Conversation, *, system_prompt: str
         context.append(ModelMessage('system', f"Conversation summary (untrusted context):\n{memory.summary}"))
     for message in reversed(messages):
         role = 'user' if message.sender_type == 'USER' else 'assistant'
-        candidate = ModelMessage(role, message.content)
+        candidate = ModelMessage(role, message.content, reasoning_content=_reasoning_of(message))
         if sum(len(item.content) for item in context) + len(candidate.content) <= max_chars:
             context.append(candidate)
     if attachment_ids:

@@ -10,7 +10,26 @@ from app.models import Agent, AgentVersion, AgentVersionSkill, Skill, SkillVersi
 from app.services.function_calling import ToolMapping, safe_function_name
 
 
-def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID) -> tuple[dict[str, ToolMapping], list[dict]]:
+def _sanitize_schema(node):
+    """递归剥离模型不可解析的 $ref（OpenAPI 导入残留的 '#/components/...' 悬空引用
+    会被上游以 400 拒绝："Invalid schema for function ... Pointer does not exist"，
+    并会使执行侧 jsonschema 校验抛 RefResolutionError）。
+
+    含 $ref 的子树替换为 object 类型并保留 description；未引用 $ref 的 schema 原样通过。
+    """
+    if isinstance(node, dict):
+        if "$ref" in node:
+            cleaned: dict = {"type": "object"}
+            if node.get("description"):
+                cleaned["description"] = node["description"]
+            return cleaned
+        return {key: _sanitize_schema(value) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_sanitize_schema(item) for item in node]
+    return node
+
+
+def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID, *, exclude_requires_confirmation: bool = False) -> tuple[dict[str, ToolMapping], list[dict]]:
     if agent_version is None:
         return {}, []
     mappings: dict[str, ToolMapping] = {}
@@ -36,10 +55,15 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID)
             tool = db.get(Tool, tool_version.tool_id) if tool_version else None
             if tool_version is None or tool is None or tool_version.tenant_id != tenant_id or tool.status != "ACTIVE" or tool_version.status != "PUBLISHED":
                 continue
+            # 委派子代理不可见需人工确认的工具：子执行链无任务级 checkpoint 挂起语义，
+            # 若不排除，写入类工具会绕过人工审批直接执行（fail-closed）
+            if exclude_requires_confirmation and (skill.requires_confirmation or tool_version.requires_confirmation):
+                continue
             name = tool.name
             if name in mappings:
                 continue
-            schema = tool_version.input_schema or {"type": "object", "properties": {}}
+            # 净化后同时用于"发给模型的工具定义"与"执行侧参数校验"，保证两侧一致
+            schema = _sanitize_schema(tool_version.input_schema or {"type": "object", "properties": {}})
             alias = safe_function_name(name)
             mappings[alias] = ToolMapping(alias, skill.id, tool_version.id, schema)
             # 工具描述只取工具自身 description，禁止回退到 skill.instructions——

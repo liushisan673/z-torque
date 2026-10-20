@@ -161,6 +161,7 @@ class PortRegistry:
                 "required": spec.required,
                 "description": spec.description,
                 "community_default": spec.community_default,
+                "version": spec.version,
                 "state": resolution.state if resolution else PortState.NOT_PORTED,
             }
             if resolution is not None:

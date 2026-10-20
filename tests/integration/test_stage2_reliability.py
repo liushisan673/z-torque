@@ -5,7 +5,8 @@ import pytest
 from sqlalchemy import delete
 
 from app.db.session import SessionLocal
-from app.kernel.ports.queue_driver import InMemoryQueueDriver
+from app.builtin_plugins.queue_driver import InMemoryQueueDriver
+from app.kernel.security_context import SecurityContext
 from app.kernel.task.dispatcher import OutboxDispatcher
 from app.kernel.task.runtime import TaskRuntime
 from app.kernel.task.service import create_task, transition_task
@@ -40,8 +41,7 @@ def setup_task():
         db.flush()
         task = create_task(
             db,
-            tenant_id=tenant.id,
-            owner_user_id=user.id,
+            ctx=SecurityContext(tenant_id=tenant.id, user_id=user.id),
             agent_id=uuid4(),
             agent_version_id=uuid4(),
             idempotency_key=str(uuid4()),
@@ -86,7 +86,7 @@ def test_recovery_requeues_running_task_and_writes_outbox():
         transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
         transition_task(db, task, TaskStatus.RUNNING, "TASK_STARTED", "started")
     import asyncio
-    asyncio.run(TaskRuntime(session_factory=SessionLocal).recover())
+    asyncio.run(TaskRuntime(queue=InMemoryQueueDriver(), session_factory=SessionLocal).recover())
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         assert task.status == TaskStatus.QUEUED

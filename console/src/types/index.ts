@@ -421,7 +421,7 @@ export interface ConnectorDiscoveredToolSummary {
   input_schema?: Record<string, unknown>;
 }
 
-// GET /connectors/{id}/tools 返回（联查 Tool 后的已注册能力）
+// GET /connectors/{id}/tools 返回（联查 Tool 后的已注册工具）
 export interface ConnectorToolLink {
   id: string;
   external_name: string | null;

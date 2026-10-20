@@ -158,6 +158,8 @@ export function ConnectorsPage() {
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editConfig, setEditConfig] = useState<Record<string, string>>({});
+  // REST 凭据头编辑行（连接器级认证头：覆盖该连接器全部导入工具的同名头模板）
+  const [authHeadersRows, setAuthHeadersRows] = useState<{ key: string; value: string }[]>([]);
 
   // 健康检查结果（本会话内保留，按连接 id 记忆）
   const [testResults, setTestResults] = useState<Record<string, ConnectorTestResult>>({});
@@ -265,6 +267,7 @@ export function ConnectorsPage() {
       setEditName(d.name);
       setEditDesc(d.description ?? "");
       setEditConfig(initEditConfig(d));
+      setAuthHeadersRows(initAuthHeaders(d));
       setTableSelection(initTableSelection(d));
       await loadTools(d.id);
     } catch (err) {
@@ -288,6 +291,15 @@ export function ConnectorsPage() {
       }
     }
     return map;
+  }
+
+  // 由 config.auth_headers 初始化凭据头编辑行（值是后端掩码回显，保存时后端按掩码语义保留旧值）
+  function initAuthHeaders(d: Connector): { key: string; value: string }[] {
+    const raw = d.config["auth_headers"];
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+      return Object.entries(raw as Record<string, unknown>).map(([key, value]) => ({ key, value: String(value ?? "") }));
+    }
+    return [];
   }
 
   // 由 config.allowed_tables 初始化表勾选
@@ -321,6 +333,17 @@ export function ConnectorsPage() {
     if (detail.connector_type !== "DB") {
       base["auth_mode"] = (editConfig["auth_mode"] ?? "").trim() || AUTH_MODES[0];
       base["auth_header"] = (editConfig["auth_header"] ?? "").trim() || "Authorization";
+    }
+    if (detail.connector_type === "REST") {
+      // 凭据头：空行剔除；掩码回显/新明文原样提交，由后端按语义处理（掩码保留旧值、明文自动加密）
+      const headers: Record<string, string> = {};
+      for (const row of authHeadersRows) {
+        const k = row.key.trim();
+        const v = row.value.trim();
+        if (k && v) headers[k] = v;
+      }
+      if (Object.keys(headers).length) base["auth_headers"] = headers;
+      else delete base["auth_headers"];
     }
     return base;
   }
@@ -608,6 +631,7 @@ export function ConnectorsPage() {
       });
       setDetail(d);
       setEditConfig(initEditConfig(d));
+      setAuthHeadersRows(initAuthHeaders(d));
       await load();
       await runTest(d);
     } catch (err) {
@@ -763,6 +787,7 @@ export function ConnectorsPage() {
             setEditName(detail.name);
             setEditDesc(detail.description ?? "");
             setEditConfig(initEditConfig(detail));
+            setAuthHeadersRows(initAuthHeaders(detail));
           }
         }}>取消</button>
         <button className="btn btn-primary" disabled={busy || !editName.trim()} onClick={() => void saveEdit()}>保存修改</button>
@@ -821,7 +846,7 @@ export function ConnectorsPage() {
                   why={loading ? undefined : canManage ? "接入外部系统与 MCP 工具，需要先创建连接" : "连接由管理员统一创建与维护"}
                   actionLabel={canManage ? "新建连接" : undefined}
                   onAction={canManage ? () => setCreateOpen(true) : undefined}
-                  hint={canManage ? "创建后可在「操作」tab 登记工具，供技能绑定调用" : undefined}
+                  hint={canManage ? "创建后可在「工具」页签登记工具，供技能绑定调用" : undefined}
                 />
               </div>
             ) : (
@@ -931,7 +956,7 @@ export function ConnectorsPage() {
                     type="button"
                     onClick={() => setTab(t)}
                   >
-                    {t === "overview" ? "概览" : t === "config" ? "连接配置" : t === "auth" ? "认证与密钥" : t === "ops" ? "操作 / 能力" : "健康检查"}
+                    {t === "overview" ? "概览" : t === "config" ? "连接配置" : t === "auth" ? "认证与密钥" : t === "ops" ? "工具" : "健康检查"}
                   </button>
                 ))}
               </div>
@@ -996,7 +1021,7 @@ export function ConnectorsPage() {
                           <div className="value">{lastTest ? `${lastTest.latency_ms} ms` : "—"}</div>
                         </div>
                         <div className="connector-health-card">
-                          <div className="label">可用操作</div>
+                          <div className="label">可用工具</div>
                           <div className="value">{tools.length}</div>
                         </div>
                       </div>
@@ -1135,6 +1160,39 @@ export function ConnectorsPage() {
                           )}
                         </div>
                       </div>
+                      {detail?.connector_type === "REST" && (
+                        <div style={{ marginTop: 16 }}>
+                          <label style={{ fontSize: 12, fontWeight: 500, color: "var(--text-muted)", display: "block", marginBottom: 8 }}>
+                            凭据头（覆盖导入工具的同名头模板，一次配置对该连接器全部工具生效）
+                          </label>
+                          {editingFields && authHeadersRows.map((row, idx) => (
+                            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                              <input
+                                type="text"
+                                placeholder="头名（如 CSRF-TOKEN）"
+                                style={{ flex: 1 }}
+                                value={row.key}
+                                onChange={(e) => setAuthHeadersRows((p) => p.map((r, i) => (i === idx ? { ...r, key: e.target.value } : r)))}
+                              />
+                              <input
+                                type="text"
+                                placeholder={row.value.startsWith("secret://") ? "已加密保存（输入新值可更换）" : "值（保存时自动加密，不落明文）"}
+                                style={{ flex: 2 }}
+                                value={row.value}
+                                onChange={(e) => setAuthHeadersRows((p) => p.map((r, i) => (i === idx ? { ...r, value: e.target.value } : r)))}
+                              />
+                              <button className="btn btn-secondary" type="button" onClick={() => setAuthHeadersRows((p) => p.filter((_, i) => i !== idx))}>删除</button>
+                            </div>
+                          ))}
+                          {editingFields && (
+                            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                              <button className="btn btn-secondary" type="button" onClick={() => setAuthHeadersRows((p) => [...p, { key: "", value: "" }])}>添加凭据头</button>
+                              <span className="hint">明文保存后自动转为加密引用；头名与导入工具 headers 模板同名时执行期自动覆盖</span>
+                            </div>
+                          )}
+                          {!editingFields && authHeadersRows.length === 0 && <span className="hint">未配置（进入编辑可添加）</span>}
+                        </div>
+                      )}
                     </div>
                     {editingFields && editBar()}
                   </div>
@@ -1142,16 +1200,16 @@ export function ConnectorsPage() {
                   <div className="tab-panel">
                     <div className="connector-section">
                       <h3>
-                        已注册操作 / 能力
-                        <span className="hint">可登记为工具供 Skill 使用</span>
+                        已注册工具
+                        <span className="hint">登记后供技能绑定调用</span>
                       </h3>
                       {tools.length === 0 ? (
-                        <div className="skill-readonly-banner">当前连接尚未注册任何操作。</div>
+                        <div className="skill-readonly-banner">当前连接尚未注册任何工具。</div>
                       ) : (
                         <table className="connector-op-table">
                           <thead>
                             <tr>
-                              <th>操作</th>
+                              <th>工具</th>
                               <th>类型</th>
                               <th>说明</th>
                               <th>授权</th>
@@ -1175,7 +1233,7 @@ export function ConnectorsPage() {
                       )}
                       {canManage && enabled && (
                         <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setRegType(selected.connector_type === "DB" ? "DB_SQL" : "HTTP"); setRegOpen(true); }}>登记新操作为工具</button>
+                          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setRegType(selected.connector_type === "DB" ? "DB_SQL" : "HTTP"); setRegOpen(true); }}>登记新工具</button>
                           {selected.connector_type === "REST" && (
                             <button
                               className="btn btn-secondary btn-sm"
@@ -1249,7 +1307,7 @@ export function ConnectorsPage() {
                         </div>
                       )}
                       <p className="connector-foot-hint">
-                        发现能力 ≠ 已授权。注册与启停由后端与权限控制；前端不能直接调用目标系统。
+                        发现工具 ≠ 已授权。注册与启停由后端与权限控制；前端不能直接调用目标系统。
                       </p>
                     </div>
                   </div>
@@ -1348,7 +1406,7 @@ export function ConnectorsPage() {
                       {/* MCP 连接：展示真实握手发现的工具清单 */}
                       {lastTest && selected.connector_type === "MCP" && (
                         <div className="connector-section" style={{ marginTop: 16, marginBottom: 0 }}>
-                          <h3>发现的工具 <span className="hint">在「操作 / 能力」页签可注册为工具</span></h3>
+                          <h3>发现的工具 <span className="hint">可在「工具」页签查看与登记</span></h3>
                           {(lastTest.tools ?? []).length === 0 ? (
                             <div className="skill-readonly-banner">MCP 服务未返回任何工具。</div>
                           ) : (
@@ -1464,10 +1522,10 @@ export function ConnectorsPage() {
         </div>
       </Modal>
 
-      {/* 登记操作为 Tool 弹窗 */}
+      {/* 登记工具弹窗：把连接器侧能力登记为平台 Tool 实体 */}
       <Modal
         open={regOpen}
-        title="登记操作为工具"
+        title="登记工具"
         onClose={() => setRegOpen(false)}
         footer={
           <>
@@ -1477,7 +1535,7 @@ export function ConnectorsPage() {
         }
       >
         <div className="form-field">
-          <label>操作名</label>
+          <label>工具名</label>
           <input className="input" value={regName} onChange={(e) => setRegName(e.target.value)} placeholder="例如：list_customers" />
         </div>
         <div className="form-field">
@@ -1536,7 +1594,7 @@ export function ConnectorsPage() {
         )}
         <div className="form-field">
           <label>说明</label>
-          <textarea className="textarea" value={regDesc} onChange={(e) => setRegDesc(e.target.value)} placeholder="该操作的用途（可选）" />
+          <textarea className="textarea" value={regDesc} onChange={(e) => setRegDesc(e.target.value)} placeholder="该工具的用途（可选）" />
         </div>
       </Modal>
 

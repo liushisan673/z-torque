@@ -5,21 +5,29 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
 from app.db.session import SessionLocal
+from app.builtin_plugins.queue_driver import InMemoryQueueDriver
+from app.kernel.security_context import SecurityContext
+from app.kernel.skill_confirmation import pause_task_for_confirmation
 from app.kernel.task.dispatcher import OutboxDispatcher, execute_simulated
 from app.kernel.task.runtime import TaskRuntime
 from app.kernel.task.service import create_task, transition_task
 from app.kernel.task.states import TaskStatus
+from app.main import app
 from app.models import (
     Agent,
     AgentVersion,
+    AuditLog,
     AuthSession,
+    Confirmation,
     Conversation,
     Message,
     Outbox,
     Task,
+    TaskCheckpoint,
     TaskEvent,
     Tenant,
     User,
@@ -31,7 +39,7 @@ from app.security.passwords import hash_password
 def cleanup():
     yield
     with SessionLocal.begin() as db:
-        for model in (Message, Conversation, TaskEvent, Outbox, Task, AgentVersion, Agent, AuthSession, User, Tenant):
+        for model in (Message, Conversation, TaskEvent, Outbox, TaskCheckpoint, Confirmation, Task, AgentVersion, Agent, AuditLog, AuthSession, User, Tenant):
             db.execute(delete(model))
 
 
@@ -67,8 +75,7 @@ async def test_outbox_dispatch_task_ready_is_effectively_idempotent():
     with SessionLocal.begin() as db:
         task = create_task(
             db,
-            tenant_id=tenant_id,
-            owner_user_id=user_id,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
             agent_id=agent_id,
             agent_version_id=version_id,
             idempotency_key=str(uuid4()),
@@ -111,8 +118,7 @@ def test_execute_simulated_honors_cancel_requested_before_side_effects():
     with SessionLocal.begin() as db:
         task = create_task(
             db,
-            tenant_id=tenant_id,
-            owner_user_id=user_id,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
             agent_id=agent_id,
             agent_version_id=version_id,
             idempotency_key=str(uuid4()),
@@ -138,8 +144,7 @@ def test_runtime_recover_requeues_running_and_writes_recovered_outbox():
     with SessionLocal.begin() as db:
         task = create_task(
             db,
-            tenant_id=tenant_id,
-            owner_user_id=user_id,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
             agent_id=agent_id,
             agent_version_id=version_id,
             idempotency_key=str(uuid4()),
@@ -151,7 +156,7 @@ def test_runtime_recover_requeues_running_and_writes_recovered_outbox():
         # create_task already wrote one TASK_READY; recover should add another.
         assert db.query(Outbox).filter_by(aggregate_id=task_id, event_type="TASK_READY").count() == 1
 
-    asyncio.run(TaskRuntime(session_factory=SessionLocal).recover())
+    asyncio.run(TaskRuntime(queue=InMemoryQueueDriver(), session_factory=SessionLocal).recover())
 
     with SessionLocal() as db:
         task = db.get(Task, task_id)
@@ -166,8 +171,7 @@ def test_timeout_loop_behavior_can_be_simulated_by_setting_deadline_and_executin
     with SessionLocal.begin() as db:
         task = create_task(
             db,
-            tenant_id=tenant_id,
-            owner_user_id=user_id,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
             agent_id=agent_id,
             agent_version_id=version_id,
             idempotency_key=str(uuid4()),
@@ -185,3 +189,109 @@ def test_timeout_loop_behavior_can_be_simulated_by_setting_deadline_and_executin
         assert task is not None
         assert task.status == TaskStatus.TIMEOUT
         assert task.error_code == "AI_TASK_TIMEOUT"
+
+
+def test_cancel_running_task_converges_to_cancelled():
+    """协作式取消终态收敛：CANCELING 任务的执行循环取消路径必须落 CANCELLED 而非 FAILED。"""
+    tenant_id, user_id, agent_id, version_id = _bootstrap()
+    with SessionLocal.begin() as db:
+        task = create_task(
+            db,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
+            agent_id=agent_id,
+            agent_version_id=version_id,
+            idempotency_key=str(uuid4()),
+            request_summary="run",
+        )
+        transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
+        transition_task(db, task, TaskStatus.RUNNING, "TASK_STARTED", "started")
+        transition_task(db, task, TaskStatus.CANCELING, "TASK_CANCEL_REQUESTED", "task cancellation requested")
+        task_id = task.id
+
+    runtime = TaskRuntime(queue=InMemoryQueueDriver(), session_factory=SessionLocal)
+    with SessionLocal() as db:
+        result = runtime._cancel_running_task(db, task_id)
+        assert result["status"] == "CANCELLED"
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.CANCELLED
+        assert db.query(TaskEvent).filter_by(task_id=task_id, event_type="TASK_CANCELLED").count() == 1
+
+
+def test_cancel_running_task_handles_running_race():
+    """竞态兜底：取消事件先于取消路由提交被感知时任务仍为 RUNNING，先入 CANCELING 再收敛。"""
+    tenant_id, user_id, agent_id, version_id = _bootstrap()
+    with SessionLocal.begin() as db:
+        task = create_task(
+            db,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
+            agent_id=agent_id,
+            agent_version_id=version_id,
+            idempotency_key=str(uuid4()),
+            request_summary="run",
+        )
+        transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
+        transition_task(db, task, TaskStatus.RUNNING, "TASK_STARTED", "started")
+        task_id = task.id
+
+    runtime = TaskRuntime(queue=InMemoryQueueDriver(), session_factory=SessionLocal)
+    with SessionLocal() as db:
+        result = runtime._cancel_running_task(db, task_id)
+        assert result["status"] == "CANCELLED"
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.CANCELLED
+        assert db.query(TaskEvent).filter_by(task_id=task_id, event_type="TASK_CANCEL_REQUESTED").count() == 1
+
+
+@pytest.mark.asyncio
+async def test_waiting_human_task_can_be_cancelled_via_api():
+    """等待审批中的任务允许取消：终态 CANCELLED 且挂起 checkpoint 置 EXPIRED。"""
+    tenant_id, user_id, agent_id, version_id = _bootstrap()
+    with SessionLocal.begin() as db:
+        task = create_task(
+            db,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
+            agent_id=agent_id,
+            agent_version_id=version_id,
+            idempotency_key=str(uuid4()),
+            request_summary="run",
+        )
+        transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
+        transition_task(db, task, TaskStatus.RUNNING, "TASK_STARTED", "started")
+        pause_task_for_confirmation(
+            db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            task_id=task.id,
+            reason="write tool requires approval",
+            snapshot={},
+            execution_context={},
+            completed_steps=[],
+            pending_steps=[],
+            pending_call={"tool_version_id": str(uuid4())},
+            idempotency_key=f"{task.id}:write",
+        )
+        task_id = task.id
+
+    with SessionLocal() as db:
+        username = db.get(User, user_id).username
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login = await client.post("/api/z-torque/auth/login", json={"username": username, "password": "pass"})
+        assert login.status_code == 200
+        token = login.json()["data"]["access_token"]
+        resp = await client.post(f"/api/z-torque/tasks/{task_id}/cancel", headers={"Authorization": f"Bearer {token}"})
+        assert resp.status_code == 200
+        assert resp.json()["data"]["status"] == "CANCELLED"
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.CANCELLED
+        checkpoint = db.query(TaskCheckpoint).filter_by(task_id=task_id).one()
+        assert checkpoint.status == "EXPIRED"

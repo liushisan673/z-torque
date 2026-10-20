@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
+from app.kernel.security_context import SecurityContext
 from app.kernel.task.service import create_task
 from app.models import Agent, Conversation, Message
 
@@ -22,7 +23,10 @@ class ChatResult:
     response_content: str | None = None
 
 
-def handle_mock_chat(db: Session, *, tenant_id: UUID, user_id: UUID, conversation_id: UUID, content: str, requires_task: bool = False, idempotency_key: str | None = None, trace_id: str | None = None) -> ChatResult:
+def handle_mock_chat(db: Session, *, ctx: SecurityContext, conversation_id: UUID, content: str, requires_task: bool = False, idempotency_key: str | None = None, trace_id: str | None = None) -> ChatResult:
+    tenant_id = ctx.tenant_id
+    user_id = ctx.user_id
+    trace_id = trace_id or ctx.trace_id
     conversation = db.scalar(select(Conversation).where(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id, Conversation.owner_user_id == user_id, Conversation.status == "ACTIVE"))
     if conversation is None:
         raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
@@ -33,7 +37,7 @@ def handle_mock_chat(db: Session, *, tenant_id: UUID, user_id: UUID, conversatio
     if requires_task:
         if not idempotency_key:
             raise ApiError("AI_PARAM_INVALID", "idempotency key is required for task chat", 400)
-        task = create_task(db, tenant_id=tenant_id, owner_user_id=user_id, agent_id=conversation.agent_id, agent_version_id=_published_version_id(db, conversation.agent_id), idempotency_key=idempotency_key, request_summary=content, conversation_id=conversation.id, trigger_message_id=user_message.id, trace_id=trace_id)
+        task = create_task(db, ctx=ctx, agent_id=conversation.agent_id, agent_version_id=_published_version_id(db, conversation.agent_id), idempotency_key=idempotency_key, request_summary=content, conversation_id=conversation.id, trigger_message_id=user_message.id, trace_id=trace_id)
         user_message.status = "COMPLETED"
         return ChatResult(user_message=user_message, assistant_message=None, task_id=task.id)
     assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content="[MOCK] " + content, status="COMPLETED")

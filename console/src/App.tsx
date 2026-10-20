@@ -16,6 +16,8 @@ const ModelsPage = lazy(() => import("./pages/Models").then((m) => ({ default: m
 const ConnectorsPage = lazy(() => import("./pages/Connectors").then((m) => ({ default: m.ConnectorsPage })));
 const AuditPage = lazy(() => import("./pages/Audit").then((m) => ({ default: m.AuditPage })));
 const UsersPage = lazy(() => import("./pages/Users").then((m) => ({ default: m.UsersPage })));
+// 嵌入对话页：第三方宿主 iframe 集成，不走 RequireAccess（自带登录态探测）
+const ChatEmbedPage = lazy(() => import("./pages/embed/ChatEmbed").then((m) => ({ default: m.ChatEmbedPage })));
 
 /**
  * 认证 + 访问守卫：未登录跳登录页；已登录但无对应导航访问权限时
@@ -66,6 +68,7 @@ export function App() {
       <Suspense fallback={<LoadingScreen />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/embed/chat" element={<ChatEmbedPage />} />
           <Route path="/chat" element={<RequireAccess><ChatPage /></RequireAccess>} />
           <Route path="/agents" element={<RequireAccess><ConsoleShell><AgentsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/skills" element={<RequireAccess><ConsoleShell><SkillsPage /></ConsoleShell></RequireAccess>} />

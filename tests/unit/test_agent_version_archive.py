@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.core.errors import ApiError
 from app.db.session import SessionLocal
 from app.kernel.agent.version_service import archive_check, archive_version
+from app.kernel.security_context import SecurityContext
 from app.kernel.task.service import create_task
 from app.models import Agent, AgentVersion, AuditLog, Task, Tenant, User
 from app.security.passwords import hash_password
@@ -45,8 +46,7 @@ def _fixture(db):
 def _task(db, tenant, user, agent, version, status: str) -> Task:
     task = create_task(
         db,
-        tenant_id=tenant.id,
-        owner_user_id=user.id,
+        ctx=SecurityContext(tenant_id=tenant.id, user_id=user.id),
         agent_id=agent.id,
         agent_version_id=version.id,
         idempotency_key=str(uuid4()),

@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.responses import success_response
 from app.db.session import get_db
-from app.kernel.skill_confirmation import resolve_confirmation
 from app.models import Confirmation, User
 from app.schemas.confirmation import ConfirmationResolveRequest, ConfirmationResponse
 
@@ -31,7 +30,9 @@ async def get_confirmation(confirmation_id: UUID, request: Request, user: User =
 
 @router.post("/{confirmation_id}/resolve", summary="处理确认请求")
 async def resolve(confirmation_id: UUID, payload: ConfirmationResolveRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    row = resolve_confirmation(db, tenant_id=user.tenant_id, confirmation_id=confirmation_id, user_id=user.id, approved=payload.approved)
+    # 裁决经 approval.provider Port（P2 收口；PEP/幂等/自审拦截语义由实现保证）
+    provider = request.app.state.port_registry.get("approval.provider")
+    row = provider.resolve(db, tenant_id=user.tenant_id, confirmation_id=confirmation_id, user_id=user.id, approved=payload.approved)
     db.commit()
     db.refresh(row)
     return success_response(request, ConfirmationResponse.model_validate(row).model_dump(mode="json"))

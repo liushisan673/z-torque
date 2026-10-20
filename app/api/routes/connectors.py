@@ -40,14 +40,14 @@ def _mcp_error_reason(exc: Exception) -> str:
     return str(exc).strip().splitlines()[0][:200] or "unknown error"
 
 
-async def _probe_mcp(config: dict, secret_ref: str | None = None) -> dict:
+async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = None) -> dict:
     """对 MCP 连接做真实探测：initialize 握手 + tools/list，返回 tools/list 原始结果。
 
-    仅支持 HTTP 传输（Streamable HTTP）；失败抛 ApiError 或底层 Mcp*Error。
+    仅支持 HTTP 传输（Streamable HTTP）；传输实现经装配注入的 SkillGateway
+    （http_connector_factory）构造，本模块不直接导入 builtin_plugins（G1 修复）。
+    失败抛 ApiError 或底层 Mcp*Error。
     """
     from app.config import get_settings
-    from app.builtin_plugins.mcp import StreamableHttpMcpConnector
-    from app.security.secret_store import SecretStore, SecretStoreError
 
     settings = get_settings()
     config = config or {}
@@ -59,24 +59,16 @@ async def _probe_mcp(config: dict, secret_ref: str | None = None) -> dict:
         timeout = float(raw_timeout) if raw_timeout else settings.mcp_timeout_seconds
     except (TypeError, ValueError):
         timeout = settings.mcp_timeout_seconds
-    auth_token = None
-    if secret_ref:
-        try:
-            auth_token = SecretStore().decrypt(secret_ref.removeprefix("secret://"))
-        except SecretStoreError as exc:
-            raise ApiError("AI_CONNECTOR_SECRET_INVALID", "连接器凭证无法解密", 503) from exc
-    connector = StreamableHttpMcpConnector(
+    gateway = getattr(request.app.state, "skill_gateway", None)
+    if gateway is None:
+        raise ApiError("AI_CONNECTOR_UNAVAILABLE", "skill gateway is unavailable", 503)
+    return await gateway.probe_mcp_http(
         endpoint,
         allowed_hosts=settings.mcp_allowed_hosts,
         timeout_seconds=max(min(timeout, MCP_PROBE_TIMEOUT_SECONDS), 1.0),
         max_response_bytes=settings.mcp_max_response_bytes,
-        auth_token=auth_token,
+        secret_ref=secret_ref,
     )
-    try:
-        await connector.negotiate()
-        return await connector.list_tools()
-    finally:
-        await connector.close()
 
 
 def _rest_auth_headers(config: dict, secret_ref: str | None) -> tuple[dict[str, str], bool]:
@@ -92,8 +84,18 @@ def _rest_auth_headers(config: dict, secret_ref: str | None) -> tuple[dict[str, 
     """
     mode = str(config.get("auth_mode") or "Bearer Token")
     headers: dict[str, str] = {}
+    # 连接器级凭据头（auth_headers，值 secret:// 引用）：探测时一并解密附加，
+    # 与工具执行期行为一致（_materialize_config 合并 → HttpExecutor 解密）
+    for name, value in (config.get("auth_headers") or {}).items():
+        if not str(value).startswith("secret://"):
+            continue
+        from app.security.secret_store import SecretStore, SecretStoreError
+        try:
+            headers[str(name)] = SecretStore().decrypt(str(value).removeprefix("secret://"))
+        except SecretStoreError as exc:
+            raise ApiError("AI_CONNECTOR_SECRET_INVALID", "连接器凭据头无法解密", 503) from exc
     if not secret_ref:
-        return headers, False
+        return headers, bool(headers)
     from app.security.secret_store import SecretStore, SecretStoreError
     try:
         token = SecretStore().decrypt(secret_ref.removeprefix("secret://"))
@@ -106,7 +108,7 @@ def _rest_auth_headers(config: dict, secret_ref: str | None) -> tuple[dict[str, 
         headers[header] = token
     elif mode == "Basic Auth":
         headers["Authorization"] = f"Basic {token}"
-    # 匿名模式：故意不发任何凭证
+    # 匿名模式：故意不发任何凭证（凭据头仍附加）
     return headers, bool(headers)
 
 
@@ -266,12 +268,26 @@ def _is_private_address(host: str | None) -> bool:
     return bool(ip.is_private or ip.is_loopback or ip.is_link_local)
 
 
+_SECRET_MASK_PREFIX = "secret://••••"
+
+
 def _mask_secret_ref(value: str | None) -> str | None:
     """脱敏 Secret URI：仅保留引用形态与末 4 位，任何场景不返回完整引用/明文。"""
     if not value:
         return None
     tail = value[-4:] if len(value) > 8 else "****"
-    return f"secret://••••{tail}"
+    return f"{_SECRET_MASK_PREFIX}{tail}"
+
+
+def _sanitize_config_for_output(config: dict) -> dict:
+    """config 出参脱敏：凭据头（auth_headers）值只回显掩码形态，任何场景不返回完整引用/明文。"""
+    auth_headers = config.get("auth_headers")
+    if isinstance(auth_headers, dict) and auth_headers:
+        return {
+            **config,
+            "auth_headers": {str(k): _mask_secret_ref(str(v)) for k, v in auth_headers.items()},
+        }
+    return config
 
 
 def serialize(item: Connector) -> dict:
@@ -280,7 +296,7 @@ def serialize(item: Connector) -> dict:
         "name": item.name,
         "connector_type": item.connector_type,
         "status": item.status,
-        "config": item.config,
+        "config": _sanitize_config_for_output(item.config or {}),
         "secret_configured": bool(item.secret_ref),
         "secret_ref_masked": _mask_secret_ref(item.secret_ref),
         "target_policy": item.target_policy,
@@ -324,6 +340,32 @@ async def patch_connector(connector_id: UUID, payload: ConnectorPatchRequest, re
     values = payload.model_dump(exclude_unset=True)
     if "secret_ref" in values and values["secret_ref"] and not values["secret_ref"].startswith("secret://"):
         raise ApiError("AI_PARAM_INVALID", "secret_ref must use Secret URI", 400)
+    # 凭据头（REST）：连接器级认证头，覆盖该连接器全部导入工具的同名头模板；
+    # 明文值在保存时即时加密为 Secret URI 引用（明文不落库）。
+    # 提交语义：空键值=删除；掩码回显（secret://••••）=保持库内旧值不变；其余=新值
+    config = values.get("config")
+    if isinstance(config, dict) and "auth_headers" in config:
+        from app.security.secret_store import SecretStore
+
+        raw_headers = config.get("auth_headers")
+        cleaned: dict[str, str] = {}
+        if isinstance(raw_headers, dict):
+            store = SecretStore()
+            existing = (item.config or {}).get("auth_headers") or {}
+            for name, value in raw_headers.items():
+                key = str(name or "").strip()
+                text = str(value or "").strip()
+                if not key or not text:
+                    continue  # 空值 = 删除该凭据头
+                if text.startswith(_SECRET_MASK_PREFIX):
+                    if key in existing:
+                        cleaned[key] = existing[key]  # 回显掩码 = 保持库内旧引用
+                    continue
+                cleaned[key] = text if text.startswith("secret://") else f"secret://{store.encrypt(text)}"
+        if cleaned:
+            config["auth_headers"] = cleaned
+        else:
+            config.pop("auth_headers", None)
     for key, value in values.items(): setattr(item, key, value)
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_UPDATED", resource_type="CONNECTOR", resource_id=item.id, summary="connector updated", detail={"fields": list(values)})
     db.commit(); db.refresh(item)
@@ -411,7 +453,7 @@ async def test_connector(connector_id: UUID, request: Request, user: ReadUser, d
         if transport not in ("http", ""):
             raise ApiError("AI_REQUEST_INVALID", "当前仅支持 HTTP 传输的 MCP 连接探测", 400)
         try:
-            listing = await _probe_mcp(dict(item.config or {}), item.secret_ref)
+            listing = await _probe_mcp(request, dict(item.config or {}), item.secret_ref)
         except ApiError:
             raise
         except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
@@ -480,7 +522,7 @@ async def discover_connector(connector_id: UUID, request: Request, user: ReadUse
     from app.kernel.ports.connector import McpProtocolError, McpTransportError
 
     try:
-        listing = await _probe_mcp(dict(item.config or {}), item.secret_ref)
+        listing = await _probe_mcp(request, dict(item.config or {}), item.secret_ref)
     except ApiError:
         raise
     except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
@@ -585,14 +627,17 @@ _MAX_OPENAPI_TOOLS_PER_IMPORT = 200
 
 
 def _build_input_schema_from_params(params: list[dict]) -> dict:
-    """把 OpenAPI parameters[] 简化为本项目 input_schema（含 path/query/header 的扁平 properties）。
+    """把 OpenAPI parameters[] 简化为本项目 input_schema（含 path/query 的扁平 properties）。
 
-    真实 OpenAPI parameters 还会包含 schema.in / schema.type 等；这里只取最常见形态。
+    header 参数一律凭据化：不进 schema（模型不可见、不向用户索要），
+    由工具 config.headers 模板/secret:// 凭据引用在执行期提供（见 HttpExecutor）。
     """
     properties: dict[str, dict] = {}
     required: list[str] = []
     for p in params or []:
         if not isinstance(p, dict):
+            continue
+        if str(p.get("in") or "query") == "header":
             continue
         name = str(p.get("name") or "").strip()
         if not name:

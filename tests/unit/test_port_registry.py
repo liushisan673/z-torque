@@ -1,4 +1,8 @@
-"""PortRegistry 解析规则与启动校验测试（阶段00 §3.5 / 阶段01 §3.11）。"""
+"""PortRegistry 解析规则与启动校验测试（阶段00 §3.5 / 阶段01 §3.11）。
+
+P2 收口后 PORT_SPECS 全部 pending=False（21/21），pending 分支用合成 spec 验证
+（保留 NOT_PORTED 语义回归，防未来新增 Port 回退）。
+"""
 
 import pytest
 
@@ -13,10 +17,21 @@ from app.kernel.registry.port_registry import (
 )
 
 
+def _pending_spec():
+    """合成一个 pending=True 的必需 spec（现网已无 pending Port；独立命名避免与现网 spec 同名）。"""
+    from app.kernel.ports.specs import GROUP_ENTRY, PortSpec
+
+    return PortSpec("test.pending", GROUP_ENTRY, True, "synthetic", "synthetic", pending=True)
+
+
 def test_specs_lock_21_ports_in_four_groups():
     groups = {spec.group for spec in PORT_SPECS}
     assert len(PORT_SPECS) == 21
     assert groups == {"entry", "execution", "information", "cross_cutting"}
+
+
+def test_specs_all_ported_after_p2():
+    assert all(not spec.pending for spec in PORT_SPECS)
 
 
 def test_unknown_port_registration_rejected():
@@ -26,7 +41,6 @@ def test_unknown_port_registration_rejected():
 
 
 def test_required_port_missing_fails_startup():
-    spec = PORT_SPECS[3]  # 任取一个 required
     spec = next(s for s in PORT_SPECS if s.required and not s.pending)
     registry = PortRegistry((spec,))
     with pytest.raises(AssemblyError, match="required port"):
@@ -34,7 +48,7 @@ def test_required_port_missing_fails_startup():
 
 
 def test_pending_port_missing_is_not_ported_not_failure():
-    spec = next(s for s in PORT_SPECS if s.required and s.pending)
+    spec = _pending_spec()
     registry = PortRegistry((spec,))
     registry.resolve()  # 不抛异常
     resolution = registry.resolution(spec.name)
@@ -87,7 +101,7 @@ def test_unavailable_capability_raises_ai_capability_unavailable():
 def test_status_reports_resolution_state():
     required_ready = next(s for s in PORT_SPECS if s.required and not s.pending)
     optional_ready = next(s for s in PORT_SPECS if not s.required and not s.pending)
-    pending = next(s for s in PORT_SPECS if s.pending)
+    pending = _pending_spec()
     registry = PortRegistry((required_ready, optional_ready, pending))
     registry.register(required_ready.name, lambda: object(), label="impl", plugin="p1")
     registry.resolve()

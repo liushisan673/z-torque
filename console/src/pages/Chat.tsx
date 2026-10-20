@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { request, uploadFile } from "../services/api";
+import { ApiRequestError, request, uploadFile } from "../services/api";
 import { errorText } from "../services/errorText";
 import { openGetStream, openPostStream } from "../services/sse";
 import type { Agent, ChatResponse, Confirmation, Conversation, FileContent, FileMetadata, FileStatus, Message, Task, TaskEvent } from "../types";
@@ -13,14 +13,8 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { AppTopbar, APP_NAV } from "../components/AppTopbar";
-
-interface TaskStep {
-  seq: number;
-  eventType: string;
-  summary: string;
-  time: string;
-  payload?: Record<string, unknown> | null;
-}
+// 内联执行块共享模块：与嵌入对话页（/embed/chat）共用类型/工具函数/渲染组件，保证实时链路展示一致
+import { RunBlock, eventLabel, localStep, payloadOf, TERMINAL, type ActiveRun, type TaskStep } from "./chatRun";
 
 // 会话记忆摘要（GET /memory 与 POST /memory/summarize 共用返回结构）
 interface MemorySummary {
@@ -29,97 +23,6 @@ interface MemorySummary {
   source_end: number;
   updated_at: string;
 }
-
-// 内联执行块（run-block）状态：当前正在展示的任务（chat.md 定稿：过程在上、结论在下）
-interface ActiveRun {
-  taskId: string;
-  steps: TaskStep[];
-  status: string;
-  waiting: boolean;
-  // 用户主动停止（区别于后端失败）：过程标记为「已停止」
-  stopped?: boolean;
-}
-
-// 本地步骤：不来自后端事件（理解需求 / 汇总结论 / 已停止），用负 seq 与真实事件隔离
-let LOCAL_SEQ = -1;
-function localStep(eventType: string, summary: string): TaskStep {
-  return { seq: LOCAL_SEQ--, eventType, summary, time: new Date().toLocaleTimeString(), payload: null };
-}
-
-// 长文本截断：工具参数/结果做脱敏与长度限制（文档 6.5）
-function clipText(text: string, limit: number): string {
-  return text.length > limit ? `${text.slice(0, limit)}…` : text;
-}
-
-// 参数/结果统一转展示文本：后端 payload 可能是字符串（_brief）或对象
-function toDisplayText(value: unknown, limit: number): string | null {
-  if (value === null || value === undefined) return null;
-  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-  return text.trim() ? clipText(text, limit) : null;
-}
-
-// SSE 事件数据中的框架字段：剔除后剩下的即业务 payload（tool_name / arguments / result …）
-const EVENT_META_KEYS = new Set([
-  "task_id", "seq", "summary", "status", "root_task_id", "parent_task_id",
-  "delegation_depth", "child_sequence", "from_state", "to_state", "created_at", "conversation_id",
-]);
-function payloadOf(d: Record<string, unknown>): Record<string, unknown> | null {
-  const rest: Record<string, unknown> = {};
-  let has = false;
-  for (const [k, v] of Object.entries(d)) {
-    if (EVENT_META_KEYS.has(k)) continue;
-    rest[k] = v;
-    has = true;
-  }
-  return has ? rest : null;
-}
-
-function eventLabel(eventType: string): string {
-  const map: Record<string, string> = {
-    // 状态事件
-    TASK_CREATED: "任务已创建",
-    TASK_QUEUED: "排队中",
-    TASK_STARTED: "开始执行",
-    TASK_MODEL_SUCCEEDED: "模型推理完成",
-    TASK_SKILL_SUCCEEDED: "能力执行完成",
-    TASK_SUCCEEDED: "任务完成",
-    TASK_FAILED: "任务失败",
-    TASK_TIMEOUT: "任务超时",
-    TASK_CANCELLED: "任务已取消",
-    TASK_CANCEL_REQUESTED: "请求取消",
-    TASK_WAITING_HUMAN: "等待人工确认",
-    TASK_APPROVAL_GRANTED: "已批准",
-    TASK_APPROVAL_REJECTED: "已拒绝",
-    TASK_SKILL_FAILED: "能力执行失败",
-    TASK_MODEL_FAILED: "模型推理失败",
-    // 工具执行事件（细粒度时间线）
-    TASK_TOOL_CALL: "正在调用能力",
-    TASK_TOOL_RESULT: "能力返回结果",
-    // 本地阶段事件（前端生成，不来自后端，文案对齐 chat.html）
-    LOCAL_UNDERSTAND: "理解需求",
-    LOCAL_SUMMARY: "汇总结论",
-    LOCAL_STOPPED: "已停止",
-    // 流式阶段事件（与文档 5.3 节事件名对齐，不虚构未发生步骤）
-    "task.snapshot": "任务状态快照",
-    "task.status": "状态更新",
-    "task.delta": "执行进展",
-    "task.tool_call": "正在调用能力",
-    "task.tool_result": "能力返回结果",
-    "task.waiting_human": "等待人工确认",
-    "task.human_decision": "人工决策",
-    "task.result": "最终结果",
-    "task.error": "执行出错",
-    "task.done": "执行完成",
-    // 普通聊天事件（备用，本面板主要展示 Task 事件）
-    "message.delta": "生成中",
-    "message.result": "生成完成",
-    "message.done": "回复结束",
-    "message.error": "回复出错",
-  };
-  return map[eventType] ?? eventType;
-}
-
-const TERMINAL = new Set(["SUCCESS", "FAILED", "TIMEOUT", "CANCELLED"]);
 
 // 附件前端校验：类型白名单与大小上限（文档 4.3，最终以后端校验为准）
 const ALLOWED_FILE_EXTS = ["pdf", "txt", "md", "csv", "xlsx"];
@@ -131,6 +34,9 @@ const STARTER_PROMPTS = [
   "把下面的内容整理成表格",
   "查一下数据库里的用户表结构",
 ];
+
+// 长会话渐进渲染：一次只上屏最近 RENDER_STEP 条（Markdown 渲染开销大），更早的消息按需向前加载
+const RENDER_STEP = 50;
 
 export function ChatPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -145,6 +51,8 @@ export function ChatPage() {
     [conversations, convFilter],
   );
   const [agentId, setAgentId] = useState<string>("");
+  // 智能体选择器自定义下拉：可承载名称 + 描述（原生 select 的 option 不支持描述文案）
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -154,6 +62,8 @@ export function ChatPage() {
 
   const [attachments, setAttachments] = useState<FileMetadata[]>([]);
   const [uploading, setUploading] = useState(false);
+  // 附件上传真实进度（XHR progress 事件，0-100；null=不在上传中）
+  const [uploadPercent, setUploadPercent] = useState<number | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   // 会话项 ⋯ 下拉菜单：记录当前展开菜单的会话 ID
@@ -180,6 +90,8 @@ export function ChatPage() {
 
   // 普通聊天流式输出的增量文本（会话页默认流式输出，无需开关）
   const [streamingText, setStreamingText] = useState<string | null>(null);
+  // 长会话渐进渲染窗口：当前渲染的消息条数上限（切换会话时重置）
+  const [renderLimit, setRenderLimit] = useState(RENDER_STEP);
 
   // 任务链路内联执行块（run-block）：任务事件实时驱动步骤逐条增加
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
@@ -188,6 +100,8 @@ export function ChatPage() {
   // 当前这一轮助手回复的开始时间（过程块与结论共用同一时间戳）
   const [turnTime, setTurnTime] = useState<string>("");
   const typeTimerRef = useRef<number | null>(null);
+  // 打字机目标（全文 + 收尾回调）：跳过动画时据此一次性上屏完整内容
+  const typeTargetRef = useRef<{ text: string; onDone: () => void } | null>(null);
   // 首次进入页面已自动选中过会话的标记（仅生效一次，避免覆盖切智能体的新对话）
   const autoSelectedRef = useRef(false);
   // 当前会话引用：流式回调使用（闭包中的 state 会过期，切换会话后旧回调不得回写视图）
@@ -276,6 +190,21 @@ export function ChatPage() {
     return () => document.removeEventListener("click", close);
   }, [menuOpenId]);
 
+  // 智能体下拉展开时监听全局点击：点击下拉外任意位置自动收起（Esc 同样关闭）
+  useEffect(() => {
+    if (!agentMenuOpen) return;
+    const close = () => setAgentMenuOpen(false);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("click", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("click", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [agentMenuOpen]);
+
   // 会话列表 ref：发送完成后判断是否需要同步自动标题（避免回调闭包读到过期列表）
   const conversationsRef = useRef<Conversation[]>([]);
   useEffect(() => {
@@ -297,8 +226,33 @@ export function ChatPage() {
   // 消息或流式内容变化时自动滚动到底部，保证最新内容可见
   useEffect(() => {
     const el = messagesScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    // 「查看更早消息」触发的这次更新不强制滚底：由锚定补偿保持用户当前阅读位置
+    if (loadMoreAnchorRef.current !== null) return;
+    el.scrollTop = el.scrollHeight;
   }, [messages, streamingText, runAnswer, activeRun]);
+
+  // 长会话渐进渲染：当前实际渲染的消息窗口（取最近的 renderLimit 条）
+  const visibleMessages = useMemo(
+    () => (renderLimit >= messages.length ? messages : messages.slice(messages.length - renderLimit)),
+    [messages, renderLimit],
+  );
+  // 向前加载更早消息：记录旧视口底距，DOM 更新后补偿差值，阅读位置不跳动
+  const loadMoreAnchorRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const anchor = loadMoreAnchorRef.current;
+    if (anchor === null) return;
+    loadMoreAnchorRef.current = null;
+    const el = messagesScrollRef.current;
+    if (el) el.scrollTop = Math.max(0, el.scrollHeight - anchor);
+  }, [renderLimit, messages]);
+
+  // 「查看更早的消息」：多渲染一批，并锚定当前阅读位置
+  function loadEarlier() {
+    const el = messagesScrollRef.current;
+    if (el) loadMoreAnchorRef.current = el.scrollHeight - el.scrollTop;
+    setRenderLimit((v) => v + RENDER_STEP);
+  }
 
   // 组件卸载时清理打字机定时器，避免内存泄漏
   useEffect(() => () => {
@@ -312,6 +266,7 @@ export function ChatPage() {
       onDone();
       return;
     }
+    typeTargetRef.current = { text, onDone };
     // 结论气泡出现即刷新本轮时间戳（与 chat.html 的 finishUi 一致）
     setTurnTime(new Date().toLocaleTimeString());
     setRunAnswer("");
@@ -323,6 +278,7 @@ export function ChatPage() {
         typeTimerRef.current = window.setTimeout(tick, 16);
       } else {
         typeTimerRef.current = null;
+        typeTargetRef.current = null;
         onDone();
       }
     };
@@ -334,6 +290,16 @@ export function ChatPage() {
       window.clearTimeout(typeTimerRef.current);
       typeTimerRef.current = null;
     }
+  }
+
+  // 跳过打字动画：立即完整显示当前结论，收尾流程（刷新真实消息）与自然播完一致
+  function skipTypewriter() {
+    const target = typeTargetRef.current;
+    if (!target || typeTimerRef.current === null) return;
+    clearTypeTimer();
+    typeTargetRef.current = null;
+    setRunAnswer(target.text);
+    target.onDone();
   }
 
   // 开启一轮内联执行块：立刻出现「理解需求」首步（chat.html 阶段 A 的本地步骤）
@@ -348,6 +314,18 @@ export function ChatPage() {
       waiting: false,
       stopped: false,
     });
+  }
+
+  // 编辑重发：把该用户消息内容回填输入框（后端无消息删除/截断接口，原对话保留，改完作为新消息发送）
+  function editUserMessage(m: Message) {
+    if (sending) return;
+    setInput(m.content);
+    inputRef.current?.focus();
+  }
+
+  // 重新生成：对最新回答不满意时，取其前最近一条用户消息（含附件）原样重发，追加一份新回答
+  function regenerateAnswer(anchor: Message) {
+    retryFailedMessage(anchor);
   }
 
   // 复制文本到剪贴板，并在短时间内给出「已复制」反馈
@@ -435,6 +413,8 @@ export function ChatPage() {
     setFileDetail(null);
     lastEventIdRef.current = "";
     setAttachments([]);
+    // 渐进渲染窗口随会话切换重置：新会话从最近一批消息开始
+    setRenderLimit(RENDER_STEP);
     // 切换会话：清理打字机与内联执行块（内联块仅在任务仍在执行时于下方恢复）
     clearTypeTimer();
     setActiveRun(null);
@@ -593,6 +573,7 @@ export function ChatPage() {
     setTask(null);
     setAttachments([]);
     setPendingAgentId(null);
+    setRenderLimit(RENDER_STEP);
     setSidebarOpen(false);
   }
 
@@ -609,15 +590,18 @@ export function ChatPage() {
     }
     setError(null);
     setUploading(true);
+    setUploadPercent(0);
     try {
       const meta = await uploadFile<FileMetadata>("/api/z-torque/files", file, {
         conversationId: conversationId ?? undefined,
+        onProgress: (p) => setUploadPercent(p),
       });
       setAttachments((prev) => [...prev, meta]);
     } catch (err) {
       setError(errorText(err, "上传失败"));
     } finally {
       setUploading(false);
+      setUploadPercent(null);
     }
   }
 
@@ -657,6 +641,7 @@ export function ChatPage() {
       lastEventIdRef.current = "";
     }
     const seen = new Set<string>();
+    let doneSeen = false; // task.done 已正常收尾标记（onDone 兜底刷新据此跳过，防打字机期间重复拉取）
     // applyRun 仅当当前展示的正是该任务时生效（prev 已保证非空）
     const applyRun = (updater: (prev: ActiveRun) => ActiveRun) => {
       setActiveRun((prev) => (prev?.taskId === taskId ? updater(prev) : prev));
@@ -691,6 +676,7 @@ export function ChatPage() {
 
         // task.done：终态收尾（结论打字机 → 清理执行块）
         if (eventType === "task.done") {
+          doneSeen = true;
           const status = String(d.status ?? "");
           setTask((prev) => (prev ? { ...prev, status, result: (d.result as Record<string, unknown>) ?? prev.result } : prev));
           setWaitingConfirm(false);
@@ -747,6 +733,12 @@ export function ChatPage() {
           // 用户已切到其他会话：旧流的收尾刷新不得覆盖当前视图
           const targetConv = options?.convId ?? conversationId ?? "";
           if (conversationIdRef.current !== targetConv) return;
+          // task.done 已正常收尾（结论打字机可能进行中）：消息由 finishUp 统一刷新，
+          // 此处提前拉取会让真实结论消息与打字机气泡同屏重复
+          if (doneSeen) {
+            await loadTaskDetail(taskId);
+            return;
+          }
           await loadMessages(targetConv, { quiet: true });
           await loadTaskDetail(taskId);
         })();
@@ -780,9 +772,9 @@ export function ChatPage() {
       created_at: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, optimistic]);
+    // 输入框立即清空；附件暂存先保留（发送失败时恢复文字的同时附件不丢，可直接重试）
     if (!isRetry) {
       setInput("");
-      setAttachments([]);
     }
     try {
       if (!convId) {
@@ -816,6 +808,8 @@ export function ChatPage() {
           idempotencyKey,
         });
         setConversationId(resp.conversation_id);
+        // 发送已被后端接受，此刻才清空附件暂存
+        if (!isRetry) setAttachments([]);
         void syncAutoTitle(resp.conversation_id); // 后端已按首条消息生成标题，静默刷新左侧列表
         if (resp.response_type === "TASK" && resp.task_id) {
           // 任务链路：内联执行块占位 + 订阅事件流（步骤逐条增加）
@@ -851,6 +845,8 @@ export function ChatPage() {
       // 切换会话后旧流的收尾刷新不得覆盖当前视图（selectConversation 已 abort，此处兜底）
       if (conversationIdRef.current === convId) void loadMessages(convId!);
     };
+    // 决策轮闲聊直答标记：message.result 已由打字机接管收尾时，onDone 不再重复 loadMessages
+    let resultSeen = false;
     streamRef.current = openPostStream(
       "/api/z-torque/chat/stream",
       { agent_id: agentId || null, conversation_id: convId, message: text, content_parts: null, stream: true },
@@ -859,6 +855,17 @@ export function ChatPage() {
           if (msg.event === "message.delta") {
             const d = msg.data as { content?: string };
             setStreamingText((prev) => (prev ?? "") + (d.content ?? ""));
+          } else if (msg.event === "message.result") {
+            // 决策轮闲聊直答：文本已完整生成（非流式），由前端打字机接管上屏（与任务链路结论一致）
+            const d = msg.data as { content?: string };
+            if (!d.content) return;
+            resultSeen = true;
+            setStreamingText(null);
+            startTypewriter(d.content, () => {
+              setRunAnswer(null);
+              setSending(false);
+              void loadMessages(convId!, { quiet: true });
+            });
           } else if (msg.event === "message.task_created") {
             // 分流：模型要求调用工具 → 后端已创建任务，切换到任务事件流（内联执行块承接后续过程）
             const d = msg.data as { task_id?: string; conversation_id?: string };
@@ -868,8 +875,9 @@ export function ChatPage() {
             subscribeTask(d.task_id, { convId: d.conversation_id ?? convId });
             // 流由服务端关闭，onDone 里 finish 统一收尾
           } else if (msg.event === "message.error") {
-            const d = msg.data as { message?: string };
-            setError(d.message ?? "流式响应失败");
+            const d = msg.data as { code?: string; message?: string };
+            // 错误码走统一中文映射（message 可能是后端英文原文，不直接外露）
+            setError(errorText(new ApiRequestError(String(d.code ?? "AI_INTERNAL_ERROR"), d.message ?? "", 0), "流式响应失败"));
             finish();
           }
         },
@@ -879,7 +887,8 @@ export function ChatPage() {
         },
         onDone: () => {
           void syncAutoTitle(convId); // 流式首条消息结束后同步自动标题
-          finish();
+          // resultSeen：打字机进行中，其回调负责 setSending(false) 与 loadMessages 收尾
+          if (!resultSeen) finish();
         },
       },
       { "Idempotency-Key": crypto.randomUUID() },
@@ -1006,6 +1015,14 @@ export function ChatPage() {
   const usableAgents = useMemo(() => agents.filter((a) => a.current_published_version_id), [agents]);
   const currentAgent = useMemo(() => agents.find((a) => a.id === agentId), [agents, agentId]);
   const currentConversation = useMemo(() => conversations.find((c) => c.id === conversationId), [conversations, conversationId]);
+  // 最后一条正常助手回复：仅在其上提供「重新生成」入口（对最新回答不满意时一键重问）
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.sender_type !== "USER" && m.status !== "FAILED" && m.content) return m.id;
+    }
+    return null;
+  }, [messages]);
   const taskRunning = task !== null && !TERMINAL.has(task.status);
 
   // Task 状态 → 胶囊样式与文案（用于头部 badge 与面板 pill，统一样式来源）
@@ -1024,78 +1041,6 @@ export function ChatPage() {
     if (idx === total - 1 && taskRunning) return "active";
     return "done";
   }
-
-  // 内联执行块整体状态 → 样式类与文案（run/wait/ok/fail）
-  const runStatusInfo = useMemo(() => {
-    if (!activeRun) return { cls: "run", label: "进行中" } as const;
-    if (activeRun.stopped) return { cls: "fail", label: "已停止" } as const;
-    if (activeRun.waiting || activeRun.status === "WAITING_HUMAN") return { cls: "wait", label: "等待确认" } as const;
-    if (activeRun.status === "SUCCESS") return { cls: "ok", label: "已完成" } as const;
-    if (TERMINAL.has(activeRun.status)) return { cls: "fail", label: "已结束" } as const;
-    return { cls: "run", label: "进行中" } as const;
-  }, [activeRun]);
-
-  // 内联单步状态：末步运行中高亮（active），已发生步骤 done，等待/失败单独着色
-  function runStepState(s: TaskStep, idx: number, total: number): "active" | "done" | "waiting" | "fail" {
-    if (s.eventType.includes("FAILED") || s.eventType.includes("ERROR") || s.eventType === "task.error") return "fail";
-    if (s.eventType === "LOCAL_STOPPED") return "fail";
-    if (s.eventType === "TASK_WAITING_HUMAN" || s.eventType === "task.waiting_human") return "waiting";
-    if (!activeRun) return "done";
-    if (activeRun.stopped || TERMINAL.has(activeRun.status)) return "done";
-    return idx === total - 1 ? "active" : "done";
-  }
-
-  // 内联步骤描述：工具类步骤的详情由工具卡片承载，此处只留简短提示
-  function runStepDesc(s: TaskStep): string {
-    const p = s.payload as Record<string, unknown> | null;
-    const toolName = p && typeof p.tool_name === "string" ? p.tool_name : null;
-    if ((s.eventType === "TASK_TOOL_CALL" || s.eventType === "task.tool_call") && toolName) return "正在请求能力，请稍候";
-    if ((s.eventType === "TASK_TOOL_RESULT" || s.eventType === "task.tool_result") && toolName) return "";
-    const label = eventLabel(s.eventType);
-    return s.summary && s.summary !== label ? s.summary : "";
-  }
-
-  // 工具卡片：调用步骤展示参数，返回步骤展示结果摘要（脱敏 + 截断，文档 6.5）
-  function toolCardOf(s: TaskStep): { name: string; args?: string | null; result?: string | null } | null {
-    const p = s.payload as Record<string, unknown> | null;
-    const toolName = p && typeof p.tool_name === "string" ? p.tool_name : null;
-    if (!toolName) return null;
-    if (s.eventType === "TASK_TOOL_CALL" || s.eventType === "task.tool_call") {
-      return { name: toolName, args: toDisplayText(p?.arguments, 600) };
-    }
-    if (s.eventType === "TASK_TOOL_RESULT" || s.eventType === "task.tool_result") {
-      const failed = String(p?.status ?? "SUCCEEDED") !== "SUCCEEDED";
-      const raw = toDisplayText(p?.result ?? p?.error, 600);
-      return { name: toolName, result: raw ?? (failed ? "执行失败" : "返回成功") };
-    }
-    return null;
-  }
-
-  // 等待审批时挂起的工具名：取最后一个「调用工具」步骤的 payload（TASK_WAITING_HUMAN 事件本身不带工具信息）
-  const waitingToolName = useMemo(() => {
-    if (!activeRun?.waiting) return null;
-    for (let i = activeRun.steps.length - 1; i >= 0; i--) {
-      const s = activeRun.steps[i];
-      if (s.eventType === "TASK_TOOL_CALL") {
-        const name = (s.payload as Record<string, unknown> | null)?.tool_name;
-        if (typeof name === "string") return name;
-      }
-    }
-    return null;
-  }, [activeRun]);
-
-  // 等待审批时的参数（截断展示，完整参数由后端确认记录留存）
-  const waitingConfirmArgs = useMemo(() => {
-    if (!activeRun?.waiting) return null;
-    for (let i = activeRun.steps.length - 1; i >= 0; i--) {
-      const s = activeRun.steps[i];
-      if (s.eventType === "TASK_TOOL_CALL") {
-        const args = toDisplayText((s.payload as Record<string, unknown> | null)?.arguments, 400);
-        if (args) return args;
-      }
-    }
-    return null;
-  }, [activeRun]);
 
   // 是否有正在推进的执行链路（内联执行块运行中且未被停止）
   const runLive = activeRun !== null && !TERMINAL.has(activeRun.status) && !activeRun.stopped;
@@ -1120,22 +1065,54 @@ export function ChatPage() {
         <aside className={`chat-sidebar${sidebarOpen ? " open" : ""}`}>
           <div className="chat-agent-picker">
             <label className="chat-agent-label">当前智能体</label>
-            <select
-              className="chat-agent-select"
-              value={agentId}
-              onChange={(e) => handleAgentChange(e.target.value)}
-            >
-              {agents.length === 0 && <option value="" disabled>加载中…</option>}
-              {/* 未发布版本的智能体也列出（disabled），避免用户困惑"我建的智能体怎么不见了" */}
-              {agents.map((a) => {
-                const usable = Boolean(a.current_published_version_id);
-                return (
-                  <option key={a.id} value={a.id} disabled={!usable}>
-                    {a.name}{a.is_default_parent ? "（默认）" : ""}{usable ? "" : "（未发布）"}
-                  </option>
-                );
-              })}
-            </select>
+            <div className="chat-agent-dropdown">
+              <button
+                type="button"
+                className="chat-agent-trigger"
+                aria-haspopup="listbox"
+                aria-expanded={agentMenuOpen}
+                disabled={agents.length === 0}
+                title={currentAgent?.description ?? undefined}
+                onClick={(e) => { e.stopPropagation(); setAgentMenuOpen((v) => !v); }}
+              >
+                <span className="chat-agent-trigger-name">
+                  {currentAgent
+                    ? `${currentAgent.name}${currentAgent.is_default_parent ? "（默认）" : ""}`
+                    : agents.length === 0 ? "加载中…" : "选择智能体"}
+                </span>
+                <svg className={"chat-agent-chevron" + (agentMenuOpen ? " open" : "")} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+              </button>
+              {agentMenuOpen && (
+                <div className="chat-agent-menu" role="listbox" aria-label="选择智能体" onClick={(e) => e.stopPropagation()}>
+                  {agents.map((a) => {
+                    const usable = Boolean(a.current_published_version_id);
+                    const active = a.id === agentId;
+                    return (
+                      <button
+                        key={a.id}
+                        type="button"
+                        role="option"
+                        aria-selected={active}
+                        disabled={!usable}
+                        title={usable ? undefined : "该智能体还没有已发布版本，无法用于对话"}
+                        className={"chat-agent-option" + (active ? " active" : "")}
+                        onClick={() => {
+                          setAgentMenuOpen(false);
+                          if (!active) handleAgentChange(a.id);
+                        }}
+                      >
+                        <span className="chat-agent-option-name">
+                          {a.name}
+                          {a.is_default_parent && <span className="chat-agent-badge">默认</span>}
+                          {!usable && <span className="chat-agent-badge muted">未发布</span>}
+                        </span>
+                        {a.description && <span className="chat-agent-option-desc">{a.description}</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
             {agentMetaTag && (
               <div className="chat-agent-meta">
                 <span className={`chat-tag-mini ${agentMetaTag.cls}`}>{agentMetaTag.label}</span>
@@ -1344,7 +1321,13 @@ export function ChatPage() {
               </div>
             ) : (
               <>
-                {messages.map((m) => {
+                {/* 长会话渐进渲染：还有更早未渲染的消息时提供向前加载入口 */}
+                {messages.length > visibleMessages.length && (
+                  <button className="chat-load-earlier" type="button" onClick={loadEarlier}>
+                    查看更早的消息（还有 {messages.length - visibleMessages.length} 条）
+                  </button>
+                )}
+                {visibleMessages.map((m) => {
                   const isUser = m.sender_type === "USER";
                   const failed = !isUser && m.status === "FAILED";
                   const files = Array.isArray(m.content_parts)
@@ -1353,49 +1336,71 @@ export function ChatPage() {
                   return (
                     <div key={m.id} className={`chat-msg ${isUser ? "user" : "assistant"}`}>
                       <div className="chat-msg-avatar">{isUser ? "我" : "Z"}</div>
-                      <div className="chat-msg-bubble">
-                        {isUser ? (
-                          <div className="chat-msg-content">{m.content}</div>
-                        ) : (
-                          <div className="chat-msg-content chat-md">
-                            <Markdown remarkPlugins={[remarkGfm]}>{m.content}</Markdown>
-                          </div>
-                        )}
-                        {files.length > 0 && (
-                          <div className="chat-msg-files">
-                            {files.map((p, i) => (
-                              <button
-                                key={i}
-                                className="chat-msg-file"
-                                type="button"
-                                onClick={() => openMessageFile(p.file_id as string)}
-                                title="查看文件详情"
-                              >
-                                附件 {String(p.file_id).slice(0, 8)}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        {!isUser && m.task_id && (
-                          <button className="chat-task-link" type="button" onClick={() => viewTaskFromMessage(m.task_id as string)} title="查看该任务执行过程详情">
-                            查看执行过程
-                          </button>
-                        )}
-                        <div className="chat-msg-meta">
-                          {new Date(m.created_at).toLocaleTimeString()}
-                          {!isUser && !failed && m.content && (
-                            <button className="chat-copy-btn" type="button" onClick={() => void copyText(m.content, m.id)}>
-                              {copiedId === m.id ? "已复制" : "复制"}
+                      <div className="chat-msg-main">
+                        <div className="chat-msg-bubble">
+                          {isUser ? (
+                            <div className="chat-msg-content">{m.content}</div>
+                          ) : (
+                            <div className="chat-msg-content chat-md">
+                              <Markdown remarkPlugins={[remarkGfm]}>{m.content}</Markdown>
+                            </div>
+                          )}
+                          {files.length > 0 && (
+                            <div className="chat-msg-files">
+                              {files.map((p, i) => (
+                                <button
+                                  key={i}
+                                  className="chat-msg-file"
+                                  type="button"
+                                  onClick={() => openMessageFile(p.file_id as string)}
+                                  title="查看文件详情"
+                                >
+                                  附件 {String(p.file_id).slice(0, 8)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {!isUser && m.task_id && (
+                            <button className="chat-task-link" type="button" onClick={() => viewTaskFromMessage(m.task_id as string)} title="查看该任务执行过程详情">
+                              查看执行过程
                             </button>
                           )}
+                          <div className="chat-msg-meta">
+                            {new Date(m.created_at).toLocaleTimeString()}
+                          </div>
+                          {failed && (
+                            <div className="chat-msg-failed">发送失败{m.error_code ? `（${m.error_code}）` : ""}</div>
+                          )}
                         </div>
-                        {failed && (
-                          <div className="chat-msg-failed">发送失败{m.error_code ? `（${m.error_code}）` : ""}</div>
-                        )}
-                        {failed && (
-                          <button className="chat-msg-retry" type="button" disabled={sending} onClick={() => retryFailedMessage(m)}>
-                            重试
-                          </button>
+                        {/* 操作按钮独立在气泡下方：比融在气泡内更醒目（复制 / 重新生成 / 编辑重发 / 重试） */}
+                        {(failed
+                          || (!isUser && !failed && m.content)
+                          || (isUser && !sending && streamingText === null && !activeRun)) && (
+                          <div className="chat-msg-actions">
+                            {failed && (
+                              <button className="chat-msg-action" type="button" disabled={sending} onClick={() => retryFailedMessage(m)}>
+                                重试
+                              </button>
+                            )}
+                            {!failed && m.content && (
+                              <button className="chat-msg-action" type="button" onClick={() => void copyText(m.content, m.id)}>
+                                {copiedId === m.id ? "已复制" : "复制"}
+                              </button>
+                            )}
+                            {/* 重新生成：仅最新一条正常助手回复提供，且当前没有进行中的流/执行块 */}
+                            {!isUser && !failed && m.id === lastAssistantId && !sending
+                              && streamingText === null && !activeRun && runAnswer === null && (
+                              <button className="chat-msg-action" type="button" onClick={() => regenerateAnswer(m)} title="基于你上一条消息重新生成一份回答（原回答保留）">
+                                重新生成
+                              </button>
+                            )}
+                            {/* 编辑重发：用户消息可回填输入框修改后重发（后端无消息删除接口，原对话保留） */}
+                            {isUser && !sending && streamingText === null && !activeRun && (
+                              <button className="chat-msg-action" type="button" onClick={() => editUserMessage(m)} title="将该消息内容填入输入框，修改后重新发送（原对话保留）">
+                                编辑重发
+                              </button>
+                            )}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1407,58 +1412,24 @@ export function ChatPage() {
                     <div className="chat-msg-avatar">Z</div>
                     <div className="chat-turn">
                       {activeRun && (
-                        <div className={`chat-run-block ${runStatusInfo.cls}`}>
-                          <div className="chat-run-head">
-                            <span className="chat-run-title">执行过程</span>
-                            <span className={`chat-run-status ${runStatusInfo.cls}`}>{runStatusInfo.label}</span>
-                          </div>
-                          <div className="chat-run-steps">
-                            {activeRun.steps.length === 0 ? (
-                              <div className="chat-run-empty"><span className="spinner" /> 正在创建任务…</div>
-                            ) : (
-                              activeRun.steps.map((s, idx) => {
-                                const cls = runStepState(s, idx, activeRun.steps.length);
-                                const tool = toolCardOf(s);
-                                return (
-                                  <div key={s.seq} className={`chat-run-step ${cls}`}>
-                                    <div className="chat-run-rail"><span className="node" /><span className="line" /></div>
-                                    <div className="chat-run-body">
-                                      <div className="chat-run-label">{eventLabel(s.eventType)}</div>
-                                      {runStepDesc(s) && <div className="chat-run-desc">{runStepDesc(s)}</div>}
-                                      {/* 工具调用/返回内联卡片：参数与结果摘要 */}
-                                      {tool && (
-                                        <div className="chat-tool-card">
-                                          <div className="chat-tool-name"><span className="chat-tool-tag">工具</span>{tool.name}</div>
-                                          {tool.args && <pre className="chat-tool-args">{tool.args}</pre>}
-                                          {tool.result && <div className="chat-tool-result">{tool.result}</div>}
-                                        </div>
-                                      )}
-                                      <div className="chat-run-time">{s.time}</div>
-                                    </div>
-                                  </div>
-                                );
-                              })
-                            )}
-                          </div>
-                          {/* 写入类工具等待审批：确认框内联在执行块中（批准/拒绝） */}
-                          {activeRun.waiting && (
-                            <div className="chat-run-confirm">
-                              <p>工具「{waitingToolName ?? "未知工具"}」为写入操作，需人工审批后才会执行。</p>
-                              {waitingConfirmArgs && <pre className="chat-confirm-args">{waitingConfirmArgs}</pre>}
-                              <div className="chat-confirm-actions">
-                                <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>批准执行</button>
-                                <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
-                              </div>
-                            </div>
-                          )}
-                          {task?.id === activeRun.taskId && task.error_message && (
-                            <div className="chat-run-error">{task.error_message}{task.error_code ? `（${task.error_code}）` : ""}</div>
-                          )}
-                        </div>
+                        <RunBlock
+                          activeRun={activeRun}
+                          taskError={task?.id === activeRun.taskId && task.error_message ? { message: task.error_message, code: task.error_code } : null}
+                          onResolve={(approved) => void resolveConfirm(approved)}
+                        />
                       )}
                       {/* 最终结论：执行过程结束后才出现并逐字上屏 */}
                       {(runAnswer !== null || streamingText !== null) && (
                         <div className="chat-msg-bubble">
+                          {/* 跳过动画入口：仅在打字机定时器存活时显示（普通流式本就实时直出，无需跳过） */}
+                          {runAnswer !== null && streamingText === null && typeTimerRef.current !== null && (
+                            <button
+                              className="chat-typewriter-skip"
+                              type="button"
+                              onClick={skipTypewriter}
+                              title="跳过打字动画，立即显示完整回复"
+                            >跳过动画</button>
+                          )}
                           {/* 光标仅在真正生成中显示（打字机定时器存活 / 普通流式进行中） */}
                           <div className={`chat-msg-content chat-md${streamingText !== null || typeTimerRef.current !== null ? " chat-streaming-cursor" : ""}`}>
                             <Markdown remarkPlugins={[remarkGfm]}>{runAnswer ?? streamingText ?? "…"}</Markdown>
@@ -1489,6 +1460,15 @@ export function ChatPage() {
                       >×</button>
                     </div>
                   ))}
+                </div>
+              )}
+              {/* 附件上传真实进度：XHR progress 事件驱动，上传完成后服务端解析期间显示「处理中」 */}
+              {uploading && uploadPercent !== null && (
+                <div className="chat-upload-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={uploadPercent}>
+                  <div className="chat-upload-progress-track">
+                    <div className="chat-upload-progress-bar" style={{ width: `${uploadPercent}%` }} />
+                  </div>
+                  <span className="chat-upload-progress-text">{uploadPercent < 100 ? `上传中 ${uploadPercent}%` : "处理中…"}</span>
                 </div>
               )}
               <div className="chat-composer-row">
@@ -1713,7 +1693,7 @@ export function ChatPage() {
       {confListOpen && (
         <Modal open title="确认记录" onClose={() => setConfListOpen(false)} width={720}>
           {confList.length === 0 ? (
-            <EmptyState title="暂无确认记录" hint="当能力执行需要人工确认时会在此记录" />
+            <EmptyState title="暂无确认记录" hint="当工具执行需要人工确认时会在此记录" />
           ) : (
             <table className="table">
               <thead>
@@ -1746,7 +1726,7 @@ export function ChatPage() {
             <div className="text-sm"><span className="text-muted">关联任务：</span>{confRecord.task_id ?? "—"}</div>
             <div className="text-sm"><span className="text-muted">发起人：</span>{confRecord.requested_by_user_id || "—"}</div>
             <div className="text-sm"><span className="text-muted">确认人：</span>{confRecord.confirmed_by_user_id ?? "—"}</div>
-            {confRecord.skill_version_id && <div className="text-sm"><span className="text-muted">能力版本：</span>{confRecord.skill_version_id}</div>}
+            {confRecord.skill_version_id && <div className="text-sm"><span className="text-muted">技能版本：</span>{confRecord.skill_version_id}</div>}
             {confRecord.tool_version_id && <div className="text-sm"><span className="text-muted">工具版本：</span>{confRecord.tool_version_id}</div>}
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
               <button className="btn btn-secondary btn-sm" onClick={() => setConfRecord(null)}>关闭</button>

@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Z-Torque 嵌入效果模拟 · 可交互预览</title>
+  <style>
+    :root {
+      --host-bg: #eef1f6;
+      --host-sidebar: #1e293b;
+      --host-accent: #3b82f6;
+      --embed-bg: #ffffff;
+      --embed-border: #e5e7eb;
+      --user-bubble: #1677ff;
+      --ai-bubble: #f3f4f6;
+      --tool-bg: #fff7ed;
+      --tool-border: #fed7aa;
+      --ok: #16a34a;
+      --warn: #d97706;
+      --text: #111827;
+      --muted: #6b7280;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--host-bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ========== 宿主系统壳 ========== */
+    .host {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      height: 100vh;
+    }
+    .host-nav {
+      background: var(--host-sidebar);
+      color: #e2e8f0;
+      padding: 20px 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .host-logo {
+      padding: 0 20px 24px;
+      font-weight: 700;
+      font-size: 1rem;
+      letter-spacing: 0.02em;
+      border-bottom: 1px solid #334155;
+      margin-bottom: 12px;
+    }
+    .host-logo span { color: #94a3b8; font-weight: 400; font-size: 0.75rem; display: block; margin-top: 4px; }
+    .host-nav a {
+      display: block;
+      padding: 10px 20px;
+      color: #cbd5e1;
+      text-decoration: none;
+      font-size: 0.875rem;
+    }
+    .host-nav a:hover, .host-nav a.active { background: #334155; color: #fff; }
+    .host-nav .tag {
+      margin: auto 16px 0;
+      font-size: 0.7rem;
+      color: #64748b;
+      line-height: 1.4;
+    }
+
+    .host-main {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      height: 100vh;
+    }
+    .host-top {
+      background: #fff;
+      border-bottom: 1px solid var(--embed-border);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .host-top h1 { font-size: 1rem; font-weight: 600; }
+    .host-top .meta { font-size: 0.8rem; color: var(--muted); }
+    .host-body {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      gap: 0;
+      min-height: 0;
+    }
+    @media (max-width: 900px) {
+      .host { grid-template-columns: 1fr; }
+      .host-nav { display: none; }
+      .host-body { grid-template-columns: 1fr; }
+      .host-content { display: none; }
+    }
+
+    .host-content {
+      padding: 24px;
+      overflow: auto;
+    }
+    .host-content .panel {
+      background: #fff;
+      border: 1px solid var(--embed-border);
+      border-radius: 10px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .host-content h2 { font-size: 0.95rem; margin-bottom: 8px; }
+    .host-content p { font-size: 0.875rem; color: var(--muted); line-height: 1.6; }
+    .fake-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+      margin-top: 12px;
+    }
+    .fake-table th, .fake-table td {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid #f1f5f9;
+    }
+    .fake-table th { color: var(--muted); font-weight: 500; }
+
+    /* ========== 嵌入面板（模拟 iframe） ========== */
+    .embed-panel {
+      border-left: 1px solid var(--embed-border);
+      background: var(--embed-bg);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      box-shadow: -4px 0 24px rgba(15, 23, 42, 0.06);
+    }
+    .embed-header {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--embed-border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    .embed-header .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #1677ff, #69b1ff);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+    .embed-header .info { flex: 1; min-width: 0; }
+    .embed-header .info strong { display: block; font-size: 0.875rem; }
+    .embed-header .info span { font-size: 0.7rem; color: var(--muted); }
+    .embed-header .badge {
+      font-size: 0.65rem;
+      background: #ecfdf5;
+      color: var(--ok);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .btn-icon {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 4px 6px;
+      border-radius: 4px;
+      font-size: 1rem;
+      line-height: 1;
+    }
+    .btn-icon:hover { background: #f3f4f6; color: var(--text); }
+
+    .embed-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .msg {
+      max-width: 92%;
+      animation: fadeIn 0.25s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: none; }
+    }
+    .msg.user { align-self: flex-end; }
+    .msg.ai, .msg.system, .msg.tool, .msg.approval { align-self: flex-start; }
+    .msg .bubble {
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: 0.875rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .msg.user .bubble {
+      background: var(--user-bubble);
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.ai .bubble {
+      background: var(--ai-bubble);
+      color: var(--text);
+      border-bottom-left-radius: 4px;
+    }
+    .msg .time {
+      font-size: 0.65rem;
+      color: var(--muted);
+      margin-top: 4px;
+      padding: 0 4px;
+    }
+    .msg.user .time { text-align: right; }
+
+    .tool-card {
+      background: var(--tool-bg);
+      border: 1px solid var(--tool-border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.8rem;
+      max-width: 92%;
+    }
+    .tool-card .title {
+      font-weight: 600;
+      color: #9a3412;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .tool-card .detail { color: #78716c; font-size: 0.75rem; }
+    .tool-card .status {
+      margin-top: 6px;
+      font-size: 0.7rem;
+      color: var(--ok);
+    }
+    .tool-card.running .status { color: var(--warn); }
+
+    .approval-card {
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 10px;
+      padding: 12px;
+      max-width: 92%;
+      font-size: 0.85rem;
+    }
+    .approval-card strong { display: block; margin-bottom: 6px; color: #92400e; }
+    .approval-card p { color: #78716c; font-size: 0.8rem; margin-bottom: 10px; }
+    .approval-actions { display: flex; gap: 8px; }
+    .approval-actions button {
+      flex: 1;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid var(--embed-border);
+      font-size: 0.8rem;
+      cursor: pointer;
+      background: #fff;
+    }
+    .approval-actions button.ok {
+      background: var(--ok);
+      color: #fff;
+      border-color: var(--ok);
+    }
+
+    .typing {
+      display: flex;
+      gap: 4px;
+      padding: 8px 12px;
+      background: var(--ai-bubble);
+      border-radius: 12px;
+      width: fit-content;
+    }
+    .typing span {
+      width: 6px;
+      height: 6px;
+      background: #9ca3af;
+      border-radius: 50%;
+      animation: bounce 1.2s infinite;
+    }
+    .typing span:nth-child(2) { animation-delay: 0.15s; }
+    .typing span:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+      30% { transform: translateY(-4px); opacity: 1; }
+    }
+
+    .embed-input {
+      border-top: 1px solid var(--embed-border);
+      padding: 12px;
+      flex-shrink: 0;
+      background: #fafafa;
+    }
+    .embed-input .box {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    .embed-input textarea {
+      flex: 1;
+      resize: none;
+      border: 1px solid var(--embed-border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.875rem;
+      font-family: inherit;
+      min-height: 42px;
+      max-height: 100px;
+      line-height: 1.4;
+    }
+    .embed-input textarea:focus {
+      outline: none;
+      border-color: #93c5fd;
+      box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12);
+    }
+    .embed-input button.send {
+      background: var(--user-bubble);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      padding: 0 16px;
+      height: 42px;
+      font-size: 0.875rem;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .embed-input button.send:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .quick-hints {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .quick-hints button {
+      font-size: 0.7rem;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--embed-border);
+      background: #fff;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .quick-hints button:hover {
+      border-color: #93c5fd;
+      color: var(--user-bubble);
+    }
+
+    /* 事件条 */
+    .event-bar {
+      position: fixed;
+      left: 236px;
+      bottom: 12px;
+      max-width: 360px;
+      font-size: 0.7rem;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 6px 10px;
+      border-radius: 6px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s;
+      z-index: 50;
+      font-family: ui-monospace, monospace;
+    }
+    .event-bar.show { opacity: 0.92; }
+    @media (max-width: 900px) {
+      .event-bar { left: 12px; }
+    }
+
+    .welcome {
+      text-align: center;
+      padding: 32px 16px;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .welcome strong { color: var(--text); display: block; margin-bottom: 6px; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <div class="host">
+    <!-- 模拟宿主侧边栏 -->
+    <aside class="host-nav">
+      <div class="host-logo">
+        某业务系统
+        <span>第三方宿主 · 演示</span>
+      </div>
+      <a href="#">工作台</a>
+      <a href="#">订单管理</a>
+      <a href="#" class="active">智能助手 ▸</a>
+      <a href="#">客户档案</a>
+      <a href="#">设置</a>
+      <div class="tag">
+        右侧为 Z-Torque iframe 嵌入区<br />
+        配置在完整控制台，此处仅对话
+      </div>
+    </aside>
+
+    <div class="host-main">
+      <header class="host-top">
+        <h1>订单工作台</h1>
+        <div class="meta">当前用户：张三 · 嵌入 Agent：客服助手</div>
+      </header>
+
+      <div class="host-body">
+        <!-- 宿主业务内容 -->
+        <div class="host-content">
+          <div class="panel">
+            <h2>今日待处理订单</h2>
+            <p>这是宿主系统自己的业务页面。右侧嵌入了 Z-Torque 对话窗口，员工可在不离开本系统的情况下咨询 AI。</p>
+            <table class="fake-table">
+              <thead>
+                <tr><th>订单号</th><th>客户</th><th>金额</th><th>状态</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>ORD-20261019-001</td><td>李四</td><td>¥1,280</td><td>待发货</td></tr>
+                <tr><td>ORD-20261019-002</td><td>王五</td><td>¥560</td><td>已支付</td></tr>
+                <tr><td>ORD-20261019-003</td><td>赵六</td><td>¥3,200</td><td>退款申请</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="panel">
+            <h2>使用说明（本模拟页）</h2>
+            <p>
+              1. 在右侧输入框发消息，或点快捷问题。<br />
+              2. 会模拟：AI 回复 → 工具调用 →（部分场景）人工确认 → 最终结果。<br />
+              3. 左下角会闪现「宿主收到的 postMessage 事件」，对应真实集成时的回调。
+            </p>
+          </div>
+        </div>
+
+        <!-- ========== 嵌入对话窗口 ========== -->
+        <aside class="embed-panel" id="embedPanel">
+          <div class="embed-header">
+            <div class="avatar">极</div>
+            <div class="info">
+              <strong>客服助手</strong>
+              <span>Z-Torque · 嵌入模式</span>
+            </div>
+            <span class="badge">已连接</span>
+            <button class="btn-icon" type="button" title="模拟关闭" id="btnClose">×</button>
+          </div>
+
+          <div class="embed-messages" id="messages">
+            <div class="welcome">
+              <strong>你好，我是客服助手</strong>
+              可查询订单、物流，或处理简单退款说明。<br />
+              配置已在控制台完成，此处直接对话即可。
+            </div>
+          </div>
+
+          <div class="embed-input">
+            <div class="box">
+              <textarea id="input" rows="1" placeholder="输入问题，Enter 发送…"></textarea>
+              <button class="send" type="button" id="btnSend">发送</button>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <div class="event-bar" id="eventBar"></div>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var messagesEl = document.getElementById("messages");
+      var inputEl = document.getElementById("input");
+      var btnSend = document.getElementById("btnSend");
+      var eventBar = document.getElementById("eventBar");
+      var busy = false;
+
+      function nowTime() {
+        var d = new Date();
+        return d.getHours().toString().padStart(2, "0") + ":" +
+          d.getMinutes().toString().padStart(2, "0");
+      }
+
+      function showEvent(text) {
+        eventBar.textContent = "postMessage ← " + text;
+        eventBar.classList.add("show");
+        clearTimeout(showEvent._t);
+        showEvent._t = setTimeout(function () {
+          eventBar.classList.remove("show");
+        }, 2800);
+      }
+
+      function clearWelcome() {
+        var w = messagesEl.querySelector(".welcome");
+        if (w) w.remove();
+      }
+
+      function appendUser(text) {
+        clearWelcome();
+        var div = document.createElement("div");
+        div.className = "msg user";
+        div.innerHTML =
+          '<div class="bubble"></div><div class="time"></div>';
+        div.querySelector(".bubble").textContent = text;
+        div.querySelector(".time").textContent = nowTime();
+        messagesEl.appendChild(div);
+        scrollBottom();
+      }
+
+      function appendAI(text) {
+        var div = document.createElement("div");
+        div.className = "msg ai";
+        div.innerHTML =
+          '<div class="bubble"></div><div class="time"></div>';
+        div.querySelector(".bubble").textContent = text;
+        div.querySelector(".time").textContent = nowTime();
+        messagesEl.appendChild(div);
+        scrollBottom();
+      }
+
+      function appendTyping() {
+        var div = document.createElement("div");
+        div.className = "msg ai";
+        div.id = "typing";
+        div.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+        messagesEl.appendChild(div);
+        scrollBottom();
+      }
+
+      function removeTyping() {
+        var t = document.getElementById("typing");
+        if (t) t.remove();
+      }
+
+      function appendTool(name, detail, running) {
+        var div = document.createElement("div");
+        div.className = "tool-card" + (running ? " running" : "");
+        div.innerHTML =
+          '<div class="title">🔧 ' + escapeHtml(name) + '</div>' +
+          '<div class="detail"></div>' +
+          '<div class="status"></div>';
+        div.querySelector(".detail").textContent = detail;
+        div.querySelector(".status").textContent = running ? "执行中…" : "✓ 完成";
+        messagesEl.appendChild(div);
+        scrollBottom();
+        return div;
+      }
+
+      function appendApproval(summary, onApprove, onReject) {
+        var div = document.createElement("div");
+        div.className = "approval-card";
+        div.innerHTML =
+          "<strong>需要人工确认</strong>" +
+          "<p></p>" +
+          '<div class="approval-actions">' +
+          '<button type="button" class="ok">同意执行</button>' +
+          '<button type="button">拒绝</button>' +
+          "</div>";
+        div.querySelector("p").textContent = summary;
+        var buttons = div.querySelectorAll("button");
+        buttons[0].onclick = function () {
+          div.querySelector(".approval-actions").innerHTML =
+            '<span style="color:#16a34a;font-size:0.8rem;">已同意 · 继续执行</span>';
+          showEvent('approval.required → 用户已确认');
+          if (onApprove) onApprove();
+        };
+        buttons[1].onclick = function () {
+          div.querySelector(".approval-actions").innerHTML =
+            '<span style="color:#dc2626;font-size:0.8rem;">已拒绝</span>';
+          showEvent('task.completed { status: "cancelled" }');
+          if (onReject) onReject();
+        };
+        messagesEl.appendChild(div);
+        scrollBottom();
+        showEvent('approval.required { summary: "..." }');
+      }
+
+      function scrollBottom() {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      function escapeHtml(s) {
+        return String(s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;");
+      }
+
+      function setBusy(v) {
+        busy = v;
+        btnSend.disabled = v;
+        inputEl.disabled = v;
+      }
+
+      // ---------- 模拟对话剧本 ----------
+      function runScenario(userText) {
+        setBusy(true);
+        showEvent('message.sent');
+        appendTyping();
+
+        var lower = userText.toLowerCase();
+        var isRefund = /退款/.test(userText);
+        var isOrder = /订单|ord-/i.test(userText);
+        var isCount = /几单|待发货|今天/.test(userText);
+
+        setTimeout(function () {
+          removeTyping();
+
+          if (isRefund) {
+            appendAI("收到。订单 ORD-20261019-003 存在退款申请，我将调用退款接口。该操作为写操作，需要您确认。");
+            showEvent('task.created { task_id: "tsk_demo_1" }');
+            setTimeout(function () {
+              var tool = appendTool("connector.refund_apply", "订单 ORD-20261019-003 · 金额 ¥3,200", true);
+              showEvent('task.updated { status: "waiting_approval" }');
+              setTimeout(function () {
+                tool.classList.remove("running");
+                tool.querySelector(".status").textContent = "⏸ 等待确认";
+                appendApproval(
+                  "即将对订单 ORD-20261019-003 发起退款（¥3,200）。确认后将调用业务系统退款接口。",
+                  function () {
+                    setBusy(true);
+                    var t2 = appendTool("connector.refund_apply", "提交退款…", true);
+                    showEvent('task.updated { status: "running" }');
+                    setTimeout(function () {
+                      t2.classList.remove("running");
+                      t2.querySelector(".status").textContent = "✓ 完成";
+                      appendAI("退款申请已提交成功。业务单号 RF-8821，预计 1–3 个工作日到账。可在订单详情中查看进度。");
+                      showEvent('task.completed { status: "succeeded" }');
+                      setBusy(false);
+                    }, 1200);
+                  },
+                  function () {
+                    appendAI("已取消退款操作。如需再次办理，请重新说明。");
+                    setBusy(false);
+                  }
+                );
+                setBusy(false);
+              }, 900);
+            }, 700);
+            return;
+          }
+
+          if (isOrder) {
+            appendAI("正在查询订单信息…");
+            showEvent('task.created { task_id: "tsk_demo_2" }');
+            setTimeout(function () {
+              var tool = appendTool("connector.order_query", "ORD-20261019-001", true);
+              showEvent('task.updated { status: "running" }');
+              setTimeout(function () {
+                tool.classList.remove("running");
+                tool.querySelector(".status").textContent = "✓ 完成";
+                appendAI(
+                  "订单 ORD-20261019-001\n" +
+                  "· 客户：李四\n" +
+                  "· 金额：¥1,280\n" +
+                  "· 状态：待发货\n" +
+                  "· 下单时间：2026-10-19 09:12\n\n" +
+                  "仓库已拣货，预计今日 18:00 前发出。"
+                );
+                showEvent('task.completed { status: "succeeded" }');
+                setBusy(false);
+              }, 1100);
+            }, 600);
+            return;
+          }
+
+          if (isCount) {
+            appendAI("根据当前订单列表统计：今日待发货 1 单（ORD-20261019-001），已支付待处理 1 单，退款申请 1 单。");
+            showEvent('conversation.started / 简单问答（无 Task）');
+            setBusy(false);
+            return;
+          }
+
+          // 默认
+          appendAI("已收到：「" + userText + "」。\n这是嵌入模式模拟回复。真实环境会走 Agent + Skill/Tool，并在需要时弹出人工确认。\n\n可试试快捷问题：查订单、发起退款、今日待发货。");
+          showEvent('message 简单回复（模拟）');
+          setBusy(false);
+        }, 700);
+      }
+
+      function send() {
+        var text = (inputEl.value || "").trim();
+        if (!text || busy) return;
+        inputEl.value = "";
+        appendUser(text);
+        runScenario(text);
+      }
+
+      btnSend.addEventListener("click", send);
+      inputEl.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          send();
+        }
+      });
+
+      document.getElementById("hints").addEventListener("click", function (e) {
+        var btn = e.target.closest("button[data-q]");
+        if (!btn || busy) return;
+        inputEl.value = btn.getAttribute("data-q");
+        send();
+      });
+
+      document.getElementById("btnClose").addEventListener("click", function () {
+        showEvent('ui.close');
+        alert("真实集成时：宿主收到 ui.close，可关闭侧栏或销毁 iframe。\n本页仅演示事件。");
+      });
+
+      // 模拟 ready
+      setTimeout(function () {
+        showEvent('ready { version: "embed-1.0" }');
+      }, 400);
+    })();
+  </script>
+</body>
+</html>

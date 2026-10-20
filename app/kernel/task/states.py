@@ -21,7 +21,7 @@ ALLOWED_TRANSITIONS = {
     TaskStatus.PENDING: {TaskStatus.QUEUED, TaskStatus.CANCELLED, TaskStatus.TIMEOUT},
     TaskStatus.QUEUED: {TaskStatus.RUNNING, TaskStatus.CANCELLED, TaskStatus.TIMEOUT},
     TaskStatus.RUNNING: {TaskStatus.QUEUED, TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT, TaskStatus.WAITING_HUMAN, TaskStatus.CANCELING},
-    TaskStatus.WAITING_HUMAN: {TaskStatus.QUEUED, TaskStatus.SUCCESS, TaskStatus.CANCELLED},
+    TaskStatus.WAITING_HUMAN: {TaskStatus.QUEUED, TaskStatus.SUCCESS, TaskStatus.CANCELLED, TaskStatus.TIMEOUT},
     TaskStatus.CANCELING: {TaskStatus.CANCELLED, TaskStatus.FAILED, TaskStatus.TIMEOUT},
 }
 

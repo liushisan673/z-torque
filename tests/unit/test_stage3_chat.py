@@ -1,15 +1,54 @@
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.core.errors import ApiError
 from app.db.session import SessionLocal
+from app.kernel.security_context import SecurityContext
 from app.kernel.task.service import create_task
-from app.models import Agent, AgentVersion, Conversation, Message, Tenant, User
+from app.models import (
+    Agent,
+    AgentVersion,
+    AuditLog,
+    AuthSession,
+    Confirmation,
+    Conversation,
+    Message,
+    Outbox,
+    Task,
+    TaskCheckpoint,
+    TaskEvent,
+    Tenant,
+    User,
+)
 from app.security.passwords import hash_password
 from app.services.chat_application import ensure_conversation_title
 from app.services.chat_service import handle_mock_chat
+
+
+@pytest.fixture(autouse=True)
+def cleanup():
+    """本文件历史上无清理夹具，向后续测试文件泄漏 Task/Message/User 残留
+    （阻塞其他文件的 DELETE FROM zr_user / zr_task）。按子表→父表顺序清理。"""
+    yield
+    with SessionLocal.begin() as db:
+        for model in (
+            Message,
+            Conversation,
+            TaskCheckpoint,
+            TaskEvent,
+            Outbox,
+            Task,
+            AuditLog,
+            Confirmation,
+            AgentVersion,
+            Agent,
+            AuthSession,
+            User,
+            Tenant,
+        ):
+            db.execute(delete(model))
 
 
 def _fixture(db):
@@ -35,7 +74,7 @@ def _fixture(db):
 def test_mock_chat_does_not_create_task():
     with SessionLocal() as db:
         tenant, user, _, _, conversation = _fixture(db)
-        result = handle_mock_chat(db, tenant_id=tenant.id, user_id=user.id, conversation_id=conversation.id, content="hello")
+        result = handle_mock_chat(db, ctx=SecurityContext(tenant_id=tenant.id, user_id=user.id), conversation_id=conversation.id, content="hello")
         assert result.task_id is None
         assert result.assistant_message is not None
         assert db.scalar(select(Message).where(Message.id == result.user_message.id)).task_id is None
@@ -73,8 +112,9 @@ def test_child_agent_delegation_uses_mapping_builder(monkeypatch):
 
     calls: dict = {}
 
-    def fake_builder(db, version, tenant_id):
+    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False):
         calls["version"] = version
+        calls["exclude_requires_confirmation"] = exclude_requires_confirmation
         return {}, []  # 无工具 → 走 generate 分支
 
     monkeypatch.setattr(execution_loop, "build_tool_mappings", fake_builder)
@@ -96,12 +136,67 @@ def test_child_agent_delegation_uses_mapping_builder(monkeypatch):
 
     loop = execution_loop.AgentExecutionLoop(FakeGateway(), None)
     out = asyncio.run(loop._run_child_agent(
-        FakeDB(), tenant_id=child_version.tenant_id, user_id="u",
+        FakeDB(), ctx=SecurityContext(tenant_id=child_version.tenant_id, user_id="u"),
         child_agent_version_id=child_version.id, task_text="do it",
         delegation_depth=0, cancellation_event=None, deadline_at=None,
     ))
     assert out == "child ok"
     assert calls["version"] is child_version
+    assert calls["exclude_requires_confirmation"] is True
+
+
+def test_child_delegation_request_carries_snapshot_model_params(monkeypatch):
+    """子委派 ModelRequest：快照 temperature/max_tokens 优先，未设置的键回退全局兜底（P0-1）。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.kernel.model_gateway import ModelResponse
+    from app.services import execution_loop
+
+    captured: dict = {}
+
+    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False):
+        captured["exclude_requires_confirmation"] = exclude_requires_confirmation
+        return {}, []  # 无工具 → 走 generate 分支
+
+    monkeypatch.setattr(execution_loop, "build_tool_mappings", fake_builder)
+
+    child_version = SimpleNamespace(
+        id=uuid4(), tenant_id="t", status="PUBLISHED", agent_id="a",
+        config_snapshot={"temperature": 0.2, "max_tokens": 512},  # 未绑定 model → 全局默认模型
+    )
+    child_agent = SimpleNamespace(status="ACTIVE")
+
+    class FakeDB:
+        def get(self, model, key):
+            if model.__name__ == "AgentVersion":
+                return child_version
+            if model.__name__ == "Agent":
+                return child_agent
+            return None
+
+    class FakeGateway:
+        async def generate(self, request):
+            captured["request"] = request
+            return ModelResponse(content="child ok")
+
+    # _run_child_agent 内部局部导入 app.config.get_settings，须打补丁到源模块
+    monkeypatch.setattr("app.config.get_settings", lambda: SimpleNamespace(
+        delegation_max_depth=1, model_name="global-model", model_temperature=0.9, model_max_tokens=4096, model_timeout_seconds=60,
+    ))
+
+    loop = execution_loop.AgentExecutionLoop(FakeGateway(), None)
+    out = asyncio.run(loop._run_child_agent(
+        FakeDB(), ctx=SecurityContext(tenant_id=child_version.tenant_id, user_id="u"),
+        child_agent_version_id=child_version.id, task_text="do it",
+        delegation_depth=0, cancellation_event=None, deadline_at=None,
+    ))
+    assert out == "child ok"
+    request = captured["request"]
+    assert request.model == "global-model"  # 无绑定 → 全局默认
+    assert request.temperature == 0.2  # 快照键优先
+    assert request.max_tokens == 512
+    assert request.agent_version_id == child_version.id
 
 
 def test_fail_model_task_writes_assistant_bubble_not_user_flag():
@@ -114,7 +209,7 @@ def test_fail_model_task_writes_assistant_bubble_not_user_flag():
         trigger = Message(tenant_id=tenant.id, conversation_id=conversation.id, sender_type="USER", content="hello", status="PROCESSING")
         db.add(trigger)
         db.flush()
-        task = create_task(db, tenant_id=tenant.id, owner_user_id=user.id, agent_id=agent.id, agent_version_id=version.id, idempotency_key=str(uuid4()), request_summary="hello", conversation_id=conversation.id, message_id=trigger.id)
+        task = create_task(db, ctx=SecurityContext(tenant_id=tenant.id, user_id=user.id), agent_id=agent.id, agent_version_id=version.id, idempotency_key=str(uuid4()), request_summary="hello", conversation_id=conversation.id, message_id=trigger.id)
         task.status = TaskStatus.RUNNING
         db.commit()
 
@@ -144,13 +239,13 @@ def test_trigger_alias_mapping_and_conflict():
         message = Message(tenant_id=tenant.id, conversation_id=conversation.id, sender_type="USER", content="run", status="COMPLETED")
         db.add(message)
         db.flush()
-        task = create_task(db, tenant_id=tenant.id, owner_user_id=user.id, agent_id=agent.id, agent_version_id=version.id, idempotency_key=str(uuid4()), request_summary="run", conversation_id=conversation.id, message_id=message.id)
+        task = create_task(db, ctx=SecurityContext(tenant_id=tenant.id, user_id=user.id), agent_id=agent.id, agent_version_id=version.id, idempotency_key=str(uuid4()), request_summary="run", conversation_id=conversation.id, message_id=message.id)
         assert task.trigger_message_id == message.id
         assert task.message_id == message.id
         # 设计约定（task/service.py）：trigger 消息不回写 task_id（zr_message.task_id 的
         # UNIQUE 约束保留给任务产出的 ASSISTANT 回复）；关联由 Task.trigger_message_id 承载
         assert message.task_id is None
         with pytest.raises(ApiError) as error:
-            create_task(db, tenant_id=tenant.id, owner_user_id=user.id, agent_id=agent.id, agent_version_id=version.id, idempotency_key=str(uuid4()), request_summary="run", conversation_id=conversation.id, trigger_message_id=message.id, message_id=uuid4())
+            create_task(db, ctx=SecurityContext(tenant_id=tenant.id, user_id=user.id), agent_id=agent.id, agent_version_id=version.id, idempotency_key=str(uuid4()), request_summary="run", conversation_id=conversation.id, trigger_message_id=message.id, message_id=uuid4())
         assert error.value.code == "AI_REQUEST_INVALID"
         db.rollback()

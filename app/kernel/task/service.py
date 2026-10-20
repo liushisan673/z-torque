@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.core.ids import new_uuid7
+from app.kernel.security_context import SecurityContext
 from app.kernel.task.states import TERMINAL_STATES, TaskStatus, can_transition
 from app.models import Agent, AgentVersion, Conversation, Message, Outbox, Task, TaskEvent
 
@@ -166,8 +167,7 @@ def _apply_legacy_child_defaults(
 def create_task(
     db: Session,
     *,
-    tenant_id: UUID,
-    owner_user_id: UUID,
+    ctx: SecurityContext,
     agent_id: UUID,
     agent_version_id: UUID,
     idempotency_key: str,
@@ -182,6 +182,10 @@ def create_task(
     trigger_message_id: UUID | None = None,
     message_id: UUID | None = None,
 ) -> Task:
+    """任务创建（不变量1：身份必须以 SecurityContext 进入，冻结为 Task 行 tenant_id/owner_user_id）。"""
+    tenant_id = ctx.tenant_id
+    owner_user_id = ctx.user_id
+    trace_id = trace_id or ctx.trace_id
     trigger_message_id = _resolve_trigger_message(trigger_message_id, message_id)
     if not idempotency_key or len(idempotency_key) > 128:
         raise ApiError("AI_PARAM_INVALID", "idempotency key is too long", 422)

@@ -638,5 +638,58 @@
       }
     });
   </script>
+
+  <!-- ============================================================
+       嵌入组件测试挂件（模拟真实宿主的「右下角客服挂件」形态）
+       ⚠ 登录态同步前提：本文件须通过 http://localhost:5173/chat.html 访问
+       （同源副本已放 console/public/chat.html 由 Vite 服务）。用 file:// 双击打开时
+       浏览器对跨站 iframe 做 localStorage 分区隔离，嵌入页将永远显示未登录。
+       可用参数：agent_id（预选智能体）/ theme=dark / starters=问题1|问题2
+       ============================================================ -->
+  <div id="embed-file-warning" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10000;
+       background:#fef2f2;color:#dc2626;font-size:13px;padding:8px 16px;text-align:center;border-bottom:1px solid #fecaca;">
+    当前通过 file:// 打开，无法与平台同步登录态——请访问 <b>http://localhost:5173/chat.html</b>（需 Vite dev server 运行中）
+  </div>
+  <div id="embed-widget" style="position:fixed;right:24px;bottom:24px;z-index:9999;display:none;">
+    <iframe id="embed-frame"
+      src="http://localhost:5173/embed/chat?theme=light"
+      style="width:400px;height:640px;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 12px 32px rgba(15,23,42,.18);"
+    ></iframe>
+  </div>
+  <!-- 悬浮球：初始与收起态显示，点击展开对话挂件 -->
+  <button id="embed-fab" type="button" title="打开嵌入对话"
+          style="position:fixed;right:24px;bottom:24px;z-index:9998;width:56px;height:56px;border:0;border-radius:50%;
+                 background:linear-gradient(135deg,#3b82f6,#2563eb);color:#fff;cursor:pointer;
+                 box-shadow:0 8px 24px rgba(37,99,235,.4);display:flex;align-items:center;justify-content:center;">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+    </svg>
+  </button>
+  <script>
+    (function () {
+      var frame = document.getElementById("embed-frame");
+      var widget = document.getElementById("embed-widget");
+      var fab = document.getElementById("embed-fab");
+      // file:// 打开时给出明确警告（登录态无法同步）
+      if (window.location.protocol === "file:") {
+        document.getElementById("embed-file-warning").style.display = "block";
+      } else {
+        // http(s) 访问时 iframe 跟随宿主地址（同源），并告知嵌入页宿主 origin 以启用 postMessage 协议
+        frame.src = window.location.origin + "/embed/chat?theme=light&parent_origin=" +
+          encodeURIComponent(window.location.origin);
+      }
+      function openWidget() { widget.style.display = "block"; fab.style.display = "none"; }
+      function closeWidget() { widget.style.display = "none"; fab.style.display = "block"; }
+      fab.addEventListener("click", openWidget);
+      // 监听嵌入页 postMessage 事件（信封：{ source: "z-torque-embed", type, payload }）
+      window.addEventListener("message", function (e) {
+        if (!e.data || e.data.source !== "z-torque-embed") return;
+        console.log("[嵌入事件]", e.data.type, e.data.payload);
+        // 嵌入页右上角 × 触发：收起对话挂件、恢复悬浮球（iframe 不销毁，会话与登录态保留）
+        if (e.data.type === "ui.close") closeWidget();
+      });
+    })();
+  </script>
 </body>
 </html>

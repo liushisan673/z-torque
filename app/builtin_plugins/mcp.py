@@ -25,12 +25,14 @@ MCP_PROTOCOL_VERSION = "2025-06-18"
 class StreamableHttpMcpConnector:
     protocol_version = MCP_PROTOCOL_VERSION
 
-    def __init__(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float = 30, max_response_bytes: int = 1_000_000, transport: httpx.AsyncBaseTransport | None = None, auth_token: str | None = None) -> None:
+    def __init__(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float = 30, max_response_bytes: int = 1_000_000, transport: httpx.AsyncBaseTransport | None = None, auth_token: str | None = None, extra_headers: dict[str, str] | None = None) -> None:
         self.endpoint = endpoint
         self.allowed_hosts = set(allowed_hosts)
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
         self.auth_token = auth_token
+        # 身份透传头（P2-5：SecurityContext 贯穿外部调用，X-ZT-User-Id 等，仅执行期）
+        self.extra_headers = dict(extra_headers) if extra_headers else {}
         self.session_id: str | None = None
         self._request_id = 0
         self.client = httpx.AsyncClient(follow_redirects=False, timeout=timeout_seconds, transport=transport)
@@ -77,6 +79,8 @@ class StreamableHttpMcpConnector:
         headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json", "MCP-Protocol-Version": self.protocol_version}
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
+        if self.extra_headers:
+            headers.update(self.extra_headers)
         if include_session and self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         try:
@@ -110,9 +114,9 @@ class StreamableHttpMcpConnector:
         raise McpTransportError("MCP SSE response did not contain JSON-RPC data")
 
 
-def make_http_connector(endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, auth_token: str | None = None) -> StreamableHttpMcpConnector:
+def make_http_connector(endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, auth_token: str | None = None, extra_headers: dict[str, str] | None = None) -> StreamableHttpMcpConnector:
     """SkillGateway 经该工厂创建 HTTP 连接器（内核不感知实现类）。"""
-    return StreamableHttpMcpConnector(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, auth_token=auth_token)
+    return StreamableHttpMcpConnector(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, auth_token=auth_token, extra_headers=extra_headers)
 
 
 @dataclass(frozen=True)

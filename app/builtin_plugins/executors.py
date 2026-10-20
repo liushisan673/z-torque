@@ -42,24 +42,56 @@ class HttpExecutor:
     def execute(self, config: dict, arguments: dict, timeout_seconds: float) -> ExecutionResult:
         method = str(config.get("method", "GET")).upper()
         url = str(config.get("url", ""))
-        if method != "GET":
-            return ExecutionResult(status="FAILED", error_code="AI_HTTP_METHOD_NOT_ALLOWED", error_message="only GET is enabled")
+        if method not in ("GET", "POST"):
+            return ExecutionResult(status="FAILED", error_code="AI_HTTP_METHOD_NOT_ALLOWED", error_message="only GET and POST are enabled")
         secret = config.get("secret_value")
         try:
-            headers = {str(key): self._resolve(str(value), arguments, secret) for key, value in (config.get("headers") or {}).items()}
-            query_params = {str(key): self._resolve(str(value), arguments, secret) for key, value in (config.get("queryParams") or {}).items()}
+            headers = {str(key): self._resolve(self._resolve_credential(str(value)), arguments, secret) for key, value in (config.get("headers") or {}).items()}
+            query_params = {str(key): self._resolve(self._resolve_credential(str(value)), arguments, secret) for key, value in (config.get("queryParams") or {}).items()}
         except ValueError as exc:
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_TEMPLATE_UNRESOLVED", error_message=str(exc))
-        params: dict[str, Any] = {**query_params, **arguments}
-        if not self._allowed_url(url, config.get("allowed_hosts", [])):
+        # 身份透传（P2-5：SecurityContext 贯穿外部调用）：保留键 _identity 由网关注入，
+        # 仅执行期存在；下游系统可经 X-ZT-* 头审计委托链
+        identity = config.get("_identity") if isinstance(config.get("_identity"), dict) else None
+        if identity:
+            if identity.get("user_id"):
+                headers["X-ZT-User-Id"] = str(identity["user_id"])
+            if identity.get("trace_id"):
+                headers["X-ZT-Trace-Id"] = str(identity["trace_id"])
+            if identity.get("task_id"):
+                headers["X-ZT-Task-Id"] = str(identity["task_id"])
+        # 连接器显式声明 allow_private_network（经 target_policy）时放行内网 http 目标；
+        # 未声明维持默认 SSRF 收敛（https + 公网）。host 始终必须在 allowed_hosts 白名单内。
+        target_policy = config.get("target_policy") if isinstance(config.get("target_policy"), dict) else {}
+        allow_private = bool(config.get("allow_private_network") or target_policy.get("allow_private_network"))
+        if not self._allowed_url(url, config.get("allowed_hosts", []), allow_private):
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_TARGET_BLOCKED", error_message="HTTP target is not allowed")
         try:
             with httpx.Client(follow_redirects=False, timeout=timeout_seconds) as client:
-                response = client.get(url, params=params, headers=headers)
+                if method == "POST":
+                    # 导入工具约定：requestBody 整体作为 __body__ 参数；其余参数拼 query
+                    body = arguments.get("__body__")
+                    query_args = {key: value for key, value in arguments.items() if key != "__body__"}
+                    response = client.post(url, json=body, params={**query_params, **query_args}, headers=headers)
+                else:
+                    params: dict[str, Any] = {**query_params, **arguments}
+                    response = client.get(url, params=params, headers=headers)
             body = response.text[: int(config.get("max_response_bytes", 1_000_000))]
             return ExecutionResult(status="SUCCEEDED" if response.is_success else "FAILED", data={"status_code": response.status_code, "body": body}, error_code=None if response.is_success else "AI_HTTP_ERROR")
         except (httpx.HTTPError, ValueError) as exc:
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_REQUEST_FAILED", error_message=str(exc))
+
+    @staticmethod
+    def _resolve_credential(value: str) -> str:
+        """凭据引用：secret:// 开头的值经 SecretStore 解密（明文不落库），其余原样返回。"""
+        if value.startswith("secret://"):
+            from app.security.secret_store import SecretStore, SecretStoreError
+
+            try:
+                return SecretStore().decrypt(value.removeprefix("secret://"))
+            except SecretStoreError as exc:
+                raise ValueError("tool credential secret reference cannot be decrypted") from exc
+        return value
 
     @staticmethod
     def _resolve(value: str, arguments: dict, secret: str | None) -> str:
@@ -78,9 +110,14 @@ class HttpExecutor:
         return _TEMPLATE.sub(substitute, value)
 
     @staticmethod
-    def _allowed_url(url: str, allowed_hosts: list[str]) -> bool:
+    def _allowed_url(url: str, allowed_hosts: list[str], allow_private_network: bool = False) -> bool:
         parsed = urlparse(url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.hostname not in set(allowed_hosts):
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.hostname not in set(allowed_hosts):
+            return False
+        if allow_private_network:
+            # 显式放行：连接器 target_policy 声明的内网/明文目标由配置者担责
+            return True
+        if parsed.scheme != "https":
             return False
         try:
             addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)

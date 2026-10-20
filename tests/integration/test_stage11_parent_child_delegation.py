@@ -16,10 +16,11 @@ from app.security.passwords import hash_password
 @pytest.fixture(autouse=True)
 def baseline():
     with SessionLocal.begin() as db:
-        db.execute(delete(TaskEvent))
-        db.execute(delete(Task))
+        # 子表→父表顺序：Message.task_id 为 RESTRICT，必须先于 Task 删除
         db.execute(delete(Message))
         db.execute(delete(Conversation))
+        db.execute(delete(TaskEvent))
+        db.execute(delete(Task))
         db.execute(delete(AgentVersion))
         db.execute(delete(Agent))
         db.execute(delete(AuthSession))

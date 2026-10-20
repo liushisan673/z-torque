@@ -24,3 +24,22 @@ def _test_database():
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _assembled_app_state():
+    """ASGITransport 不触发 lifespan：为经 API 层的测试装配 Port 注册表。
+
+    仅做装配（deps 依赖 identity.provider 等 Port）；不启动 TaskRuntime /
+    MdSkillWatcher 等长生命周期组件，由各测试按需构造。
+    """
+    from app.assembly import assemble  # noqa: E402
+    from app.config import get_settings  # noqa: E402
+    from app.main import app  # noqa: E402
+
+    result = assemble(get_settings(), engine)
+    app.state.port_registry = result.registry
+    app.state.skill_gateway = result.skill_gateway
+    app.state.model_gateway = result.model_gateway
+    app.state.mcp_stdio_registry = result.stdio_registry
+    yield

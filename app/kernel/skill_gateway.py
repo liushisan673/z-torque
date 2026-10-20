@@ -6,13 +6,20 @@ from jsonschema import ValidationError, validate
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
-from app.kernel.audit.service import record_audit
+from app.kernel.audit.service import AuditExecutionInterceptor
 from app.kernel.authz import PermissionChecker
 from app.kernel.md_skill import MdSkillManifest
 from app.kernel.md_skill_runtime import MdSkillRuntime
+from app.kernel.ports.authz_provider import AuthzProvider
 from app.kernel.ports.connector import McpConnector
+from app.kernel.ports.interceptor import ExecutionInterceptor
+from app.kernel.ports.sandbox_driver import SandboxDriver
 from app.kernel.ports.skill_executor import ExecutionResult, ToolExecutor
-from app.kernel.skill_confirmation import pause_task_for_confirmation
+from app.kernel.plugin_guard import CIRCUIT_OPEN_CODE, QUOTA_EXCEEDED_CODE, PluginGuardRegistry
+from app.kernel.security_context import SecurityContext
+from app.services.tool_mapping_builder import _sanitize_schema
+from app.kernel.skill_confirmation import BuiltinApprovalProvider, pause_task_for_confirmation
+from app.kernel.ports.approval_provider import ApprovalProvider
 from app.models import (
     Connector,
     Skill,
@@ -56,15 +63,24 @@ class NegotiatedMcpExecutor:
 
 
 class SkillGateway:
-    def __init__(self, permission_checker: PermissionChecker | None = None, *, http_connector_factory: Any = None, stdio_registry: Any = None) -> None:
+    def __init__(self, permission_checker: AuthzProvider | None = None, *, http_connector_factory: Any = None, stdio_registry: Any = None, approval_provider: ApprovalProvider | None = None, sandbox_driver: SandboxDriver | None = None, interceptor: ExecutionInterceptor | None = None, plugin_guard: PluginGuardRegistry | None = None) -> None:
+        # authz.provider Port 解析结果由装配根经插件注入（P1-3）；默认回退保留内置 RBAC
+        # 检查器，供无装配的直构场景（测试/脚本）使用，语义与插件包装实现一致
         self.permission_checker = permission_checker or PermissionChecker()
+        # approval / sandbox / interceptor 三 Port 解析结果由装配根经插件注入（P2 收口）；
+        # 未注入时回退内核默认实现（直构场景语义不变，单一路径无分支）
+        self._approvals = approval_provider or BuiltinApprovalProvider()
+        self._interceptor = interceptor or AuditExecutionInterceptor()
+        # 插件级熔断与配额（契约 §5.5）：执行器分派闸门（按 tool_type 键）；
+        # 未注入时按全局配置默认构建
+        self._guard = plugin_guard or PluginGuardRegistry.from_settings()
         self._executors: dict[str, ToolExecutor] = {}
         # 连接器传输由 connector Port 插件注入（内核不感知实现，阶段00 §3.8 约束 1）
         self.http_connector_factory = http_connector_factory
         self.stdio_registry = stdio_registry
         from app.config import get_settings
         settings = get_settings()
-        self._md_runtime = MdSkillRuntime(settings.md_skills_dir, enabled=settings.md_skill_script_enabled, timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output)
+        self._md_runtime = MdSkillRuntime(settings.md_skills_dir, enabled=settings.md_skill_script_enabled, timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output, sandbox_driver=sandbox_driver)
 
     def register(self, executor: ToolExecutor) -> None:
         self._executors[executor.tool_type] = executor
@@ -81,7 +97,26 @@ class SkillGateway:
         except SecretStoreError:
             return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_SECRET_INVALID", error_message="连接器凭证无法解密")
 
-    async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float, *, secret_ref: str | None = None) -> ExecutionResult:
+    async def probe_mcp_http(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, secret_ref: str | None = None) -> dict:
+        """MCP HTTP 探测：initialize 握手 + tools/list，返回 tools/list 原始结果。
+
+        供 API 层连接器测试/工具发现使用；传输实现经装配注入的 http_connector_factory
+        构造，内核不感知插件类型（阶段00 §3.8 约束 1，G1 修复）。
+        失败抛 McpProtocolError / McpTransportError / ApiError，由调用方映射错误码。
+        """
+        if self.http_connector_factory is None:
+            raise ApiError("AI_CONNECTOR_UNAVAILABLE", "MCP HTTP connector is unavailable", 503)
+        auth_token = self._resolve_secret_token(secret_ref)
+        if isinstance(auth_token, ExecutionResult):
+            raise ApiError(auth_token.error_code or "AI_CONNECTOR_SECRET_INVALID", auth_token.error_message or "连接器凭证无法解密", 503)
+        connector = self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, auth_token=auth_token)
+        try:
+            await connector.negotiate()
+            return await connector.list_tools()
+        finally:
+            await connector.close()
+
+    async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float, *, secret_ref: str | None = None, identity: dict[str, str] | None = None) -> ExecutionResult:
         from app.config import get_settings
 
         transport = str(config.get("transport", "http")).lower()
@@ -96,7 +131,7 @@ class SkillGateway:
             auth_token = self._resolve_secret_token(secret_ref)
             if isinstance(auth_token, ExecutionResult):
                 return auth_token
-            connector = self.http_connector_factory(endpoint, allowed_hosts=settings.mcp_allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token)
+            connector = self.http_connector_factory(endpoint, allowed_hosts=settings.mcp_allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token, extra_headers=self._identity_headers(identity))
         elif transport == "stdio":
             registry = self.stdio_registry
             server_name = config.get("server_name")
@@ -118,7 +153,11 @@ class SkillGateway:
         finally:
             await connector.close()
 
-    async def _execute_with_retry(self, executor: ToolExecutor, config: dict[str, Any], arguments: dict[str, Any], *, timeout_seconds: float, max_retries: int, backoff_seconds: float) -> ExecutionResult:
+    async def _execute_with_retry(self, executor: ToolExecutor, config: dict[str, Any], arguments: dict[str, Any], *, timeout_seconds: float, max_retries: int, backoff_seconds: float, guard_key: str | None = None) -> ExecutionResult:
+        if guard_key is not None:
+            gated = self._guard_gate(guard_key)
+            if gated is not None:
+                return gated
         result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="tool execution failed")
         for attempt in range(max_retries + 1):
             try:
@@ -131,9 +170,33 @@ class SkillGateway:
             except (OSError, ValueError, RuntimeError):
                 result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message=_TOOL_FAILURE_MESSAGE)
             if result.status == "SUCCEEDED" or attempt == max_retries or not self._is_retryable(result):
-                return result
+                break
             await asyncio.sleep(min(backoff_seconds * (2 ** attempt), 30))
+        if guard_key is not None:
+            self._guard_record(guard_key, result)
         return result
+
+    def _guard_gate(self, key: str) -> ExecutionResult | None:
+        """熔断/配额闸门：通过返回 None（并计一次配额）；拒绝返回 FAILED 结果（不经执行器）。"""
+        try:
+            self._guard.check(f"executor.{key}")
+        except ApiError as exc:
+            return ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)
+        return None
+
+    def _guard_record(self, key: str, result: ExecutionResult) -> None:
+        """熔断计数：SUCCEEDED 清零，FAILED 计失败；WAITING_HUMAN/CANCELLED 不计。
+
+        闸门拒绝（熔断 OPEN / 配额超限）不是插件故障，不参与熔断计数——
+        否则持续流量会在 OPEN 期间反复把拒绝记为失败、刷新冷却窗口，
+        熔断器永远等不到恢复探测。
+        """
+        if result.error_code in (CIRCUIT_OPEN_CODE, QUOTA_EXCEEDED_CODE):
+            return
+        if result.status == "SUCCEEDED":
+            self._guard.record(f"executor.{key}", succeeded=True)
+        elif result.status == "FAILED":
+            self._guard.record(f"executor.{key}", succeeded=False)
 
     @staticmethod
     def _is_retryable(result: ExecutionResult) -> bool:
@@ -150,13 +213,14 @@ class SkillGateway:
         self,
         db: Session,
         *,
-        tenant_id: UUID,
-        user_id: UUID | None,
+        ctx: SecurityContext,
         skill_version_id: UUID,
         arguments: dict[str, Any],
         task_id: UUID | None = None,
         timeout_seconds: float = 30,
     ) -> ExecutionResult:
+        tenant_id = ctx.tenant_id
+        user_id = ctx.user_id
         skill = db.get(SkillVersion, skill_version_id)
         if not skill or skill.tenant_id != tenant_id or skill.status != "PUBLISHED":
             raise ApiError("AI_SKILL_NOT_FOUND", "published skill version not found", 404)
@@ -201,6 +265,7 @@ class SkillGateway:
                     idempotency_key=f"{task_id}:{tool.id}",
                     skill_version_id=skill.id,
                     tool_version_id=tool.id,
+                    approval_provider=self._approvals,
                 )
                 result = ExecutionResult(status="WAITING_HUMAN", requires_confirmation=True, data={"confirmation_id": str(confirmation.id)})
                 self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
@@ -223,24 +288,30 @@ class SkillGateway:
             if executor is None:
                 result = ExecutionResult(status="FAILED", error_code="AI_EXECUTOR_UNAVAILABLE", error_message="executor is unavailable")
             else:
-                try:
-                    result = executor.execute(self._materialize_config(tool, connector), arguments, timeout_seconds)
-                except TimeoutError:
-                    result = ExecutionResult(status="FAILED", error_code="AI_SKILL_TIMEOUT", error_message="tool execution timed out")
-                except (OSError, ValueError, RuntimeError):
-                    result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="tool execution failed")
+                gated = self._guard_gate(owner.tool_type)
+                if gated is not None:
+                    result = gated
+                else:
+                    try:
+                        result = executor.execute(self._materialize_config(tool, connector, identity=self._identity_meta(ctx, task_id)), arguments, timeout_seconds)
+                    except TimeoutError:
+                        result = ExecutionResult(status="FAILED", error_code="AI_SKILL_TIMEOUT", error_message="tool execution timed out")
+                    except (OSError, ValueError, RuntimeError):
+                        result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="tool execution failed")
             result = self._validate_output(tool.output_schema, result)
+            if executor is not None:
+                self._guard_record(owner.tool_type, result)
             results.append(result.data)
             self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
             if result.status != "SUCCEEDED":
                 return result
         return ExecutionResult(status="SUCCEEDED", data=results)
 
-    async def execute_async(self, db: Session, **kwargs: Any) -> ExecutionResult:
+    async def execute_async(self, db: Session, ctx: SecurityContext, **kwargs: Any) -> ExecutionResult:
         """Execute sync and negotiated async tools through one audited gateway path."""
         skill_version_id = kwargs.pop("skill_version_id")
-        tenant_id = kwargs.pop("tenant_id")
-        user_id = kwargs.pop("user_id", None)
+        tenant_id = ctx.tenant_id
+        user_id = ctx.user_id
         arguments = kwargs.pop("arguments")
         task_id = kwargs.pop("task_id", None)
         timeout_seconds = kwargs.pop("timeout_seconds", 30)
@@ -288,6 +359,7 @@ class SkillGateway:
                 result = ExecutionResult(status="SUCCEEDED", data=data)
             except ApiError as exc:
                 result = ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)
+            self._guard_record("MD_SCRIPT", result)
             self._log(db, tenant_id, user_id, skill, None, task_id, result)
             return result
         for link in links:
@@ -323,13 +395,17 @@ class SkillGateway:
                     idempotency_key=f"{task_id}:{tool.id}",
                     skill_version_id=skill.id,
                     tool_version_id=tool.id,
+                    approval_provider=self._approvals,
                 )
                 result = ExecutionResult(status="WAITING_HUMAN", requires_confirmation=True, data={"confirmation_id": str(confirmation.id)})
                 self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
                 return result
             executor = self._executors.get(owner.tool_type)
             if owner.tool_type == "MCP":
-                result = await self._execute_mcp(tool.config_snapshot, arguments, self._remaining_timeout(timeout_seconds, deadline_at), secret_ref=connector.secret_ref if connector else None)
+                gated = self._guard_gate(owner.tool_type)
+                identity = self._identity_meta(ctx, task_id)
+                result = gated if gated is not None else await self._execute_mcp(tool.config_snapshot, arguments, self._remaining_timeout(timeout_seconds, deadline_at), secret_ref=connector.secret_ref if connector else None, identity=identity)
+                self._guard_record(owner.tool_type, result)
                 self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
                 if result.status != "SUCCEEDED":
                     return result
@@ -338,7 +414,7 @@ class SkillGateway:
             if executor is None:
                 result = ExecutionResult(status="FAILED", error_code="AI_EXECUTOR_UNAVAILABLE", error_message="executor is unavailable")
             else:
-                result = await self._execute_with_retry(executor, self._materialize_config(tool, connector), arguments, timeout_seconds=min(self._remaining_timeout(timeout_seconds, deadline_at), tool.timeout_seconds), max_retries=tool.max_retries, backoff_seconds=tool.retry_backoff_seconds)
+                result = await self._execute_with_retry(executor, self._materialize_config(tool, connector, identity=self._identity_meta(ctx, task_id)), arguments, timeout_seconds=min(self._remaining_timeout(timeout_seconds, deadline_at), tool.timeout_seconds), max_retries=tool.max_retries, backoff_seconds=tool.retry_backoff_seconds, guard_key=owner.tool_type)
             result = self._validate_output(tool.output_schema, result)
             self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
             if result.status != "SUCCEEDED":
@@ -360,9 +436,43 @@ class SkillGateway:
             raise ApiError("AI_TASK_TIMEOUT", "task deadline exceeded", 504)
         return min(timeout_seconds, remaining)
 
-    def _materialize_config(self, tool: ToolVersion, connector: Connector | None) -> dict[str, Any]:
-        """构造运行时配置：解密连接器 Secret URI 供 {{secret}} 模板使用，并兜底 allowed_hosts。"""
+    @staticmethod
+    def _identity_meta(ctx: SecurityContext | None, task_id: UUID | None = None) -> dict[str, str] | None:
+        """提取身份元数据（P2-5：SecurityContext 贯穿外部调用，委托链可审计）。"""
+        if ctx is None:
+            return None
+        meta: dict[str, str] = {}
+        if ctx.user_id:
+            meta["user_id"] = str(ctx.user_id)
+        if ctx.trace_id:
+            meta["trace_id"] = ctx.trace_id
+        if task_id is not None:
+            meta["task_id"] = str(task_id)
+        return meta or None
+
+    @staticmethod
+    def _identity_headers(identity: dict[str, str] | None) -> dict[str, str] | None:
+        """身份元数据 → 出站头（HTTP / MCP 传输层统一 X-ZT-* 命名）。"""
+        if not identity:
+            return None
+        headers: dict[str, str] = {}
+        if identity.get("user_id"):
+            headers["X-ZT-User-Id"] = str(identity["user_id"])
+        if identity.get("trace_id"):
+            headers["X-ZT-Trace-Id"] = str(identity["trace_id"])
+        if identity.get("task_id"):
+            headers["X-ZT-Task-Id"] = str(identity["task_id"])
+        return headers or None
+
+    def _materialize_config(self, tool: ToolVersion, connector: Connector | None, *, identity: dict[str, str] | None = None) -> dict[str, Any]:
+        """构造运行时配置：解密连接器 Secret URI 供 {{secret}} 模板使用，并兜底 allowed_hosts。
+
+        identity（P2-5）：执行期身份元数据，写入保留键 `_identity`（仅运行时存在，
+        不落任何快照/持久化），供执行器（HTTP 出站头等）透传身份。
+        """
         config = dict(tool.config_snapshot or {})
+        if identity:
+            config["_identity"] = identity
         if connector is not None and connector.connector_type == "DB":
             # DB 工具：连接信息以连接器当前 config 为准（运行时叠加，避免注册快照过期）；
             # allowed_tables 取当前连接器白名单，执行器会与注册快照求交集（fail-closed）。
@@ -372,6 +482,19 @@ class SkillGateway:
             tables = (connector.config or {}).get("allowed_tables")
             if isinstance(tables, list):
                 config["connector_allowed_tables"] = [str(table) for table in tables]
+        if connector is not None and connector.connector_type == "REST" and connector.target_policy:
+            # REST 工具：目标安全策略（allow_private_network 等）以连接器实时配置为源头，
+            # 叠加到工具导入快照之上，避免已导入工具的旧快照阻塞策略更新
+            config["target_policy"] = {**(config.get("target_policy") or {}), **connector.target_policy}
+        if connector is not None and connector.connector_type == "REST":
+            # 连接器级凭据头（前端连接器页配置，明文保存时已转 secret:// 引用）：
+            # 覆盖导入工具 headers 里的同名 {{参数}} 模板项 → 一次配置对该连接器全部工具生效，
+            # 无需重新发布工具版本；值在执行期由 HttpExecutor 经 SecretStore 解密
+            auth_headers = (connector.config or {}).get("auth_headers")
+            if isinstance(auth_headers, dict) and auth_headers:
+                merged_headers = dict(config.get("headers") or {})
+                merged_headers.update({str(k): str(v) for k, v in auth_headers.items()})
+                config["headers"] = merged_headers
         if connector is not None and connector.secret_ref:
             from app.security.secret_store import SecretStore, SecretStoreError
 
@@ -398,8 +521,11 @@ class SkillGateway:
     def _validate_input(schema: dict[str, Any] | None, arguments: dict[str, Any]) -> None:
         if not schema:
             return
+        # 执行侧与模型侧同源净化：悬空 $ref（OpenAPI 导入残留）会让 jsonschema 抛
+        # RefResolutionError（非 ValidationError）导致任务 AI_TASK_FAILED
+        clean = _sanitize_schema(schema)
         try:
-            validate(arguments, schema)
+            validate(arguments, clean)
         except ValidationError as exc:
             raise ApiError("AI_PARAM_INVALID", "tool input does not match its schema", 400, {"path": list(exc.path)}) from exc
 
@@ -407,14 +533,16 @@ class SkillGateway:
     def _validate_output(schema: dict[str, Any] | None, result: ExecutionResult) -> ExecutionResult:
         if result.status != "SUCCEEDED" or not schema:
             return result
+        clean = _sanitize_schema(schema)
         try:
-            validate(result.data, schema)
+            validate(result.data, clean)
         except ValidationError:
             return ExecutionResult(status="FAILED", error_code="AI_TASK_RESULT_INVALID", error_message="tool output does not match its schema")
         return result
 
-    @staticmethod
-    def _log(db: Session, tenant_id: UUID, user_id: UUID | None, skill: SkillVersion, tool: ToolVersion | None, task_id: UUID | None, result: ExecutionResult, arguments: dict | None = None) -> None:
+    def _log(self, db: Session, tenant_id: UUID, user_id: UUID | None, skill: SkillVersion, tool: ToolVersion | None, task_id: UUID | None, result: ExecutionResult, arguments: dict | None = None) -> None:
         db.add(SkillExecutionLog(tenant_id=tenant_id, actor_user_id=user_id, skill_version_id=skill.id, tool_version_id=tool.id if tool else None, task_id=task_id, status=result.status, result={**({"data": result.data} if result.data is not None else {}), **({"input": arguments} if arguments else {})}, error_code=result.error_code))
-        record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="SKILL_EXECUTED", resource_type="SKILL_VERSION", resource_id=skill.id, summary="skill execution completed", detail={"status": result.status, "tool_version_id": str(tool.id) if tool else None})
+        # 审计事件经 interceptor Port 发射（P2 收口，契约红线1 审计不可关闭）；
+        # 默认实现委托 record_audit，行为与直调完全一致
+        self._interceptor.on_execution(db, tenant_id=tenant_id, actor_user_id=user_id, action="SKILL_EXECUTED", resource_type="SKILL_VERSION", resource_id=skill.id, summary="skill execution completed", detail={"status": result.status, "tool_version_id": str(tool.id) if tool else None})
         db.flush()

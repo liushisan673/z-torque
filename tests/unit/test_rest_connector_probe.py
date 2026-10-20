@@ -242,6 +242,8 @@ async def test_probe_falls_back_to_get_when_head_rejected(monkeypatch):
 async def test_probe_rejects_loopback_in_production(monkeypatch):
     from app.config import get_settings
     monkeypatch.setattr(get_settings(), "app_debug", False)
+    # 测试意图为「生产默认拒绝回环」：需同时隔离本地 .env 的显式放行列表，保证跨环境稳定
+    monkeypatch.setattr(get_settings(), "connector_allowed_targets", [])
     with pytest.raises(ApiError) as exc:
         await _probe_rest({"base_url": "http://127.0.0.1:8080"}, None)
     assert exc.value.code == "AI_CONNECTOR_FORBIDDEN_HOST"
@@ -260,6 +262,19 @@ def test_build_input_schema_from_openapi_params():
     assert props["properties"]["user_id"]["type"] == "string"
     assert props["properties"]["limit"]["type"] == "integer"
     assert props["properties"]["status"]["enum"] == ["a", "b"]
+
+
+def test_build_input_schema_excludes_header_params():
+    """header 参数一律凭据化：不进 schema（模型不可见），由工具 config.headers 在执行期提供。"""
+    props = _build_input_schema_from_params([
+        {"name": "CSRF-TOKEN", "in": "header", "required": True, "schema": {"type": "string"}},
+        {"name": "X-AUTH-TOKEN", "in": "header", "required": True, "schema": {"type": "string"}},
+        {"name": "limit", "in": "query", "schema": {"type": "integer"}},
+    ])
+    assert "CSRF-TOKEN" not in props["properties"]
+    assert "X-AUTH-TOKEN" not in props["properties"]
+    assert set(props["properties"].keys()) == {"limit"}
+    assert "required" not in props
 
 
 def test_safe_tool_name_sanitizes_and_dedupes():

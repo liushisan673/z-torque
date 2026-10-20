@@ -86,13 +86,13 @@
       cursor: pointer; font-size: 13px; padding: 4px 8px; border-radius: 4px;
     }
     .btn-text:hover { color: var(--danger); background: var(--danger-soft); }
-
+    
     /* 主布局：列表 + 详情 */
     .main {
       display: flex;
       height: calc(100vh - 52px);
     }
-
+    
     /* 左侧列表 */
     .list-pane {
       width: 380px;
@@ -132,7 +132,7 @@
       font-size: 13px; font-weight: 500; cursor: pointer;
     }
     .btn-secondary:hover { background: var(--bg); color: var(--text); }
-
+    
     .search-row {
       display: flex;
       gap: 8px;
@@ -169,7 +169,7 @@
     }
     .filter-tab:hover { background: var(--bg); }
     .filter-tab.active { background: var(--primary-soft); color: var(--primary); }
-
+    
     .agent-list {
       flex: 1;
       overflow-y: auto;
@@ -233,7 +233,7 @@
     .tag-draft { background: var(--warning-soft); color: var(--warning); }
     .tag-archived { background: var(--bg); color: var(--text-muted); }
     .ver { font-size: 11px; color: var(--text-muted); }
-
+    
     /* 右侧详情 */
     .detail-pane {
       flex: 1;
@@ -252,7 +252,7 @@
       gap: 8px;
     }
     .detail-empty h2 { font-size: 16px; color: var(--text-secondary); font-weight: 500; }
-
+    
     .detail-header {
       padding: 20px 28px 16px;
       background: var(--surface);
@@ -292,7 +292,7 @@
       font-size: 13px; font-weight: 500; cursor: pointer;
     }
     .btn-danger-outline:hover { background: var(--danger-soft); }
-
+    
     .detail-tags {
       display: flex;
       gap: 8px;
@@ -300,7 +300,7 @@
       flex-wrap: wrap;
     }
     .detail-tags .tag { font-size: 12px; padding: 3px 10px; }
-
+    
     /* Tab */
     .tabs {
       display: flex;
@@ -323,13 +323,13 @@
     }
     .tab:hover { color: var(--text); }
     .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
-
+    
     .detail-body {
       flex: 1;
       overflow-y: auto;
       padding: 24px 28px 40px;
     }
-
+    
     .section {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -351,7 +351,7 @@
       font-weight: 400;
       color: var(--text-muted);
     }
-
+    
     .form-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -391,7 +391,7 @@
       color: var(--text-muted);
       margin-top: 4px;
     }
-
+    
     /* 版本时间线 */
     .version-list { display: flex; flex-direction: column; gap: 0; }
     .version-item {
@@ -424,7 +424,7 @@
     .version-item .v-actions {
       display: flex; gap: 6px; flex-shrink: 0; align-items: center;
     }
-
+    
     /* Skill 绑定表 */
     .skill-table {
       width: 100%;
@@ -456,7 +456,7 @@
     }
     .mode-instruction { background: #ecfeff; color: #0e7490; }
     .mode-script { background: #fef3c7; color: #b45309; }
-
+    
     /* 规则编辑 */
     .rules-editor {
       border: 1px solid var(--border);
@@ -474,7 +474,7 @@
       resize: vertical;
       outline: none;
     }
-
+    
     /* 告警 */
     .alert {
       padding: 12px 14px;
@@ -488,7 +488,7 @@
     .alert-info { background: var(--primary-soft); color: #1e40af; border: 1px solid #bfdbfe; }
     .alert-warn { background: var(--warning-soft); color: #92400e; border: 1px solid #fde68a; }
     .alert-error { background: var(--danger-soft); color: #991b1b; border: 1px solid #fecaca; }
-
+    
     .readonly-banner {
       background: #f8fafc;
       border: 1px dashed var(--border);
@@ -498,7 +498,7 @@
       color: var(--text-secondary);
       margin-bottom: 16px;
     }
-
+    
     @media (max-width: 900px) {
       .list-pane { width: 100%; }
       .detail-pane { display: none; }
@@ -600,7 +600,7 @@
         </div>
       </div>
     </aside>
-
+    
     <!-- 右侧详情 -->
     <section class="detail-pane" id="detailPane">
       <div class="detail-header">
@@ -622,14 +622,14 @@
           </div>
         </div>
       </div>
-
+    
       <div class="tabs">
         <button class="tab active" data-tab="overview" type="button">概览</button>
         <button class="tab" data-tab="config" type="button">配置</button>
         <button class="tab" data-tab="skills" type="button">Skill 绑定</button>
         <button class="tab" data-tab="versions" type="button">版本</button>
       </div>
-
+    
       <div class="detail-body">
         <!-- 概览 -->
         <div class="tab-panel" id="panel-overview">
@@ -658,7 +658,7 @@
               </div>
             </div>
           </div>
-
+    
           <div class="section">
             <h3>运行概要 <span class="hint">只读，来自当前已发布版本快照</span></h3>
             <div class="form-grid">
@@ -680,20 +680,20 @@
               </div>
             </div>
           </div>
-
+    
           <div class="alert alert-info">
             <span>ℹ</span>
             <span>发布后生成不可变的 Agent Version 快照。已创建的 Task 固定使用创建时选定的版本，不会随后续发布自动升级。</span>
           </div>
         </div>
-
+    
         <!-- 配置 -->
         <div class="tab-panel" id="panel-config" style="display:none">
           <div class="alert alert-warn">
             <span>⚠</span>
             <span>当前查看的是已发布版本的只读快照。请先「编辑草稿」后再修改配置；修改官方 Agent 前须复制到个人空间。</span>
           </div>
-
+    
           <div class="section">
             <h3>模型绑定</h3>
             <div class="form-grid">
@@ -714,7 +714,7 @@
               </div>
             </div>
           </div>
-
+    
           <div class="section">
             <h3>系统规则 <span class="hint">写入 AgentVersion 快照，约束模型行为</span></h3>
             <div class="rules-editor">
@@ -836,7 +836,7 @@
         </div>
       </div>
     </section>
-  </div>
+    </div>
 
   <script>
     // Tab 切换
@@ -866,7 +866,7 @@
         });
       });
     });
-
+    
     // 搜索
     document.getElementById("searchInput").addEventListener("input", (e) => {
       const q = e.target.value.trim().toLowerCase();
@@ -875,7 +875,7 @@
         card.style.display = !q || text.includes(q) ? "" : "none";
       });
     });
-
+    
     // 选中卡片
     const agents = {
       "official-qa": {
@@ -911,7 +911,7 @@
         version: "v5",
       },
     };
-
+    
     document.querySelectorAll(".agent-card").forEach((card) => {
       card.addEventListener("click", () => {
         document.querySelectorAll(".agent-card").forEach((c) => c.classList.remove("active"));
@@ -921,13 +921,13 @@
         document.getElementById("detailTitle").textContent = a.title;
         document.getElementById("detailDesc").textContent = a.desc;
         document.querySelector(".breadcrumb").textContent = "Agent / " + a.source;
-
+    
         const tags = document.querySelector(".detail-tags");
         tags.innerHTML = `
           <span class="tag ${a.official ? "tag-official" : "tag-mine"}">${a.source}</span>
           <span class="tag ${a.status === "已发布" ? "tag-published" : a.status === "草稿" ? "tag-draft" : "tag-archived"}">${a.status}</span>
           <span class="tag" style="background:#f1f5f9;color:#475569">当前版本 ${a.version}</span>`;
-
+    
         const actions = document.getElementById("detailActions");
         if (a.official) {
           actions.innerHTML = `

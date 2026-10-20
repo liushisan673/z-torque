@@ -8,26 +8,27 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.core.errors import ApiError
 from app.kernel.model_gateway import ModelGateway, ModelRequest, ModelGatewayError
+from app.kernel.ports.memory_short import ShortTermMemoryProvider
+from app.kernel.ports.model_selector import snapshot_model_params
+from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.service import create_task
 from app.models import Agent, AgentVersion, Conversation, Message, Task
 from app.models.message import message_file
 from app.security.permissions import admin_owned_clause
 from app.services.chat_service import ChatResult
-from app.services.context_builder import build_agent_system_prompt, build_context
-from app.services.memory_service import summarize_conversation
+from app.services.context_builder import assistant_reasoning_parts, build_agent_system_prompt, build_context
 from app.services.tool_mapping_builder import build_tool_mappings
 
 logger = logging.getLogger("z_torque.chat")
 
 
-def create_chat_task(db: Session, *, tenant_id: UUID, user_id: UUID, conversation: Conversation, user_message: Message, idempotency_key: str, trace_id: str | None) -> Task:
+def create_chat_task(db: Session, *, ctx: SecurityContext, conversation: Conversation, user_message: Message, idempotency_key: str, trace_id: str | None) -> Task:
     """会话任务创建（POST /chat 任务链路与流式分流共用）：绑定会话当前发布版本。"""
     agent_version = _published_agent_version(db, conversation.agent_id)
     return create_task(
         db,
-        tenant_id=tenant_id,
-        owner_user_id=user_id,
+        ctx=ctx,
         agent_id=conversation.agent_id,
         agent_version_id=agent_version.id,
         idempotency_key=idempotency_key,
@@ -66,7 +67,10 @@ def _published_agent_version(db: Session, agent_id: UUID | None) -> AgentVersion
     return agent_version
 
 
-async def handle_chat(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None) -> ChatResult:
+async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None) -> ChatResult:
+    tenant_id = ctx.tenant_id
+    user_id = ctx.user_id
+    trace_id = trace_id or ctx.trace_id
     if idempotency_key:
         existing = db.scalar(select(Task).where(Task.tenant_id == tenant_id, Task.owner_user_id == user_id, Task.idempotency_key == idempotency_key))
         if existing is not None:
@@ -101,16 +105,20 @@ async def handle_chat(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: 
         if mappings and skill_gateway is not None and agent_version is not None:
             # 工具型会话：只创建任务并入队（Outbox TASK_READY），执行由 worker 完成；
             # POST /chat 立即返回 task_id，前端订阅任务事件流获得实时执行过程。
-            chat_task = create_chat_task(db, tenant_id=tenant_id, user_id=user_id, conversation=conversation, user_message=user_message, idempotency_key=idempotency_key, trace_id=trace_id)
+            chat_task = create_chat_task(db, ctx=ctx, conversation=conversation, user_message=user_message, idempotency_key=idempotency_key, trace_id=trace_id)
             return ChatResult(user_message=user_message, assistant_message=None, task_id=chat_task.id, mocked=False)
         if agent_version is not None:
             # 无工具智能体：同步直答（不建任务），回复随响应返回
             system_prompt = build_agent_system_prompt(db, agent_version)
+            settings = get_settings()
+            # 调用参数：版本快照键优先（快照语义），未设置回退全局兜底
+            temperature, max_tokens = snapshot_model_params(agent_version.config_snapshot, default_temperature=settings.model_temperature, default_max_tokens=settings.model_max_tokens)
             request = ModelRequest(
                 trace_id=trace_id or str(user_message.id), conversation_id=conversation.id,
                 model=getattr(model_gateway, "default_model", "mock"),
+                temperature=temperature, max_tokens=max_tokens,
                 messages=build_context(db, conversation, system_prompt=system_prompt, attachment_ids=attachment_ids),
-                tools=[], timeout_seconds=get_settings().model_timeout_seconds,
+                tools=[], timeout_seconds=settings.model_timeout_seconds,
             )
             try:
                 response = await model_gateway.generate(request)
@@ -118,24 +126,27 @@ async def handle_chat(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: 
                 user_message.status = "FAILED"
                 raise ApiError(exc.code, exc.message, 502) from exc
             reply = response.content or ""
-            assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content=reply, status="COMPLETED")
+            assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content=reply, content_parts=assistant_reasoning_parts(response.reasoning_content), status="COMPLETED")
             db.add(assistant)
             db.flush()
             user_message.status = "COMPLETED"
-            await _maybe_summarize(db, conversation=conversation, user_id=user_id, trace_id=trace_id, model_gateway=model_gateway, user_message_id=str(user_message.id))
+            await _maybe_summarize(db, conversation=conversation, user_id=user_id, trace_id=trace_id, model_gateway=model_gateway, user_message_id=str(user_message.id), short_memory=short_memory)
             return ChatResult(user_message=user_message, assistant_message=assistant, mocked=False, response_content=reply)
-    task = create_task(db, tenant_id=tenant_id, owner_user_id=user_id, agent_id=conversation.agent_id, agent_version_id=_version_id(db, conversation.agent_id), idempotency_key=idempotency_key, request_summary=content, conversation_id=conversation.id, trigger_message_id=user_message.id, trace_id=trace_id)
+    task = create_task(db, ctx=ctx, agent_id=conversation.agent_id, agent_version_id=_version_id(db, conversation.agent_id), idempotency_key=idempotency_key, request_summary=content, conversation_id=conversation.id, trigger_message_id=user_message.id, trace_id=trace_id)
     user_message.status = "COMPLETED"
     return ChatResult(user_message=user_message, assistant_message=None, task_id=task.id, mocked=False)
 
 
-async def _maybe_summarize(db: Session, *, conversation: Conversation, user_id: UUID, trace_id: str | None, model_gateway: ModelGateway, user_message_id: str) -> None:
+async def _maybe_summarize(db: Session, *, conversation: Conversation, user_id: UUID, trace_id: str | None, model_gateway: ModelGateway, user_message_id: str, short_memory: ShortTermMemoryProvider | None = None) -> None:
     """会话记忆维护：失败不阻断回复（下一条消息达到阈值时会自动重试）。"""
+    if short_memory is None:
+        logger.warning("memory.short provider is not injected; skip chat summarization for conversation %s", conversation.id)
+        return
     settings = get_settings()
     message_count = db.scalar(select(Message.id).where(Message.conversation_id == conversation.id).order_by(Message.created_at.desc()).offset(settings.memory_short_summary_message_threshold - 1).limit(1))
     if message_count is not None:
         try:
-            await summarize_conversation(db, conversation=conversation, user_id=user_id, trace_id=trace_id or user_message_id, model_gateway=model_gateway)
+            await short_memory.summarize(db, conversation=conversation, user_id=user_id, trace_id=trace_id or user_message_id, model_gateway=model_gateway)
         except Exception as exc:
             logger.warning("summarize failed for conversation %s: %s", conversation.id, exc)
 

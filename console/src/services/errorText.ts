@@ -20,9 +20,10 @@ const CODE_TEXT: Record<string, string> = {
   AI_CONFLICT: "存在冲突（如名称重复），请调整后重试",
   AI_INTERNAL_ERROR: "服务内部错误，请稍后重试",
   AI_SERVICE_UNAVAILABLE: "无法连接到后端服务，请检查网络与服务状态",
-  AI_CAPABILITY_UNAVAILABLE: "该能力当前不可用（未装配或缺少依赖）",
+  AI_CAPABILITY_UNAVAILABLE: "该工具当前不可用（未装配或缺少依赖）",
   AI_RATE_LIMITED: "操作过于频繁，请稍后再试",
   AI_TIMEOUT: "操作超时，请重试",
+  AI_RESOURCE_IN_USE: "该资源仍被引用，请先删除关联内容（如连接器下已登记的工具、仍被消息引用的文件）后再试",
   // ---- 智能体 / 版本 ----
   AI_AGENT_NOT_FOUND: "智能体不存在或你没有访问权限",
   AI_AGENT_VERSION_NOT_FOUND: "智能体版本不存在",
@@ -30,6 +31,9 @@ const CODE_TEXT: Record<string, string> = {
   AI_AGENT_VERSION_IN_USE: "该版本仍有任务在执行，请等待结束或取消后重试",
   AI_AGENT_VERSION_REFERENCED: "该版本仍被其他已发布版本的委派白名单引用",
   AI_AGENT_NAME_CONFLICT: "同名智能体已存在，请换一个名称",
+  AI_AGENT_IN_USE: "该智能体仍被会话引用，请先删除相关会话或将会话改绑其他智能体后再删除",
+  AI_AGENT_VERSION_NOT_PUBLISHED: "该智能体没有可用的已发布版本，请先在智能体管理中发布版本",
+  AI_CONVERSATION_AGENT_CONFLICT: "当前会话绑定了其他智能体，请新建会话或切回原智能体后再发送",
   // ---- 技能 / 工具 ----
   AI_SKILL_NOT_FOUND: "技能不存在或已被删除",
   AI_SKILL_VERSION_NOT_FOUND: "技能版本不存在",
@@ -55,7 +59,6 @@ const CODE_TEXT: Record<string, string> = {
   // ---- 连接器 ----
   AI_CONNECTOR_NOT_FOUND: "连接器不存在或已被删除",
   AI_CONNECTOR_TEST_FAILED: "连接测试失败，请检查地址与凭据",
-  AI_CONNECTOR_IN_USE: "该连接器仍被工具引用，需先删除对应工具",
   // ---- 会话 / 消息 ----
   AI_CONVERSATION_NOT_FOUND: "会话不存在或已被删除",
   AI_MESSAGE_NOT_FOUND: "消息不存在或已被删除",

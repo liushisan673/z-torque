@@ -114,7 +114,7 @@ const ERROR_CODE_LABEL: Record<string, string> = {
   AI_TASK_FAILED: "任务执行失败",
   AI_MODEL_CALL_FAILED: "模型调用失败",
   AI_MODEL_UNAVAILABLE: "模型不可用",
-  AI_CAPABILITY_UNAVAILABLE: "所需能力不可用",
+  AI_CAPABILITY_UNAVAILABLE: "所需工具不可用",
   AI_CONNECTOR_SECRET_INVALID: "连接器凭证无效或已失效",
   AI_CONNECTOR_UNREACHABLE: "连接器无法连通",
   AI_MCP_HANDSHAKE_FAILED: "MCP 握手失败",
@@ -194,7 +194,7 @@ export function AuditPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 筛选状态（查询按钮触发刷新）
+  // 筛选状态（变更后自动防抖查询，无需手动「查询」按钮）
   const [range, setRange] = useState<RangeKey>("7d");
   const [startCustom, setStartCustom] = useState("");
   const [endCustom, setEndCustom] = useState("");
@@ -290,10 +290,14 @@ export function AuditPage() {
   }, [detail]);
 
   function resetFilters() {
+    const changed = range !== "7d" || startCustom !== "" || endCustom !== "" || typePrefix !== ""
+      || username !== "" || agentId !== "" || traceInput !== "" || keyword !== "";
     setRange("7d"); setStartCustom(""); setEndCustom(""); setTypePrefix("");
     setUsername(""); setAgentId(""); setTraceInput(""); setKeyword("");
     setPage(0); setPageJump("");
-    void load(0);
+    // 有筛选变更：防抖 effect 会自动重查（固定 offset 0），无需手动请求，避免双请求；
+    // 无变更：effect 不会触发，仅当停留在非首页时手动拉回第 1 页数据
+    if (!changed && page !== 0) void load(0);
   }
 
   // 跳页：夹在有效页码范围内
@@ -430,8 +434,8 @@ export function AuditPage() {
             <label>Trace ID</label>
             <input type="text" placeholder="精确关联" value={traceInput} onChange={(e) => setTraceInput(e.target.value)} style={{ width: 220 }} />
           </div>
+          {/* 筛选变更已自动防抖查询，此处仅保留「重置」入口 */}
           <div className="audit-filter-actions">
-            <button className="btn btn-primary" disabled={loading} onClick={() => { setPage(0); void load(0); }}>查询</button>
             <button
               className="btn btn-secondary"
               disabled={loading}

@@ -1,4 +1,3 @@
-import hashlib
 from pathlib import Path
 from uuid import UUID
 
@@ -17,9 +16,15 @@ from app.db.session import get_db
 from app.models import Conversation, File, User
 from app.models.message import message_file
 from app.kernel.audit.service import record_audit
+from app.kernel.ports.object_store import ObjectStore
 from app.services.file_parser import SUPPORTED, parse_file
 
 router = APIRouter(prefix="/files", tags=["files"])
+
+
+def _object_store(request: Request) -> ObjectStore:
+    """经 Port 注册表取 object.store（API 层不 import 插件包，契约 v1.1 边界表）。"""
+    return request.app.state.port_registry.get("object.store")
 
 
 def owned_file(db: Session, user: User, file_id: UUID) -> File:
@@ -50,24 +55,15 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         if conversation is None:
             raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
     file_id = new_uuid7()
-    root = settings.file_storage_dir.resolve()
-    target = (root / str(file_id)).resolve()
-    if root not in target.parents:
-        raise ApiError("AI_INTERNAL_ERROR", "invalid file storage path", 500)
-    digest = hashlib.sha256()
-    size = 0
-    with target.open("wb") as handle:
-        while chunk := await upload.read(1024 * 1024):
-            size += len(chunk)
-            if size > settings.max_upload_size_mb * 1024 * 1024:
-                target.unlink(missing_ok=True)
-                raise ApiError("AI_FILE_TOO_LARGE", "file exceeds configured limit", 413)
-            digest.update(chunk)
-            handle.write(chunk)
+    store = _object_store(request)
+    # 流式写入经 object.store Port（大小上限 + sha256 + 路径逃逸防护由实现承载）
+    result = store.put(str(file_id), upload.file, max_bytes=settings.max_upload_size_mb * 1024 * 1024)
+    target = store.local_path(str(file_id))
+    size, digest = result.size_bytes, result.sha256
     if not _signature_matches(target, suffix):
-        target.unlink(missing_ok=True)
+        store.delete(str(file_id))
         raise ApiError("AI_FILE_TYPE_UNSUPPORTED", "file content does not match its type", 415)
-    item = File(id=file_id, tenant_id=user.tenant_id, owner_user_id=user.id, conversation_id=conversation_id, original_name=Path(upload.filename or "file").name[:255], media_type=upload.content_type or "application/octet-stream", size_bytes=size, sha256=digest.hexdigest(), storage_key=str(file_id), status="UPLOADED")
+    item = File(id=file_id, tenant_id=user.tenant_id, owner_user_id=user.id, conversation_id=conversation_id, original_name=Path(upload.filename or "file").name[:255], media_type=upload.content_type or "application/octet-stream", size_bytes=size, sha256=digest, storage_key=str(file_id), status="UPLOADED")
     try:
         item.extracted_text = parse_file(target, suffix, settings.file_max_extracted_text)
         item.status = "PARSED"
@@ -107,8 +103,7 @@ async def remove(file_id: UUID, request: Request, user: User = Depends(get_curre
     item = owned_file(db, user, file_id)
     if db.scalar(select(message_file.c.message_id).where(message_file.c.file_id == item.id).limit(1)) is not None:
         raise ApiError("AI_RESOURCE_IN_USE", "file is still referenced by a message", 409)
-    target = get_settings().file_storage_dir / item.storage_key
-    target.unlink(missing_ok=True)
+    target = _object_store(request).local_path(item.storage_key)
     item.status = "DELETED"
     item.extracted_text = None
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="FILE_DELETED", resource_type="FILE", resource_id=item.id, summary="file deleted", trace_id=request.state.trace_id)

@@ -6,13 +6,14 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, get_security_context
 from app.core.errors import ApiError
 from app.core.responses import success_response
 from app.db.session import get_db
+from app.kernel.security_context import SecurityContext
 from app.kernel.task.service import create_task, transition_task
 from app.kernel.task.states import TaskStatus
-from app.models import Task, TaskEvent, User
+from app.models import Task, TaskCheckpoint, TaskEvent, User
 from app.schemas.task import TaskCreateRequest, TaskEventResponse, TaskResponse
 from app.services.task_stream import task_event_stream
 
@@ -21,8 +22,8 @@ _TASK_NOT_FOUND = "task not found"
 
 
 @router.post("", summary="创建任务", response_model=None)
-async def create(payload: TaskCreateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    task = create_task(db, tenant_id=user.tenant_id, owner_user_id=user.id, trace_id=request.state.trace_id, **payload.model_dump())
+async def create(payload: TaskCreateRequest, request: Request, ctx: SecurityContext = Depends(get_security_context), db: Session = Depends(get_db)):
+    task = create_task(db, ctx=ctx, trace_id=request.state.trace_id, **payload.model_dump())
     db.commit()
     db.refresh(task)
     return success_response(request, TaskResponse.model_validate(task).model_dump(mode="json"))
@@ -70,6 +71,12 @@ async def cancel(task_id: str, request: Request, user: User = Depends(get_curren
         raise ApiError("AI_TASK_NOT_FOUND", _TASK_NOT_FOUND, 404)
     if task.status in {TaskStatus.PENDING, TaskStatus.QUEUED}:
         transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled", request.state.trace_id)
+    elif task.status == TaskStatus.WAITING_HUMAN:
+        # 等待审批中允许取消：过期挂起的 checkpoint（审批晚到时任务已非 WAITING_HUMAN，resolve 不再生效）
+        checkpoint = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == task.id))
+        if checkpoint is not None and checkpoint.status in {"WAITING_APPROVAL", "APPROVED"}:
+            checkpoint.status = "EXPIRED"
+        transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled while waiting for approval", request.state.trace_id)
     elif task.status == TaskStatus.RUNNING:
         task.cancel_requested_at = datetime.now(timezone.utc)
         transition_task(db, task, TaskStatus.CANCELING, "TASK_CANCEL_REQUESTED", "task cancellation requested", request.state.trace_id)
