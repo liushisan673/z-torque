@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.core.ids import new_uuid7
+from app.kernel.registry.active import emit_event
 from app.kernel.security_context import SecurityContext
 from app.kernel.task.states import TERMINAL_STATES, TaskStatus, can_transition
 from app.models import Agent, AgentVersion, Conversation, Message, Outbox, Task, TaskEvent
@@ -17,21 +18,63 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-_SENSITIVE_KEY = re.compile(r"(?i)(password|passwd|token|secret|api[_-]?key|authorization|refresh[_-]?token)")
+_REDACTED = "[REDACTED]"
+# 敏感词表：既用于"键=值"整体脱敏，也用于裸词兜底
+_SENSITIVE_WORDS = r"(?:password|passwd|pwd|token|secret|api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret|private[_-]?key)"
+# 键值对：password=xxx / "token": "xxx" / authorization: xxx → 键与值整体替换
+# （仅替换键名会让明文口令落库；键名可能被 JSON/查询串引号包裹，故允许两侧成对引号）
+_SENSITIVE_PAIR = re.compile(
+    r"(?i)\b" + _SENSITIVE_WORDS + r"\b[\"']?\s*[:=：]\s*(?:\[REDACTED\]|[\"']?[^\s,;&)\]>\"']+[\"']?)"
+)
+# Bearer/Basic 等认证头形态：Authorization: Bearer xxx → 凭证替换
+_SENSITIVE_CREDENTIAL = re.compile(r"(?i)\b(bearer|basic|digest)\s+([A-Za-z0-9\-._~+/=]+)")
+# 兜底：未带值的裸敏感词（如 "token expired"），与旧行为保持一致
+_SENSITIVE_BARE = re.compile(r"(?i)\b" + _SENSITIVE_WORDS + r"\b(?!\s*[:=：])")
 _MAX_SUMMARY_LENGTH = 2000
 
 
 def sanitize_summary(value: str | None) -> str:
+    """任务摘要脱敏：键值对整体脱敏，避免只替换键名而把明文口令/密钥落库。
+
+    顺序为「认证凭证 → 键值对 → 裸敏感词」：先处理 Bearer 等凭证形态，
+    再连同键名一起抹掉（仅保留 [REDACTED]），避免键名或值任一残留。
+    """
     if not value:
         return ""
     text = value[:_MAX_SUMMARY_LENGTH]
-    return _SENSITIVE_KEY.sub("[REDACTED]", text)
+    text = _SENSITIVE_CREDENTIAL.sub(_REDACTED, text)
+    text = _SENSITIVE_PAIR.sub(_REDACTED, text)
+    return _SENSITIVE_BARE.sub(_REDACTED, text)
 
 
 def _resolve_trigger_message(trigger_message_id: UUID | None, message_id: UUID | None) -> UUID | None:
     if trigger_message_id and message_id and trigger_message_id != message_id:
         raise ApiError("AI_REQUEST_INVALID", "trigger and legacy message references differ", 422)
     return trigger_message_id or message_id
+
+
+def _visible_agent(db: Session, *, tenant_id: UUID, owner_user_id: UUID, agent_id: UUID, require_published: bool = False) -> Agent | None:
+    """按 chat 一致的可见性口径（本人 | OFFICIAL | 本租户管理员创建）取 Agent。"""
+    from app.security.permissions import admin_owned_clause
+
+    stmt = select(Agent).where(
+        Agent.id == agent_id,
+        Agent.tenant_id == tenant_id,
+        Agent.status == "ACTIVE",
+        (Agent.owner_user_id == owner_user_id) | (Agent.source_type == "OFFICIAL") | admin_owned_clause(Agent.owner_user_id, tenant_id),
+    )
+    if require_published:
+        stmt = stmt.where(Agent.current_published_version_id.is_not(None))
+    return db.scalar(stmt)
+
+
+def assert_agent_version_visible(db: Session, *, tenant_id: UUID, owner_user_id: UUID, agent_id: UUID, agent_version_id: UUID) -> None:
+    """接口层强校验（契约 §1 + 阶段2文档 4.1）：Agent 可见且版本已发布、归属一致。"""
+    if _visible_agent(db, tenant_id=tenant_id, owner_user_id=owner_user_id, agent_id=agent_id, require_published=True) is None:
+        raise ApiError("AI_AGENT_NOT_FOUND", "agent not found", 404)
+    version = db.scalar(select(AgentVersion).where(AgentVersion.id == agent_version_id, AgentVersion.agent_id == agent_id, AgentVersion.tenant_id == tenant_id, AgentVersion.status == "PUBLISHED"))
+    if version is None:
+        raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent version is not published", 409)
 
 
 def _validate_stage3_context(
@@ -44,12 +87,21 @@ def _validate_stage3_context(
     conversation_id: UUID | None,
     trigger_message_id: UUID | None,
 ) -> Message | None:
-    agent = db.scalar(select(Agent).where(Agent.id == agent_id, Agent.tenant_id == tenant_id, (Agent.owner_user_id == owner_user_id) | (Agent.source_type == "OFFICIAL"), Agent.status == "ACTIVE"))
+    agent = _visible_agent(db, tenant_id=tenant_id, owner_user_id=owner_user_id, agent_id=agent_id)
     version = db.scalar(select(AgentVersion).where(AgentVersion.id == agent_version_id, AgentVersion.agent_id == agent_id, AgentVersion.tenant_id == tenant_id, AgentVersion.status == "PUBLISHED"))
-    if agent is None and (conversation_id is not None or trigger_message_id is not None):
-        raise ApiError("AI_AGENT_NOT_FOUND", "agent not found", 404)
-    if version is None and (conversation_id is not None or trigger_message_id is not None):
-        raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent version is not published", 409)
+    if conversation_id is not None or trigger_message_id is not None:
+        if agent is None:
+            raise ApiError("AI_AGENT_NOT_FOUND", "agent not found", 404)
+        if version is None:
+            raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent version is not published", 409)
+    else:
+        # 无会话上下文的直接创建：内核保持阶段2的宽松语义（允许引用尚未落库的测试标识），
+        # 但对已存在却不可见/跨租户的快照必须拒绝（P1-5），
+        # 面向不可信输入的完整校验由接口层 assert_agent_version_visible 负责。
+        if agent is None and db.scalar(select(Agent.id).where(Agent.id == agent_id)) is not None:
+            raise ApiError("AI_AGENT_NOT_FOUND", "agent not found", 404)
+        if version is None and db.scalar(select(AgentVersion.id).where(AgentVersion.id == agent_version_id)) is not None:
+            raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent version is not published", 409)
     if conversation_id is not None:
         _validate_conversation(db, tenant_id, owner_user_id, agent_id, conversation_id)
     if trigger_message_id is None:
@@ -189,9 +241,11 @@ def create_task(
     trigger_message_id = _resolve_trigger_message(trigger_message_id, message_id)
     if not idempotency_key or len(idempotency_key) > 128:
         raise ApiError("AI_PARAM_INVALID", "idempotency key is too long", 422)
+    # 幂等基准：落库值是脱敏+截断后的结果，比较必须用同一变换，否则含敏感词或超长消息的重试会被误判为"不同请求"
+    stored_summary = sanitize_summary(request_summary)
     existing = db.query(Task).filter_by(tenant_id=tenant_id, owner_user_id=owner_user_id, idempotency_key=idempotency_key).one_or_none()
     if existing:
-        if existing.request_summary != request_summary or existing.agent_id != agent_id or existing.agent_version_id != agent_version_id:
+        if existing.request_summary != stored_summary or existing.agent_id != agent_id or existing.agent_version_id != agent_version_id:
             raise ApiError("AI_TASK_DUPLICATE_IDEMPOTENCY", "idempotency key was used with different request", 409)
         return existing
     delegation_id, child_sequence = _apply_legacy_child_defaults(
@@ -208,7 +262,7 @@ def create_task(
             return _create_task_records(db, tenant_id=tenant_id, owner_user_id=owner_user_id, agent_id=agent_id, agent_version_id=agent_version_id, idempotency_key=idempotency_key, request_summary=request_summary, parent_task_id=parent_task_id, delegation_id=delegation_id, child_sequence=child_sequence, depends_on_task_ids=depends_on_task_ids, deadline_at=deadline_at, conversation_id=conversation_id, trigger_message_id=trigger_message_id, trace_id=trace_id)
     except IntegrityError as exc:
         existing = db.query(Task).filter_by(tenant_id=tenant_id, owner_user_id=owner_user_id, idempotency_key=idempotency_key).one_or_none()
-        if existing is not None and existing.request_summary == sanitize_summary(request_summary) and existing.agent_id == agent_id and existing.agent_version_id == agent_version_id:
+        if existing is not None and existing.request_summary == stored_summary and existing.agent_id == agent_id and existing.agent_version_id == agent_version_id:
             return existing
         raise ApiError("AI_TASK_DUPLICATE_IDEMPOTENCY", "idempotency key was used with different request", 409) from exc
 
@@ -231,26 +285,40 @@ def transition_task(
     if not can_transition(current, target):
         raise ApiError("AI_TASK_INVALID_TRANSITION", f"invalid transition {current} -> {target}", 409)
     next_event_seq = task.last_event_seq + 1
-    changed = db.execute(
-        update(Task)
-        .where(Task.id == task.id, Task.status == current, Task.last_event_seq == task.last_event_seq)
-        .values(
-            status=target,
-            started_at=_now() if target == TaskStatus.RUNNING else Task.started_at,
-            finished_at=_now() if target in TERMINAL_STATES else Task.finished_at,
-            last_event_seq=Task.last_event_seq + 1,
+    # 并发失败只用 SAVEPOINT 回滚本函数自身的 UPDATE/事件追加：
+    # 直接 db.rollback() 会连带回滚调用方已 flush 的审计与同批其他任务的迁移（P2-16）。
+    with db.begin_nested():
+        changed = db.execute(
+            update(Task)
+            .where(Task.id == task.id, Task.status == current, Task.last_event_seq == task.last_event_seq)
+            .values(
+                status=target,
+                started_at=_now() if target == TaskStatus.RUNNING else Task.started_at,
+                finished_at=_now() if target in TERMINAL_STATES else Task.finished_at,
+                last_event_seq=Task.last_event_seq + 1,
+            )
         )
+        if changed.rowcount != 1:
+            raise ApiError("AI_TASK_INVALID_TRANSITION", "task changed concurrently", 409)
+        task.status = target
+        task.last_event_seq = next_event_seq
+        if target == TaskStatus.RUNNING:
+            task.started_at = _now()
+        if target in TERMINAL_STATES:
+            task.finished_at = _now()
+        db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq, event_type=event_type, from_state=current, to_state=target, summary=sanitize_summary(summary), trace_id=trace_id))
+    # 观测事件经 observability.sink Port 外发（状态机是统一收口点，P2-14）
+    emit_event(
+        "task.transition",
+        {
+            "task_id": str(task.id),
+            "tenant_id": str(task.tenant_id),
+            "from_state": current,
+            "to_state": target,
+            "event_type": event_type,
+            "trace_id": trace_id,
+        },
     )
-    if changed.rowcount != 1:
-        db.rollback()
-        raise ApiError("AI_TASK_INVALID_TRANSITION", "task changed concurrently", 409)
-    task.status = target
-    task.last_event_seq = next_event_seq
-    if target == TaskStatus.RUNNING:
-        task.started_at = _now()
-    if target in TERMINAL_STATES:
-        task.finished_at = _now()
-    db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq, event_type=event_type, from_state=current, to_state=target, summary=sanitize_summary(summary), trace_id=trace_id))
     return task
 
 

@@ -1,0 +1,15 @@
+﻿INFO:     127.0.0.1:55536 - "OPTIONS /api/z-torque/agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52188 - "OPTIONS /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64539 - "OPTIONS /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52188 - "GET /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64539 - "GET /api/z-torque/agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55536 - "GET /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55251 - "GET /api/z-torque/agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61180 - "GET /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55251 - "GET /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63438 - "GET /api/z-torque/agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56145 - "GET /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53602 - "GET /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53602 - "GET /api/z-torque/agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56145 - "GET /api/z-torque/conversations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63438 - "GET /api/z-torque/conversations HTTP/1.1" 200 OK

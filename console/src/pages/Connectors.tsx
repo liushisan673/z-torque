@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
+import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import type {
   Connector,
   ConnectorDiscoveredToolSummary,
@@ -17,6 +18,23 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useAuth } from "../stores/auth";
 
 const API = "/api/z-torque/connectors";
+
+// 选中记忆：跳转页面后返回时恢复上次选中的连接器（sessionStorage 按标签页隔离）
+const SELECTED_KEY = "zt.connectors.selectedId";
+
+// 标签录入：中英文逗号均可，去空白、去重，最多 20 个
+function splitTags(text: string): string[] {
+  const seen = new Set<string>();
+  return text
+    .split(/[,，]/)
+    .map((tag) => tag.trim())
+    .filter((tag) => {
+      if (!tag || seen.has(tag)) return false;
+      seen.add(tag);
+      return true;
+    })
+    .slice(0, 20);
+}
 
 type Tab = "overview" | "config" | "auth" | "ops" | "test";
 type Filter = "all" | "REST" | "DB" | "MCP";
@@ -136,6 +154,9 @@ export function ConnectorsPage() {
   const [confirmDisable, setConfirmDisable] = useState<{ id: string; name: string } | null>(null);
   const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  // 工具归档 / 删除（登记工具生命周期管理；删除前置条件为归档）
+  const [confirmToolArchive, setConfirmToolArchive] = useState<{ id: string; name: string } | null>(null);
+  const [confirmToolDelete, setConfirmToolDelete] = useState<{ id: string; name: string } | null>(null);
   // 权限：connector.manage 才能新建/编辑/启停/注册（对齐 connector.md 安全要求）
   const canManage = user?.permissions?.includes("connector.manage") ?? false;
 
@@ -214,6 +235,30 @@ export function ConnectorsPage() {
   const [regQuery, setRegQuery] = useState("");
   const [regSchema, setRegSchema] = useState("");
   const [regSql, setRegSql] = useState("");
+  const [regTags, setRegTags] = useState("");
+  const [regBusiness, setRegBusiness] = useState(false);
+
+  // 工具元数据编辑（标签 / 业务封装标记）：手工维护 OpenAPI 导入后的标签
+  const [metaEdit, setMetaEdit] = useState<{ id: string; name: string } | null>(null);
+  const [metaTags, setMetaTags] = useState("");
+  const [metaBusiness, setMetaBusiness] = useState(false);
+  const [metaSaving, setMetaSaving] = useState(false);
+
+  // 更新配置（编辑模式）：普通工具复用登记弹窗，组合工具复用封装弹窗
+  const [editTool, setEditTool] = useState<ConnectorToolLink | null>(null);
+  const [editLoading, setEditLoading] = useState(false);
+  const [compositeEditTool, setCompositeEditTool] = useState<ConnectorToolLink | null>(null);
+
+  // 业务封装工具登记：同一连接器下多个已发布工具线性组合
+  const [compositeOpen, setCompositeOpen] = useState(false);
+  const [compositeName, setCompositeName] = useState("");
+  const [compositeDesc, setCompositeDesc] = useState("");
+  const [compositeTags, setCompositeTags] = useState("");
+  const [compositeOutputPath, setCompositeOutputPath] = useState("$steps.step1.output");
+  const [compositeSteps, setCompositeSteps] = useState<{ key: string; tool_version_id: string; arguments: string }[]>([
+    { key: "step1", tool_version_id: "", arguments: "" },
+  ]);
+  const [compositeSaving, setCompositeSaving] = useState(false);
 
   // 数据库表清单勾选（健康检查页签中维护 allowed_tables）
   const [tableSelection, setTableSelection] = useState<string[]>([]);
@@ -236,10 +281,13 @@ export function ConnectorsPage() {
     void load();
   }, [load]);
 
-  // 默认展示列表第一项，避免主区空白（仅当前无选中时生效；删除当前选中后自动补选）
+  // 默认展示列表第一项，避免主区空白；跳转回来时优先恢复上次选中（记忆 id 已不存在则回退第一项）
   useEffect(() => {
     if (loading || selectedId) return;
-    if (items.length > 0) void openDetail(items[0]);
+    if (items.length === 0) return;
+    const remembered = readSelectedId(SELECTED_KEY);
+    const target = (remembered && items.find((c) => c.id === remembered)) || items[0];
+    void openDetail(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, items, selectedId]);
 
@@ -254,6 +302,7 @@ export function ConnectorsPage() {
 
   async function openDetail(c: Connector) {
     setSelectedId(c.id);
+    writeSelectedId(SELECTED_KEY, c.id);
     setDetail(c);
     setTab("overview");
     setEditing(false);
@@ -679,6 +728,8 @@ export function ConnectorsPage() {
     const body: Record<string, unknown> = {
       name: regName.trim(),
       description: regDesc.trim() || null,
+      tags: splitTags(regTags),
+      is_business_tool: regBusiness,
     };
     if (detail.connector_type === "DB") {
       // DB 连接：注册只读 SQL 工具（DB_SQL），SQL 模板 + 输入参数 Schema
@@ -718,8 +769,11 @@ export function ConnectorsPage() {
     setBusy(true);
     setError(null);
     try {
-      await request(`${API}/${detail.id}/tools/register`, { method: "POST", body });
+      // 更新模式：复用同一表单，改调 reconfigure（后端忽略 name/description/tags 等登记专用字段）
+      const url = editTool ? `${API}/${detail.id}/tools/${editTool.id}/reconfigure` : `${API}/${detail.id}/tools/register`;
+      await request(url, { method: "POST", body });
       setRegOpen(false);
+      setEditTool(null);
       setRegName("");
       setRegDesc("");
       setRegType("HTTP");
@@ -729,12 +783,42 @@ export function ConnectorsPage() {
       setRegQuery("");
       setRegSchema("");
       setRegSql("");
+      setRegTags("");
+      setRegBusiness(false);
       await loadTools(detail.id);
-      toast("success", "工具已注册");
+      toast("success", editTool ? "配置已更新为新版本" : "工具已注册");
     } catch (err) {
-      setError(errorText(err, "注册失败"));
+      setError(errorText(err, editTool ? "更新配置失败" : "注册失败"));
     } finally {
       setBusy(false);
+    }
+  }
+
+  // 更新配置：拉取当前发布版本预填表单（编辑模式复用登记弹窗）
+  async function openEditTool(tool: ConnectorToolLink) {
+    if (!tool.published_version_id) return;
+    setEditLoading(true);
+    setError(null);
+    try {
+      const v = await request<{ config_snapshot: Record<string, unknown>; input_schema: Record<string, unknown> | null }>(
+        `/api/z-torque/skills-tools/tool-versions/${tool.published_version_id}`,
+      );
+      const cfg = v.config_snapshot ?? {};
+      setEditTool(tool);
+      setRegType(tool.tool_type === "DB_SQL" ? "DB_SQL" : tool.tool_type === "MCP" ? "MCP" : "HTTP");
+      setRegName(tool.name ?? tool.external_name ?? tool.id);
+      setRegDesc(tool.description ?? "");
+      setRegExternal(String(cfg.external_name ?? tool.external_name ?? ""));
+      setRegUrl(String(cfg.url ?? ""));
+      setRegHeaders(cfg.headers ? JSON.stringify(cfg.headers) : "");
+      setRegQuery(cfg.queryParams ? JSON.stringify(cfg.queryParams) : "");
+      setRegSchema(v.input_schema ? JSON.stringify(v.input_schema) : "");
+      setRegSql(String(cfg.sql_template ?? ""));
+      setRegOpen(true);
+    } catch (err) {
+      setError(errorText(err, "加载工具配置失败"));
+    } finally {
+      setEditLoading(false);
     }
   }
 
@@ -754,7 +838,8 @@ export function ConnectorsPage() {
       try {
         await request(`${API}/${detail.id}/tools/register`, {
           method: "POST",
-          body: { name: t.name.trim(), description: t.description || null, tool_type: "MCP", external_name: t.name.trim() },
+          // 透传发现结果自带的参数 Schema：模型据此自动传参
+          body: { name: t.name.trim(), description: t.description || null, tool_type: "MCP", external_name: t.name.trim(), input_schema: t.input_schema ?? {} },
         });
         ok += 1;
       } catch {
@@ -767,11 +852,164 @@ export function ConnectorsPage() {
     else toast("info", `已登记 ${ok} 个，失败 ${failed.length} 个：${failed.slice(0, 3).join("、")}${failed.length > 3 ? "…" : ""}`);
   }
 
+  // 工具元数据编辑：手工维护标签与业务封装标记（OpenAPI 导入后仍可修改）
+  function openToolMeta(tool: ConnectorToolLink) {
+    setMetaEdit({ id: tool.id, name: tool.name ?? tool.external_name ?? tool.id });
+    setMetaTags((tool.tags ?? []).join("、"));
+    setMetaBusiness(Boolean(tool.is_business_tool));
+  }
+
+  async function saveToolMeta() {
+    if (!metaEdit) return;
+    setMetaSaving(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/skills-tools/tools/${metaEdit.id}`, {
+        method: "PATCH",
+        body: { tags: splitTags(metaTags), is_business_tool: metaBusiness },
+      });
+      setMetaEdit(null);
+      if (detail) await loadTools(detail.id);
+      toast("success", "工具标签已更新");
+    } catch (err) {
+      setError(errorText(err, "更新工具标签失败"));
+    } finally {
+      setMetaSaving(false);
+    }
+  }
+
+  // 归档登记工具：选择器不再返回、执行被拒绝；归档后才允许删除
+  async function archiveRegisteredTool(toolId: string) {
+    if (!confirmToolArchive || confirmToolArchive.id !== toolId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/skills-tools/tools/${toolId}/archive`, { method: "POST" });
+      if (detail) await loadTools(detail.id);
+      toast("success", "工具已归档");
+    } catch (err) {
+      setError(errorText(err, "归档工具失败"));
+    } finally {
+      setBusy(false);
+      setConfirmToolArchive(null);
+    }
+  }
+
+  // 删除登记工具：级联清理全部版本、Skill 绑定行与连接器链接，不可恢复
+  async function deleteRegisteredTool(toolId: string) {
+    if (!confirmToolDelete || confirmToolDelete.id !== toolId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/skills-tools/tools/${toolId}`, { method: "DELETE" });
+      if (detail) await loadTools(detail.id);
+      toast("success", "工具已删除");
+    } catch (err) {
+      setError(errorText(err, "删除工具失败"));
+    } finally {
+      setBusy(false);
+      setConfirmToolDelete(null);
+    }
+  }
+
+  // 业务封装工具登记：同连接器内多个已发布工具线性组合（深度 1，无分支）
+  function openComposite() {
+    setCompositeEditTool(null);
+    setCompositeName("");
+    setCompositeDesc("");
+    setCompositeTags("");
+    setCompositeOutputPath("$steps.step1.output");
+    setCompositeSteps([{ key: "step1", tool_version_id: "", arguments: "" }]);
+    setCompositeOpen(true);
+  }
+
+  // 更新业务封装工具：预填当前版本步骤与输出选取（编辑模式复用封装弹窗）
+  async function openCompositeEdit(tool: ConnectorToolLink) {
+    if (!tool.published_version_id) return;
+    setEditLoading(true);
+    setError(null);
+    try {
+      const v = await request<{ config_snapshot: Record<string, unknown>; input_schema: Record<string, unknown> | null }>(
+        `/api/z-torque/skills-tools/tool-versions/${tool.published_version_id}`,
+      );
+      const cfg = v.config_snapshot ?? {};
+      const rawSteps = Array.isArray(cfg.steps) ? (cfg.steps as Record<string, unknown>[]) : [];
+      setCompositeEditTool(tool);
+      setCompositeName(tool.name ?? "");
+      setCompositeDesc(tool.description ?? "");
+      setCompositeTags((tool.tags ?? []).join("、"));
+      setCompositeOutputPath(String(cfg.output_path ?? ""));
+      setCompositeSteps(
+        rawSteps.map((s, i) => ({
+          key: String(s.key ?? `step${i + 1}`),
+          tool_version_id: String(s.tool_version_id ?? ""),
+          arguments: s.arguments && Object.keys(s.arguments as Record<string, unknown>).length > 0 ? JSON.stringify(s.arguments) : "",
+        })),
+      );
+      setCompositeOpen(true);
+    } catch (err) {
+      setError(errorText(err, "加载业务封装配置失败"));
+    } finally {
+      setEditLoading(false);
+    }
+  }
+
+  async function registerComposite() {
+    if (!detail || !compositeName.trim()) return;
+    const steps: { key: string; tool_version_id: string; arguments: Record<string, unknown> }[] = [];
+    for (const [index, step] of compositeSteps.entries()) {
+      if (!step.tool_version_id) {
+        setError(`第 ${index + 1} 步未选择工具版本`);
+        return;
+      }
+      let args: unknown = {};
+      try {
+        args = JSON.parse(step.arguments.trim() || "{}");
+      } catch {
+        setError(`第 ${index + 1} 步参数必须是 JSON 对象`);
+        return;
+      }
+      if (!args || typeof args !== "object" || Array.isArray(args)) {
+        setError(`第 ${index + 1} 步参数必须是 JSON 对象`);
+        return;
+      }
+      steps.push({ key: step.key.trim() || `step${index + 1}`, tool_version_id: step.tool_version_id, arguments: args as Record<string, unknown> });
+    }
+    setCompositeSaving(true);
+    setError(null);
+    try {
+      // 更新模式：改调 reconfigure（后端忽略 name/description/tags，仅更新步骤/参数/输出）
+      const url = compositeEditTool
+        ? `${API}/${detail.id}/composite-tools/${compositeEditTool.id}/reconfigure`
+        : `${API}/${detail.id}/composite-tools`;
+      await request(url, {
+        method: "POST",
+        body: {
+          name: compositeName.trim(),
+          description: compositeDesc.trim() || null,
+          tags: splitTags(compositeTags),
+          steps,
+          output_path: compositeOutputPath.trim() || null,
+        },
+      });
+      setCompositeOpen(false);
+      setCompositeEditTool(null);
+      await loadTools(detail.id);
+      toast("success", compositeEditTool ? "配置已更新为新版本" : "业务封装工具已登记");
+    } catch (err) {
+      setError(errorText(err, compositeEditTool ? "更新业务封装配置失败" : "登记业务封装工具失败"));
+    } finally {
+      setCompositeSaving(false);
+    }
+  }
+
   const lastTest = selected ? testResults[selected.id] ?? null : null;
   // 已登记工具名集合：用于在发现结果里区分「已注册 / 未注册」，并支撑批量注册
   const registeredNames = new Set(
     tools.map((t) => String(t.external_name ?? t.name ?? "").trim()).filter(Boolean),
   );
+  // 业务封装可选子工具：仅取有已发布版本且未归档的工具
+  const compositeCandidates = tools.filter((tool) => tool.published_version_id && tool.status !== "ARCHIVED");
   const enabled = selected?.status === "ENABLED";
   const typeLabel = selected ? typeInfo(selected.connector_type).label : "—";
   const fields = selected ? configFields(selected.connector_type) : [];
@@ -1212,20 +1450,67 @@ export function ConnectorsPage() {
                               <th>工具</th>
                               <th>类型</th>
                               <th>说明</th>
+                              <th>标签</th>
                               <th>授权</th>
+                              {canManage && <th>操作</th>}
                             </tr>
                           </thead>
                           <tbody>
                             {tools.map((t) => (
                               <tr key={t.id}>
-                                <td className="op-name">{t.name ?? t.external_name ?? t.id}</td>
-                                <td>{toolTypeLabel(t.tool_type)}</td>
+                                <td className="op-name">
+                                  {t.name ?? t.external_name ?? t.id}
+                                  {t.is_business_tool && <span className="skill-tag skill-tag-mine">业务封装</span>}
+                                  {t.status === "ARCHIVED" && <span className="connector-tag connector-tag-warn">已归档</span>}
+                                </td>
+                                <td>{toolTypeLabel(t.tool_type)}{t.published_version_number ? <span className="connector-tool-ver">v{t.published_version_number}</span> : null}</td>
                                 <td>{t.description ?? "—"}</td>
+                                <td>
+                                  <div className="connector-tool-tags">
+                                    {(t.tags ?? []).length === 0
+                                      ? "—"
+                                      : (t.tags ?? []).map((tag) => (
+                                          <span key={tag} className="skill-tag skill-tag-neutral">{tag}</span>
+                                        ))}
+                                  </div>
+                                </td>
                                 <td>
                                   <span className={`connector-tag ${t.approved ? "connector-tag-ok" : "connector-tag-warn"}`}>
                                     {t.approved ? "已注册" : "待授权"}
                                   </span>
                                 </td>
+                                {canManage && (
+                                  <td className="connector-tool-op">
+                                    <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => openToolMeta(t)}>
+                                      编辑标签
+                                    </button>
+                                    <button
+                                      className="btn btn-ghost btn-sm"
+                                      disabled={busy || editLoading || !t.published_version_id}
+                                      onClick={() => (t.tool_type === "COMPOSITE" ? void openCompositeEdit(t) : void openEditTool(t))}
+                                      title="生成新发布版本，历史版本与既有 Skill 绑定不受影响"
+                                    >
+                                      更新配置
+                                    </button>
+                                    {t.status === "ARCHIVED" ? (
+                                      <button
+                                        className="skill-btn-danger-outline btn-sm"
+                                        disabled={busy}
+                                        onClick={() => setConfirmToolDelete({ id: t.id, name: t.name ?? t.external_name ?? t.id })}
+                                      >
+                                        删除
+                                      </button>
+                                    ) : (
+                                      <button
+                                        className="skill-btn-danger-outline btn-sm"
+                                        disabled={busy}
+                                        onClick={() => setConfirmToolArchive({ id: t.id, name: t.name ?? t.external_name ?? t.id })}
+                                      >
+                                        归档
+                                      </button>
+                                    )}
+                                  </td>
+                                )}
                               </tr>
                             ))}
                           </tbody>
@@ -1234,6 +1519,9 @@ export function ConnectorsPage() {
                       {canManage && enabled && (
                         <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
                           <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setRegType(selected.connector_type === "DB" ? "DB_SQL" : "HTTP"); setRegOpen(true); }}>登记新工具</button>
+                          <button className="btn btn-secondary btn-sm" disabled={busy || compositeCandidates.length === 0} onClick={openComposite} title="把本连接器多个已发布工具组合为一个业务工具（线性、无分支）">
+                            登记业务封装工具
+                          </button>
                           {selected.connector_type === "REST" && (
                             <button
                               className="btn btn-secondary btn-sm"
@@ -1522,28 +1810,36 @@ export function ConnectorsPage() {
         </div>
       </Modal>
 
-      {/* 登记工具弹窗：把连接器侧能力登记为平台 Tool 实体 */}
+      {/* 登记工具弹窗：把连接器侧能力登记为平台 Tool 实体（更新模式复用，仅改配置） */}
       <Modal
         open={regOpen}
-        title="登记工具"
-        onClose={() => setRegOpen(false)}
+        title={editTool ? `更新工具配置 · ${regName}` : "登记工具"}
+        onClose={() => { setRegOpen(false); setEditTool(null); }}
         footer={
           <>
-            <button className="btn btn-secondary" onClick={() => setRegOpen(false)}>取消</button>
-            <button className="btn btn-primary" disabled={busy || !regName.trim()} onClick={() => void registerTool()}>注册</button>
+            <button className="btn btn-secondary" onClick={() => { setRegOpen(false); setEditTool(null); }}>取消</button>
+            <button className="btn btn-primary" disabled={busy || editLoading || (!editTool && !regName.trim())} onClick={() => void registerTool()}>
+              {editTool ? (busy ? "保存中…" : "保存为新版本") : "注册"}
+            </button>
           </>
         }
       >
+        {editTool && (
+          <div className="skill-alert skill-alert-info">
+            <span>ℹ</span>
+            <span>保存将生成新发布版本（v{(editTool.published_version_number ?? 1) + 1}），历史版本与既有 Skill 绑定不受影响；Skill 草稿中可一键升级绑定。</span>
+          </div>
+        )}
         <div className="form-field">
           <label>工具名</label>
-          <input className="input" value={regName} onChange={(e) => setRegName(e.target.value)} placeholder="例如：list_customers" />
+          <input className="input" value={regName} onChange={(e) => setRegName(e.target.value)} placeholder="例如：list_customers" disabled={!!editTool} />
         </div>
         <div className="form-field">
           <label>类型</label>
           {selected?.connector_type === "DB" ? (
             <input className="input" value="数据库 SQL（只读查询 / 写入需审批）" disabled />
           ) : (
-            <select className="select" value={regType} onChange={(e) => setRegType(e.target.value)}>
+            <select className="select" value={regType} onChange={(e) => setRegType(e.target.value)} disabled={!!editTool}>
               <option value="HTTP">HTTP</option>
               <option value="MCP">MCP</option>
             </select>
@@ -1565,9 +1861,31 @@ export function ConnectorsPage() {
             <div className="form-field">
               <label>输入参数 Schema（JSON）</label>
               <textarea className="textarea" rows={3} value={regSchema} onChange={(e) => setRegSchema(e.target.value)} placeholder='{"type": "object", "properties": {"status": {"type": "string"}}, "required": ["status"]}' />
-              <span className="hint">SQL 模板中的每个 {"{{参数}}"} 必须在此声明</span>
+              <span className="hint">可留空：{"{{参数}}"} 将自动按 string 生成参数定义；声明后可补充类型与描述，帮助模型更准确地传参</span>
             </div>
           </>
+        )}
+        {regType === "MCP" && !editTool && discovered !== null && discovered.length > 0 && (
+          <div className="form-field">
+            <label>从发现结果快速填充</label>
+            <select
+              className="select"
+              value=""
+              onChange={(e) => {
+                const found = discovered.find((d) => d.name === e.target.value);
+                if (!found) return;
+                setRegExternal(found.name);
+                setRegDesc(found.description || "");
+                setRegSchema(found.input_schema && Object.keys(found.input_schema).length > 0 ? JSON.stringify(found.input_schema) : "");
+              }}
+            >
+              <option value="">选择已发现的 MCP 工具</option>
+              {discovered.map((d) => (
+                <option key={d.name} value={d.name}>{d.name}</option>
+              ))}
+            </select>
+            <span className="hint">选中后自动填入外部名、说明与参数 Schema（均可修改）——参数定义完整时模型才能自动传参</span>
+          </div>
         )}
         {regType === "HTTP" && (
           <>
@@ -1592,11 +1910,229 @@ export function ConnectorsPage() {
             </div>
           </>
         )}
+        {!editTool && (
+          <>
+            <div className="form-field">
+              <label>标签（可选）</label>
+              <input className="input" value={regTags} onChange={(e) => setRegTags(e.target.value)} placeholder="用逗号分隔，例如：客户、查询、CRM" />
+              <span className="hint">技能绑定选择器按标签过滤；导入后可随时修改</span>
+            </div>
+            <div className="form-field">
+              <label>业务封装标记</label>
+              <label className="connector-check">
+                <input type="checkbox" checked={regBusiness} onChange={(e) => setRegBusiness(e.target.checked)} />
+                <span>标记为业务封装工具（组合多个原子工具的业务级能力）</span>
+              </label>
+            </div>
+          </>
+        )}
         <div className="form-field">
           <label>说明</label>
-          <textarea className="textarea" value={regDesc} onChange={(e) => setRegDesc(e.target.value)} placeholder="该工具的用途（可选）" />
+          <textarea className="textarea" value={regDesc} onChange={(e) => setRegDesc(e.target.value)} placeholder="该工具的用途（可选）" disabled={!!editTool} />
         </div>
       </Modal>
+
+      {/* 工具元数据：标签与业务封装标记（手工维护） */}
+      <Modal
+        open={metaEdit !== null}
+        title={`编辑工具标签 · ${metaEdit?.name ?? ""}`}
+        onClose={() => setMetaEdit(null)}
+        footer={
+          <>
+            <button className="btn btn-secondary" onClick={() => setMetaEdit(null)}>取消</button>
+            <button className="btn btn-primary" disabled={metaSaving} onClick={() => void saveToolMeta()}>
+              {metaSaving ? "保存中…" : "保存"}
+            </button>
+          </>
+        }
+      >
+        <div className="form-field">
+          <label>标签</label>
+          <input className="input" value={metaTags} onChange={(e) => setMetaTags(e.target.value)} placeholder="用逗号分隔，例如：客户、查询" />
+          <span className="hint">标签用于 Skill 绑定选择器过滤；最多 20 个，单个不超过 32 字符</span>
+        </div>
+        <div className="form-field">
+          <label>业务封装标记</label>
+          <label className="connector-check">
+            <input type="checkbox" checked={metaBusiness} onChange={(e) => setMetaBusiness(e.target.checked)} />
+            <span>标记为业务封装工具</span>
+          </label>
+        </div>
+      </Modal>
+
+      {/* 业务封装工具登记：线性组合本连接器已发布工具（更新模式复用，仅改步骤/参数/输出） */}
+      <Modal
+        open={compositeOpen}
+        title={compositeEditTool ? `更新业务封装工具 · ${compositeName}` : "登记业务封装工具"}
+        onClose={() => { setCompositeOpen(false); setCompositeEditTool(null); }}
+        width={720}
+        footer={
+          <>
+            <button className="btn btn-secondary" onClick={() => { setCompositeOpen(false); setCompositeEditTool(null); }}>取消</button>
+            <button className="btn btn-primary" disabled={compositeSaving || !compositeName.trim()} onClick={() => void registerComposite()}>
+              {compositeEditTool ? (compositeSaving ? "保存中…" : "保存为新版本") : compositeSaving ? "登记中…" : "登记"}
+            </button>
+          </>
+        }
+      >
+        {compositeEditTool && (
+          <div className="skill-alert skill-alert-info">
+            <span>ℹ</span>
+            <span>保存将生成新发布版本（v{(compositeEditTool.published_version_number ?? 1) + 1}），历史版本与既有 Skill 绑定不受影响；Skill 草稿中可一键升级绑定。</span>
+          </div>
+        )}
+        <div className="form-field">
+          <label>工具名</label>
+          <input className="input" value={compositeName} onChange={(e) => setCompositeName(e.target.value)} placeholder="例如：客户开户资料查询" disabled={!!compositeEditTool} />
+        </div>
+        <div className="form-field">
+          <label>标签（可选）</label>
+          <input className="input" value={compositeTags} onChange={(e) => setCompositeTags(e.target.value)} placeholder="用逗号分隔，例如：业务封装、客户" disabled={!!compositeEditTool} />
+        </div>
+        <div className="form-field">
+          <label>说明</label>
+          <textarea className="textarea" value={compositeDesc} onChange={(e) => setCompositeDesc(e.target.value)} placeholder="描述该业务能力的用途（可选）" disabled={!!compositeEditTool} />
+        </div>
+        <div className="form-field">
+          <label>执行步骤（按顺序，最多 10 步）</label>
+          {compositeSteps.map((step, index) => (
+            <div key={index} className="connector-composite-step">
+              <div className="step-head">
+                <span className="step-index">{index + 1}</span>
+                <input
+                  className="input"
+                  value={step.key}
+                  onChange={(e) => setCompositeSteps((prev) => prev.map((item, i) => (i === index ? { ...item, key: e.target.value } : item)))}
+                  placeholder="步骤 key"
+                  maxLength={32}
+                />
+                <select
+                  className="select"
+                  value={step.tool_version_id}
+                  onChange={(e) =>
+                    setCompositeSteps((prev) =>
+                      prev.map((item, i) => {
+                        if (i !== index) return item;
+                        const candidate = compositeCandidates.find((c) => c.published_version_id === e.target.value);
+                        // 预填分步：第一步取调用入参（$input.x）；后续步骤需要的是
+                        // 上一步的加工结果（如 LocationID），留空由用户按输出结构填写，避免盲填错值
+                        const blank = !item.arguments.trim() || item.arguments.trim() === "{}";
+                        const prefill =
+                          blank && index === 0 && candidate && (candidate.required_params ?? []).length > 0
+                            ? JSON.stringify(Object.fromEntries(candidate.required_params.map((p) => [p.name, `$input.${p.name}`])))
+                            : item.arguments;
+                        return { ...item, tool_version_id: e.target.value, arguments: prefill };
+                      }),
+                    )
+                  }
+                >
+                  <option value="">选择已发布工具</option>
+                  {compositeCandidates.map((candidate) => (
+                    <option key={candidate.id} value={candidate.published_version_id ?? ""}>
+                      {candidate.name ?? candidate.external_name ?? candidate.id}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="btn btn-ghost btn-sm"
+                  disabled={compositeSteps.length === 1}
+                  onClick={() => {
+                    setCompositeSteps((prev) => prev.filter((_, i) => i !== index));
+                    // 删除步骤后输出选取若指向已不存在的步骤，回落到最后一步
+                    setCompositeOutputPath((prev) => {
+                      const matched = /^\$steps\.step(\d+)\.output$/.exec(prev.trim());
+                      const remaining = compositeSteps.length - 1;
+                      if (matched && Number(matched[1]) > remaining) {
+                        return `$steps.step${Math.max(remaining, 1)}.output`;
+                      }
+                      return prev;
+                    });
+                  }}
+                  aria-label="删除步骤"
+                >
+                  ✕
+                </button>
+              </div>
+              {(() => {
+                const candidate = compositeCandidates.find((c) => c.published_version_id === step.tool_version_id);
+                const required = candidate?.required_params ?? [];
+                if (required.length === 0) return null;
+                return (
+                  <div className="connector-step-params">
+                    <span>必填参数：</span>
+                    {required.map((p) => (
+                      <span key={p.name} className="skill-tag skill-tag-confirm" title={`${p.type}${p.description ? " · " + p.description : ""}`}>
+                        {p.name}
+                      </span>
+                    ))}
+                    <span className="connector-step-params-hint">
+                      {index === 0
+                        ? "留空将自动按 $input.参数名 透传调用入参"
+                        : "若参数来自上一步结果，请填 $steps.<上一步key>.output.json.<路径>（如 location[0].id）"}
+                    </span>
+                  </div>
+                );
+              })()}
+              <textarea
+                className="textarea"
+                rows={2}
+                value={step.arguments}
+                onChange={(e) => setCompositeSteps((prev) => prev.map((item, i) => (i === index ? { ...item, arguments: e.target.value } : item)))}
+                placeholder='留空 = 自动透传调用入参；或填 JSON，例如 {"location": "$input.location"}、{"name": "$steps.step1.output.name"}'
+              />
+            </div>
+          ))}
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={compositeSteps.length >= 10}
+            onClick={() => {
+              setCompositeSteps((prev) => [...prev, { key: `step${prev.length + 1}`, tool_version_id: "", arguments: "" }]);
+              // 输出选取默认跟随最后一步（业务封装最常见的语义：最后一步产出最终结果）；
+              // 仅同步自动生成的默认形态，用户手改过的路径不动
+              setCompositeOutputPath((prev) =>
+                /^\$steps\.step\d+\.output$/.test(prev.trim()) ? `$steps.step${compositeSteps.length + 1}.output` : prev,
+              );
+            }}
+          >
+            添加步骤
+          </button>
+        </div>
+        <div className="form-field">
+          <label>输出选取</label>
+          <input className="input" value={compositeOutputPath} onChange={(e) => setCompositeOutputPath(e.target.value)} placeholder="$steps.step1.output" />
+          <span className="hint">默认返回最后一步结果（添加/删除步骤时自动跟随）；留空返回全部步骤结果；也支持 $steps.&lt;key&gt;.output.json.&lt;路径&gt; 取内层字段</span>
+        </div>
+        <p className="skill-field help">
+          仅支持线性、无分支、深度 1；子步骤 pin 已发布版本，执行仍经 SkillGateway 审批与审计。
+          步骤参数留空时，执行期会把本次调用的入参自动透传给该步骤。
+        </p>
+      </Modal>
+
+      {/* 工具归档 / 删除确认 */}
+      <ConfirmDialog
+        open={confirmToolArchive !== null}
+        title="归档该工具？"
+        confirmText="归档"
+        busy={busy}
+        onCancel={() => setConfirmToolArchive(null)}
+        onConfirm={() => { if (confirmToolArchive) void archiveRegisteredTool(confirmToolArchive.id); }}
+      >
+        <p>工具「{confirmToolArchive?.name ?? ""}」归档后：Skill 绑定选择器不再显示该工具，已绑定的版本执行时会被拒绝。归档后仍可删除。</p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmToolDelete !== null}
+        title="删除该工具？"
+        confirmText="删除"
+        destructive
+        requireText={confirmToolDelete?.name ?? ""}
+        requireLabel="请输入工具名称以确认删除"
+        busy={busy}
+        onCancel={() => setConfirmToolDelete(null)}
+        onConfirm={() => { if (confirmToolDelete) void deleteRegisteredTool(confirmToolDelete.id); }}
+      >
+        <p>工具「{confirmToolDelete?.name ?? ""}」的全部版本、Skill 绑定关系与连接器链接将被永久删除，不可恢复。已发布 Skill 中对它的绑定会一并移除。</p>
+      </ConfirmDialog>
 
       {/* 危险操作三连：停用 / 归档 / 删除 */}
       <ConfirmDialog

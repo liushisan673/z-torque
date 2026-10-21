@@ -7,7 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
-from app.models import Agent, AgentVersion, AgentVersionSkill, SkillVersion, Task
+from app.core.limits import MAX_SKILL_BOUND_TOOLS
+from app.models import Agent, AgentVersion, AgentVersionSkill, SkillVersion, SkillVersionTool, Task
 from app.kernel.audit.service import record_audit
 from app.kernel.task.states import TERMINAL_STATES
 
@@ -35,7 +36,24 @@ def _owned_agent(db: Session, tenant_id: UUID, user_id: UUID, agent_id: UUID) ->
 def create_version(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID, snapshot: dict) -> AgentVersion:
     _owned_agent(db, tenant_id, user_id, agent_id)
     number = (db.scalar(select(func.max(AgentVersion.version_number)).where(AgentVersion.agent_id == agent_id)) or 0) + 1
-    version = AgentVersion(tenant_id=tenant_id, agent_id=agent_id, version_number=number, status="DRAFT", config_schema_version="1", config_snapshot=snapshot)
+    # 委派配置随新草稿继承当前发布版本（启用开关 / 任务数上限 / 委派白名单），
+    # 避免新建草稿后被清空重填；无发布版本时保持默认（不启用）
+    current = db.scalar(
+        select(AgentVersion)
+        .where(AgentVersion.agent_id == agent_id, AgentVersion.status == "PUBLISHED")
+        .order_by(AgentVersion.version_number.desc())
+    )
+    version = AgentVersion(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        version_number=number,
+        status="DRAFT",
+        config_schema_version="1",
+        config_snapshot=snapshot,
+        delegation_enabled=bool(current.delegation_enabled) if current is not None else False,
+        allowed_child_agent_versions=list(current.allowed_child_agent_versions or []) if current is not None else [],
+        child_necessity_policy=dict(current.child_necessity_policy) if current is not None and current.child_necessity_policy else None,
+    )
     db.add(version)
     db.flush()
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="AGENT_VERSION_CREATED", resource_type="AGENT_VERSION", resource_id=version.id, summary="agent version draft created")
@@ -79,10 +97,25 @@ def publish_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: 
         raise ApiError("AI_REQUEST_INVALID", "version is not a draft", 422)
     if not version.config_snapshot:
         raise ApiError("AI_REQUEST_INVALID", "version configuration is empty", 422)
+    bound_skill_ids: list[UUID] = []
     for link in db.query(AgentVersionSkill).filter(AgentVersionSkill.agent_version_id == version.id).all():
         skill = db.get(SkillVersion, link.skill_version_id)
         if not skill or skill.tenant_id != tenant_id or skill.status != "PUBLISHED":
             raise ApiError("AI_REQUEST_INVALID", "agent version references an unpublished skill version", 422)
+        bound_skill_ids.append(skill.id)
+    # 双闸门之二：AgentVersion 发布时按去重后的工具版本数限制模型侧暴露规模
+    exposed_tool_ids: set[str] = set()
+    if bound_skill_ids:
+        rows = db.scalars(
+            select(SkillVersionTool.tool_version_id).where(SkillVersionTool.skill_version_id.in_(bound_skill_ids))
+        ).all()
+        exposed_tool_ids = {str(item) for item in rows}
+    if len(exposed_tool_ids) > MAX_SKILL_BOUND_TOOLS:
+        raise ApiError(
+            "AI_AGENT_TOOL_LIMIT_EXCEEDED",
+            f"an agent version can expose at most {MAX_SKILL_BOUND_TOOLS} tools, got {len(exposed_tool_ids)}",
+            409,
+        )
     # 委派白名单校验：引用必须是同租户、已发布版本的 AgentVersion
     if version.delegation_enabled:
         for cid in version.allowed_child_agent_versions or []:

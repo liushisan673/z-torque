@@ -39,7 +39,14 @@ async def run_isolated_process(*, script_path: Path, arguments: dict[str, Any], 
         raise ApiError("AI_SKILL_FAILED", "MD-Skill script output exceeded limit", 500)
     if process.returncode != 0:
         raise ApiError("AI_SKILL_FAILED", "MD-Skill script failed", 500)
-    return json.loads(stdout)
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        # 脚本输出非 JSON 属"执行结果不合约"，必须转为 ApiError，不能冒泡成 500 未处理异常
+        raise ApiError("AI_SKILL_FAILED", "MD-Skill script output is not valid JSON", 500) from exc
+    if not isinstance(payload, dict):
+        raise ApiError("AI_SKILL_FAILED", "MD-Skill script output must be a JSON object", 500)
+    return payload
 
 
 class MdSkillRuntime:

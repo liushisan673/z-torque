@@ -17,6 +17,11 @@ _NAME = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 _ALLOWED = {".md", ".py", ".json", ".csv", ".txt"}
 
 
+def normalize_newlines(text: str) -> str:
+    """统一换行为 LF：Windows 上传的 SKILL.md（CRLF）同样能识别 YAML front matter。"""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 @dataclass(frozen=True)
 class MdSkillManifest:
     name: str
@@ -52,7 +57,7 @@ class MdSkillInstructionLoader:
             raise ApiError("AI_SKILL_PATH_INVALID", "skill path escapes configured root", 422)
         if path.name != "SKILL.md" or not path.is_file():
             raise ApiError("AI_SKILL_NOT_FOUND", "SKILL.md not found", 404)
-        text = path.read_text(encoding="utf-8")
+        text = normalize_newlines(path.read_text(encoding="utf-8"))
         if not text.startswith("---\n"):
             raise ApiError("AI_SKILL_METADATA_INVALID", "SKILL.md requires YAML front matter", 422)
         marker = text.find("\n---\n", 4)
@@ -80,7 +85,7 @@ def parse_skill(root: str | Path, skill_dir: str | Path) -> MdSkillManifest:
     manifest_path = _safe_path(root_path, directory / "SKILL.md")
     if not manifest_path.is_file():
         raise ApiError("AI_SKILL_INVALID_MANIFEST", "SKILL.md is required", 422)
-    text = manifest_path.read_text(encoding="utf-8")
+    text = normalize_newlines(manifest_path.read_text(encoding="utf-8"))
     if not text.startswith("---\n"):
         raise ApiError("AI_SKILL_INVALID_MANIFEST", "YAML front matter is required", 422)
     marker = text.find("\n---\n", 4)

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { request } from "../services/api";
 import { errorText } from "../services/errorText";
+import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import type { Agent, AgentVersion, AgentVersionArchiveCheck, BoundSkill } from "../types";
 import type { ModelResource } from "../types";
 import type { Task } from "../types";
+import type { SelectableSkillGroup, SelectableSkillResponse, SelectableSkillVersion } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { useToast } from "../components/Toast";
@@ -11,27 +13,11 @@ import { GuideCallout } from "../components/GuideCallout";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useAuth } from "../stores/auth";
 
-// 已发布 SkillVersion（用于绑定下拉选项）
-interface PublishedSkillVersion {
-  skill_id: string;
-  skill_name: string;
-  version_id: string;
-  version_number: number;
-}
+// Agent 绑定技能：单个 Agent 版本最多引用的去重工具数（与后端发布闸门一致）
+const MAX_AGENT_TOOLS = 30;
 
-// /skills-tools/skills 列表项
-interface SkillListItem {
-  id: string;
-  name: string;
-  skill_type: string;
-  official: boolean;
-}
-
-// /skills-tools/skills/{id} 详情
-interface SkillDetail extends SkillListItem {
-  description: string | null;
-  versions: { id: string; version_number: number; status: string; snapshot_hash: string | null }[];
-}
+// 选中记忆：跳转页面后返回时恢复上次选中的智能体（sessionStorage 按标签页隔离）
+const SELECTED_KEY = "zt.agents.selectedId";
 
 type Tab = "overview" | "config" | "skills" | "versions";
 type Filter = "all" | "mine" | "official" | "draft";
@@ -112,13 +98,23 @@ export function AgentsPage() {
   const [editing, setEditing] = useState<{ agentId: string; version: AgentVersion } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [modelId, setModelId] = useState("");
-  const [publishedSkills, setPublishedSkills] = useState<PublishedSkillVersion[]>([]);
-  const [pickSkillId, setPickSkillId] = useState("");
+  const [skillGroups, setSkillGroups] = useState<SelectableSkillGroup[]>([]);
+  const [skillQuery, setSkillQuery] = useState("");
+  // 技能绑定选择器：对齐技能页「绑定工具」的弹窗式双栏多选（一次可勾选多个技能版本）
+  const [bindSkillOpen, setBindSkillOpen] = useState(false);
+  const [skillSource, setSkillSource] = useState<"all" | "official" | "mine">("all");
+  const [skillPicks, setSkillPicks] = useState<{ group: SelectableSkillGroup; version: SelectableSkillVersion }[]>([]);
+  const [bindingSkills, setBindingSkills] = useState(false);
+  const [unbindingSkillId, setUnbindingSkillId] = useState<string | null>(null);
   // 委派设置编辑（存于 AgentVersion 独立列，随版本草稿一并保存）
   const [editDelegation, setEditDelegation] = useState(false);
   const [editMaxChild, setEditMaxChild] = useState("");
   const [editChildAgents, setEditChildAgents] = useState<string[]>([]);
   const [childOptions, setChildOptions] = useState<{ version_id: string; label: string }[]>([]);
+  // 子智能体选择器：与技能页「绑定工具」同款弹窗式勾选（确定后随版本草稿一并保存）
+  const [childPickerOpen, setChildPickerOpen] = useState(false);
+  const [childPicks, setChildPicks] = useState<string[]>([]);
+  const [childQuery, setChildQuery] = useState("");
   // 委派白名单只读展示用：version_id → 「智能体名 · vN」可读标签
   const [childLabels, setChildLabels] = useState<Record<string, string>>({});
   const { push: toast } = useToast();
@@ -144,10 +140,13 @@ export function AgentsPage() {
     void load();
   }, [load]);
 
-  // 默认展示列表第一项，避免主区空白（仅当前无选中时生效；删除当前选中后自动补选）
+  // 默认展示列表第一项，避免主区空白；跳转回来时优先恢复上次选中（记忆 id 已不存在则回退第一项）
   useEffect(() => {
     if (loading || selectedId) return;
-    if (agents.length > 0) void openDetail(agents[0]);
+    if (agents.length === 0) return;
+    const remembered = readSelectedId(SELECTED_KEY);
+    const target = (remembered && agents.find((a) => a.id === remembered)) || agents[0];
+    void openDetail(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, agents, selectedId]);
 
@@ -181,8 +180,46 @@ export function AgentsPage() {
     return currentPublishedVersion;
   }, [editing, currentPublishedVersion]);
 
+  // 技能选择器：关键字（技能名/说明/版本号）+ 来源（全部/平台/我的）过滤
+  const filteredSkillGroups = useMemo(() => {
+    const kw = skillQuery.trim().toLowerCase();
+    return skillGroups
+      .filter((group) => {
+        if (skillSource === "official") return group.official;
+        if (skillSource === "mine") return !group.official;
+        return true;
+      })
+      .map((group) => {
+        if (!kw) return group;
+        const groupHit =
+          group.skill_name.toLowerCase().includes(kw) || (group.description ?? "").toLowerCase().includes(kw);
+        const versions = groupHit
+          ? group.versions
+          : group.versions.filter((version) => `v${version.version_number}`.includes(kw));
+        return { ...group, versions };
+      })
+      .filter((group) => group.versions.length > 0);
+  }, [skillGroups, skillQuery, skillSource]);
+
+  // 已绑定技能的工具数合计（按技能计；去重后的最终校验在发布时执行）
+  const boundToolTotal = useMemo(() => {
+    const toolCountByVersion = new Map<string, number>();
+    skillGroups.forEach((group) => group.versions.forEach((version) => toolCountByVersion.set(version.skill_version_id, version.tool_count)));
+    return boundSkills.reduce((sum, skill) => sum + (toolCountByVersion.get(skill.skill_version_id) ?? 0), 0);
+  }, [skillGroups, boundSkills]);
+
+  const boundSkillVersionIds = useMemo(() => new Set(boundSkills.map((skill) => skill.skill_version_id)), [boundSkills]);
+
+  // 本次已选技能的工具数合计与绑定后预估（对照单版本工具上限，发布时后端最终校验）
+  const pickedToolTotal = useMemo(
+    () => skillPicks.reduce((sum, pick) => sum + pick.version.tool_count, 0),
+    [skillPicks],
+  );
+  const projectedToolTotal = boundToolTotal + pickedToolTotal;
+
   async function openDetail(a: Agent) {
     setSelectedId(a.id);
+    writeSelectedId(SELECTED_KEY, a.id);
     setVersions([]);
     setBoundSkills([]);
     setLatestTask(null);
@@ -373,22 +410,15 @@ export function AgentsPage() {
     }
   }
 
-  async function loadPublishedSkills() {
-    const skills = await request<SkillListItem[]>("/api/z-torque/skills-tools/skills");
-    const result: PublishedSkillVersion[] = [];
-    for (const s of skills) {
-      try {
-        const d = await request<SkillDetail>(`/api/z-torque/skills-tools/skills/${s.id}`);
-        for (const v of d.versions) {
-          if (v.status === "PUBLISHED") {
-            result.push({ skill_id: s.id, skill_name: s.name, version_id: v.id, version_number: v.version_number });
-          }
-        }
-      } catch {
-        /* 单个技能加载失败则跳过 */
-      }
+  // 可选技能版本：后端按技能分组一次性返回，替代逐技能详情请求（避免 N+1）；
+  // 失败时置空列表（选择器显示空态），不阻塞绑定主流程
+  async function loadSelectableSkills() {
+    try {
+      const data = await request<SelectableSkillResponse>("/api/z-torque/skills-tools/skill-versions/selectable?size=200");
+      setSkillGroups(data.groups);
+    } catch {
+      setSkillGroups([]);
     }
-    return result;
   }
 
   // 委派白名单候选：其他 Agent 的已发布版本（排除自身）
@@ -416,6 +446,21 @@ export function AgentsPage() {
     }
   }
 
+  function openChildPicker() {
+    setChildPicks(editChildAgents);
+    setChildQuery("");
+    setChildPickerOpen(true);
+  }
+
+  function toggleChildPick(versionId: string) {
+    setChildPicks((prev) => (prev.includes(versionId) ? prev.filter((id) => id !== versionId) : [...prev, versionId]));
+  }
+
+  function applyChildPicks() {
+    setEditChildAgents(childPicks);
+    setChildPickerOpen(false);
+  }
+
   async function openEditor(agentId: string, version: AgentVersion) {
     setError(null);
     setEditing({ agentId, version });
@@ -423,7 +468,10 @@ export function AgentsPage() {
     const cfg = version.config_snapshot ?? {};
     setSystemPrompt(typeof cfg.system_prompt === "string" ? cfg.system_prompt : "");
     setModelId(typeof cfg.model === "string" ? cfg.model : "");
-    setPickSkillId("");
+    setBindSkillOpen(false);
+    setSkillPicks([]);
+    setSkillQuery("");
+    setSkillSource("all");
     setEditDelegation(Boolean(version.delegation_enabled));
     setEditMaxChild(
       version.child_necessity_policy && typeof version.child_necessity_policy.max_child === "number"
@@ -432,13 +480,12 @@ export function AgentsPage() {
     );
     setEditChildAgents(Array.isArray(version.allowed_child_agent_versions) ? version.allowed_child_agent_versions : []);
     try {
-      const published = await loadPublishedSkills();
-      setPublishedSkills(published);
+      await loadSelectableSkills();
       await loadBoundSkills(agentId, version.id);
       void loadChildOptions(agentId);
     } catch (err) {
       setError(errorText(err, "加载技能失败"));
-      setPublishedSkills([]);
+      setSkillGroups([]);
     }
   }
 
@@ -471,21 +518,71 @@ export function AgentsPage() {
     }
   }
 
-  async function attachSkill() {
-    if (!editing || !pickSkillId) return;
-    setBusy(true);
+  function openSkillBindModal() {
+    setBindSkillOpen(true);
+    setSkillPicks([]);
+    setSkillQuery("");
+    setSkillSource("all");
+    void loadSelectableSkills();
+  }
+
+  // 勾选/取消一个技能版本；工具合计超上限时拦截（与技能页选择器同款守卫）
+  function toggleSkillPick(group: SelectableSkillGroup, version: SelectableSkillVersion) {
+    if (boundSkillVersionIds.has(version.skill_version_id)) return;
+    setSkillPicks((prev) => {
+      if (prev.some((pick) => pick.version.skill_version_id === version.skill_version_id)) {
+        return prev.filter((pick) => pick.version.skill_version_id !== version.skill_version_id);
+      }
+      if (boundToolTotal + prev.reduce((sum, pick) => sum + pick.version.tool_count, 0) >= MAX_AGENT_TOOLS) {
+        toast("info", `绑定技能的工具合计不能超过 ${MAX_AGENT_TOOLS} 个`);
+        return prev;
+      }
+      return [...prev, { group, version }];
+    });
+  }
+
+  async function bindSkills() {
+    if (!editing || skillPicks.length === 0) return;
+    setBindingSkills(true);
     setError(null);
     try {
-      await request(`/api/z-torque/agents/${editing.agentId}/versions/${editing.version.id}/skills`, {
-        method: "POST",
-        body: { skill_version_id: pickSkillId },
+      // 顺序提交：与技能页绑定工具一致，保持已选区顺序
+      for (const pick of skillPicks) {
+        await request(`/api/z-torque/agents/${editing.agentId}/versions/${editing.version.id}/skills`, {
+          method: "POST",
+          body: { skill_version_id: pick.version.skill_version_id },
+        });
+      }
+      const count = skillPicks.length;
+      setBindSkillOpen(false);
+      await loadBoundSkills(editing.agentId, editing.version.id);
+      await loadSelectableSkills();
+      toast("success", `已绑定 ${count} 个技能`);
+    } catch (err) {
+      setError(errorText(err, "绑定技能失败"));
+      // 顺序提交可能部分成功：刷新已绑定列表，避免界面与实际状态不一致
+      await loadBoundSkills(editing.agentId, editing.version.id);
+      await loadSelectableSkills();
+    } finally {
+      setBindingSkills(false);
+    }
+  }
+
+  async function detachSkill(skillVersionId: string) {
+    if (!editing) return;
+    setUnbindingSkillId(skillVersionId);
+    setError(null);
+    try {
+      await request(`/api/z-torque/agents/${editing.agentId}/versions/${editing.version.id}/skills/${skillVersionId}`, {
+        method: "DELETE",
       });
       await loadBoundSkills(editing.agentId, editing.version.id);
-      setPickSkillId("");
+      await loadSelectableSkills();
+      toast("success", "已解绑");
     } catch (err) {
-setError(errorText(err, "绑定技能失败"));
+      setError(errorText(err, "解绑失败"));
     } finally {
-      setBusy(false);
+      setUnbindingSkillId(null);
     }
   }
 
@@ -905,23 +1002,21 @@ setError(errorText(err, "绑定技能失败"));
                           />
                         </div>
                         <div className="agent-field full">
-                          <label>允许的子智能体（已发布版本{editing ? "，可多选" : ""}）</label>
+                          <label>允许的子智能体（已发布版本，可多选）</label>
                           {editing ? (
-                            <select
-                              multiple
-                              size={4}
-                              value={editChildAgents}
-                              onChange={(e) => setEditChildAgents(Array.from(e.target.selectedOptions, (o) => o.value))}
-                              disabled={busy || !editDelegation}
-                            >
-                              {childOptions.length === 0 ? (
-                                <option value="" disabled>暂无其他智能体的已发布版本</option>
-                              ) : (
-                                childOptions.map((o) => (
-                                  <option key={o.version_id} value={o.version_id}>{o.label}</option>
-                                ))
-                              )}
-                            </select>
+                            <>
+                              <div className="agent-skill-actions" style={{ marginBottom: 8 }}>
+                                <button className="btn btn-primary btn-sm" disabled={busy || !editDelegation} onClick={openChildPicker}>
+                                  选择子智能体
+                                </button>
+                                <span className="hint">已选 {editChildAgents.length} 个</span>
+                              </div>
+                              <input
+                                type="text"
+                                value={editChildAgents.map((id) => childLabels[id] ?? id).join("、") || "—"}
+                                disabled
+                              />
+                            </>
                           ) : (
                             <input
                               type="text"
@@ -966,6 +1061,7 @@ setError(errorText(err, "绑定技能失败"));
                               <th>模式</th>
                               <th>来源</th>
                               <th>状态</th>
+                              {editing && <th>操作</th>}
                             </tr>
                           </thead>
                           <tbody>
@@ -982,6 +1078,17 @@ setError(errorText(err, "绑定技能失败"));
                                   </td>
                                   <td>{s.official ? "平台" : "我的"}</td>
                                   <td><span className={`agent-tag ${statusInfo(s.status).cls}`}>{statusInfo(s.status).label}</span></td>
+                                  {editing && (
+                                    <td>
+                                      <button
+                                        className="btn btn-ghost btn-sm"
+                                        disabled={busy || unbindingSkillId === s.skill_version_id}
+                                        onClick={() => void detachSkill(s.skill_version_id)}
+                                      >
+                                        {unbindingSkillId === s.skill_version_id ? "解绑中…" : "解绑"}
+                                      </button>
+                                    </td>
+                                  )}
                                 </tr>
                               );
                             })}
@@ -990,22 +1097,11 @@ setError(errorText(err, "绑定技能失败"));
                       )}
 
                       {editing && (
-                        <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
-                          <select
-                            className="agent-field"
-                            style={{ flex: 1, padding: "8px 12px", borderRadius: "var(--radius)", border: "1px solid var(--border-strong)" }}
-                            value={pickSkillId}
-                            onChange={(e) => setPickSkillId(e.target.value)}
-                            disabled={busy}
-                          >
-                            <option value="">选择要绑定的已发布技能版本</option>
-                            {publishedSkills.map((s) => (
-                              <option key={s.version_id} value={s.version_id}>
-                                {s.skill_name} · v{s.version_number}
-                              </option>
-                            ))}
-                          </select>
-                          <button className="btn btn-secondary" disabled={busy || !pickSkillId} onClick={() => void attachSkill()}>绑定</button>
+                        <div className="agent-skill-actions" style={{ marginTop: 12 }}>
+                          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => openSkillBindModal()}>绑定技能</button>
+                          <span className={projectedToolTotal > MAX_AGENT_TOOLS ? "skill-bind-limit danger" : "skill-bind-limit"}>
+                            工具合计 {boundToolTotal} / {MAX_AGENT_TOOLS}
+                          </span>
                         </div>
                       )}
 
@@ -1135,6 +1231,179 @@ setError(errorText(err, "绑定技能失败"));
           <label>说明</label>
           <textarea className="textarea" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
         </div>
+      </Modal>
+
+      {/* 绑定技能选择器：与技能页「绑定工具」同款的弹窗式双栏多选 */}
+      <Modal
+        open={bindSkillOpen}
+        title="绑定技能（已发布版本）"
+        onClose={() => setBindSkillOpen(false)}
+        width={880}
+        footer={
+          <>
+            <span className="skill-bind-count">
+              已绑定 {boundSkills.length} · 本次已选 {skillPicks.length} · 工具合计 {projectedToolTotal} / {MAX_AGENT_TOOLS}
+            </span>
+            <button className="btn btn-secondary" onClick={() => setBindSkillOpen(false)}>取消</button>
+            <button className="btn btn-primary" disabled={bindingSkills || skillPicks.length === 0} onClick={() => void bindSkills()}>
+              {bindingSkills ? "绑定中…" : `绑定 ${skillPicks.length || ""}`.trim()}
+            </button>
+          </>
+        }
+      >
+        <div className="skill-bind-toolbar">
+          <input
+            className="input"
+            value={skillQuery}
+            onChange={(e) => setSkillQuery(e.target.value)}
+            placeholder="搜索技能名称、说明或版本"
+            aria-label="搜索技能"
+          />
+          <select
+            className="input"
+            value={skillSource}
+            onChange={(e) => setSkillSource(e.target.value as "all" | "official" | "mine")}
+            aria-label="按来源过滤"
+          >
+            <option value="all">全部来源</option>
+            <option value="official">平台</option>
+            <option value="mine">我的</option>
+          </select>
+        </div>
+
+        {filteredSkillGroups.length === 0 ? (
+          <div className="skill-readonly-banner">当前没有可绑定的已发布技能版本（或调整搜索条件）。</div>
+        ) : (
+          <div className="skill-bind-layout">
+            <div className="skill-bind-list">
+              {filteredSkillGroups.map((group) => (
+                <div key={group.skill_id} className="skill-bind-group">
+                  <div className="skill-bind-group-title">
+                    <span>
+                      {group.skill_name}
+                      {group.official && <span className="skill-tag skill-tag-official">平台</span>}
+                    </span>
+                    <span className="hint">{group.versions.length} 个已发布版本</span>
+                  </div>
+                  {group.versions.map((version) => {
+                    const already = boundSkillVersionIds.has(version.skill_version_id);
+                    const picked = skillPicks.some((pick) => pick.version.skill_version_id === version.skill_version_id);
+                    const disabled = already || (!picked && projectedToolTotal >= MAX_AGENT_TOOLS);
+                    return (
+                      <label
+                        key={version.skill_version_id}
+                        className={`skill-tool-picker-item${picked ? " selected" : ""}${already ? " disabled" : ""}`}
+                        title={already ? "已绑定当前版本" : (version.orchestration_hint ?? undefined)}
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={disabled || bindingSkills}
+                          checked={picked || already}
+                          onChange={() => toggleSkillPick(group, version)}
+                        />
+                        <div className="t-main">
+                          <div className="t-row">
+                            <span className="t-name">v{version.version_number}</span>
+                            <span className="skill-tag skill-tag-neutral">{version.mode === "script" ? "脚本" : "纯指令"}</span>
+                            <span className="skill-tag skill-tag-neutral">{version.tool_count} 个工具</span>
+                            {version.requires_confirmation && <span className="skill-tag skill-tag-confirm">需审批</span>}
+                            {already && <span className="t-bound">已绑定</span>}
+                          </div>
+                          <div className="t-desc">{group.description || version.orchestration_hint || "—"}</div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+
+            <div className="skill-bind-picked">
+              <div className="skill-bind-group-title">
+                <span>本次已选</span>
+                <span className={projectedToolTotal > MAX_AGENT_TOOLS ? "skill-bind-limit danger" : "skill-bind-limit"}>
+                  工具合计 {projectedToolTotal} / {MAX_AGENT_TOOLS}
+                </span>
+              </div>
+              {skillPicks.length === 0 ? (
+                <div className="skill-readonly-banner">从左侧勾选技能版本；一次可绑定多个。</div>
+              ) : (
+                skillPicks.map((pick) => (
+                  <div key={pick.version.skill_version_id} className="skill-bind-pick-card">
+                    <div className="pick-head">
+                      <span className="t-name">{pick.group.skill_name}</span>
+                      <span className="skill-tag skill-tag-neutral">v{pick.version.version_number}</span>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setSkillPicks((prev) => prev.filter((item) => item.version.skill_version_id !== pick.version.skill_version_id))}
+                        aria-label={`移除 ${pick.group.skill_name}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div className="t-desc">
+                      {pick.version.tool_count} 个工具
+                      {pick.version.orchestration_hint ? ` · ${pick.version.orchestration_hint}` : ""}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* 子智能体选择器：与技能页「绑定工具」同款弹窗式勾选，确定后随版本草稿保存 */}
+      <Modal
+        open={childPickerOpen}
+        title="选择子智能体（已发布版本）"
+        onClose={() => setChildPickerOpen(false)}
+        width={640}
+        footer={
+          <>
+            <span className="skill-bind-count">已选 {childPicks.length} 个</span>
+            <button className="btn btn-secondary" onClick={() => setChildPickerOpen(false)}>取消</button>
+            <button className="btn btn-primary" onClick={applyChildPicks}>确定</button>
+          </>
+        }
+      >
+        <div className="skill-bind-toolbar">
+          <input
+            className="input"
+            value={childQuery}
+            onChange={(e) => setChildQuery(e.target.value)}
+            placeholder="搜索智能体名称或版本"
+            aria-label="搜索子智能体"
+          />
+        </div>
+        {(() => {
+          const kw = childQuery.trim().toLowerCase();
+          const filtered = kw ? childOptions.filter((o) => o.label.toLowerCase().includes(kw)) : childOptions;
+          if (childOptions.length === 0) {
+            return <div className="agent-readonly-banner">暂无其他智能体的已发布版本。</div>;
+          }
+          if (filtered.length === 0) {
+            return <div className="agent-readonly-banner">没有匹配的子智能体版本。</div>;
+          }
+          return (
+            <div className="skill-bind-list">
+              {filtered.map((o) => {
+                const picked = childPicks.includes(o.version_id);
+                return (
+                  <label key={o.version_id} className={`skill-tool-picker-item${picked ? " selected" : ""}`}>
+                    <input type="checkbox" checked={picked} onChange={() => toggleChildPick(o.version_id)} />
+                    <div className="t-main">
+                      <div className="t-row">
+                        <span className="t-name">{o.label}</span>
+                        {picked && <span className="t-bound">已选</span>}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          );
+        })()}
       </Modal>
 
       {/* 危险操作三连：归档 / 级联删除 / 版本归档（含告警） */}

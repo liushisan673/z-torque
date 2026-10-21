@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import TenantModel
@@ -9,6 +9,8 @@ from app.db.base import TenantModel
 
 class ModelProvider(TenantModel):
     __tablename__ = "zr_model_provider"
+    # 与迁移 1a2b3c4d5e6f 已建的唯一约束对齐（同租户内 provider 名唯一）
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_zr_model_provider_tenant_name"),)
 
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     provider_type: Mapped[str] = mapped_column(String(32), nullable=False)

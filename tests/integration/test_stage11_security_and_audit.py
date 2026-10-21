@@ -188,3 +188,53 @@ def test_task_request_summary_redacts_secrets():
     assert "authorization" not in sanitized.lower()
     assert "[REDACTED]" in sanitized
     assert len(sanitized) <= 2000
+
+
+@pytest.mark.asyncio
+async def test_file_delete_removes_stored_object():
+    """删除文件必须同步清理对象存储，不能只把记录置为 DELETED。"""
+    from uuid import UUID
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client, "owner", "pass")
+        headers = {"Authorization": f"Bearer {token}"}
+        uploaded = await client.post(
+            "/api/z-torque/files",
+            headers=headers,
+            files={"upload": ("hello.txt", io.BytesIO(b"hello"), "text/plain")},
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["data"]["id"]
+        with SessionLocal() as db:
+            storage_key = db.get(File, UUID(file_id)).storage_key
+
+        store = app.state.port_registry.get("object.store")
+        assert store.local_path(storage_key).exists()
+
+        removed = await client.delete(f"/api/z-torque/files/{file_id}", headers=headers)
+        assert removed.status_code == 200, removed.text
+        assert not store.local_path(storage_key).exists()
+
+        status = await client.get(f"/api/z-torque/files/{file_id}/status", headers=headers)
+        assert status.json()["data"]["status"] == "DELETED"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_rejects_invalid_request_with_4xx():
+    """流式接口的非法请求必须是 4xx，不能退化成 500。"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client, "owner", "pass")
+        headers = {"Authorization": f"Bearer {token}"}
+
+        not_stream = await client.post("/api/z-torque/chat/stream", headers=headers, json={"message": "hi", "stream": False})
+        assert not_stream.status_code == 400, not_stream.text
+
+        missing_conversation = await client.post("/api/z-torque/chat/stream", headers=headers, json={"message": "hi", "stream": True})
+        assert missing_conversation.status_code == 400, missing_conversation.text
+
+        unknown_conversation = await client.post(
+            "/api/z-torque/chat/stream",
+            headers=headers,
+            json={"message": "hi", "stream": True, "conversation_id": str(uuid4())},
+        )
+        assert unknown_conversation.status_code == 404, unknown_conversation.text

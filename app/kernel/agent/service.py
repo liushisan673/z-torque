@@ -97,8 +97,10 @@ def set_default_parent(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id:
         raise ApiError("AI_FORBIDDEN", "only official agents can be the default parent", 403)
     if agent.status != "ACTIVE" or agent.current_published_version_id is None:
         raise ApiError("AI_REQUEST_INVALID", "default parent requires an active published agent", 422)
-    db.query(Agent).filter(Agent.is_default_parent.is_(True), Agent.id != agent.id).update(
-        {Agent.is_default_parent: False}, synchronize_session=False
+    # 仅在本租户内互斥（契约 §1：任何数据访问必须带租户条件）；
+    # 缺少 tenant_id 会把其他租户的默认父 Agent 一并置 false。
+    db.query(Agent).filter(Agent.tenant_id == tenant_id, Agent.is_default_parent.is_(True), Agent.id != agent.id).update(
+        {Agent.is_default_parent: False}, synchronize_session="fetch"
     )
     agent.is_default_parent = True
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="DEFAULT_PARENT_SET", resource_type="AGENT", resource_id=agent.id, summary="default parent set")

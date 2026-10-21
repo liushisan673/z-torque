@@ -13,17 +13,22 @@ from typing import Annotated
 from pydantic import AfterValidator
 
 
-def _ensure_utc(value: datetime) -> datetime:
+def ensure_utc(value: datetime) -> datetime:
+    """把 naive（数据库读出的 UTC）或带时区时间统一为 aware UTC，避免相减 TypeError。"""
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
 
+# 兼容历史私有名
+_ensure_utc = ensure_utc
+
+
 def iso_utc(dt: datetime | None) -> str | None:
     if dt is None:
         return None
-    return _ensure_utc(dt).isoformat()
+    return ensure_utc(dt).isoformat()
 
 
 # pydantic v2 字段类型：naive 视为 UTC；序列化输出带 +00:00 后缀
-UTCDatetime = Annotated[datetime, AfterValidator(_ensure_utc)]
+UTCDatetime = Annotated[datetime, AfterValidator(ensure_utc)]

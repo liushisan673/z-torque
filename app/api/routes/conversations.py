@@ -88,6 +88,7 @@ async def memory(conversation_id: UUID, request: Request, user: User = Depends(g
     provider = request.app.state.port_registry.get("memory.short")
     if should_summarize_for_idle(conversation) and getattr(request.app.state, "model_gateway", None) is not None:
         await provider.summarize(db, conversation=conversation, user_id=user.id, trace_id=request.state.trace_id, model_gateway=request.app.state.model_gateway)
+        db.commit()
     item = provider.active_memory(db, tenant_id=user.tenant_id, user_id=user.id, agent_id=conversation.agent_id, conversation_id=conversation.id)
     return success_response(request, {"summary": item.summary, "source_start": item.source_start, "source_end": item.source_end, "updated_at": iso_utc(item.updated_at)} if item else None)
 
@@ -99,4 +100,5 @@ async def summarize(conversation_id: UUID, request: Request, user: User = Depend
     if gateway is None:
         raise ApiError("AI_MODEL_NOT_AVAILABLE", "model gateway is unavailable", 503)
     item = await request.app.state.port_registry.get("memory.short").summarize(db, conversation=conversation, user_id=user.id, trace_id=request.state.trace_id, model_gateway=gateway)
+    db.commit()
     return success_response(request, {"summary": item.summary, "source_start": item.source_start, "source_end": item.source_end, "updated_at": iso_utc(item.updated_at)})

@@ -4,6 +4,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ApiRequestError, request, uploadFile } from "../services/api";
 import { errorText } from "../services/errorText";
+import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import { openGetStream, openPostStream } from "../services/sse";
 import type { Agent, ChatResponse, Confirmation, Conversation, FileContent, FileMetadata, FileStatus, Message, Task, TaskEvent } from "../types";
 import { StatusTag, EmptyState, Alert } from "../components/ui";
@@ -37,6 +38,11 @@ const STARTER_PROMPTS = [
 
 // 长会话渐进渲染：一次只上屏最近 RENDER_STEP 条（Markdown 渲染开销大），更早的消息按需向前加载
 const RENDER_STEP = 50;
+
+// 选中记忆：跳转页面后返回时恢复上次会话与智能体（sessionStorage 按标签页隔离）。
+// 会话记忆为空串表示"上次停留在新对话"，返回时保持空白而非自动选中第一个会话。
+const CONV_KEY = "zt.chat.conversationId";
+const AGENT_KEY = "zt.chat.agentId";
 
 export function ChatPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -75,6 +81,13 @@ export function ChatPage() {
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [taskHistoryOpen, setTaskHistoryOpen] = useState(false);
   const [taskHistory, setTaskHistory] = useState<Task[]>([]);
+
+  // 任务级错误文案中文化（历史数据 error_message 为英文，前端统一映射展示）
+  function taskErrorText(message: string, code: string | null): string {
+    if (code === "AI_TASK_CANCELLED") return "任务已按用户要求取消";
+    if (code === "AI_CONFIRMATION_REJECTED") return "用户拒绝工具执行，任务终止";
+    return message || code || "任务执行失败";
+  }
 
   const [task, setTask] = useState<Task | null>(null);
   const [steps, setSteps] = useState<TaskStep[]>([]);
@@ -143,12 +156,20 @@ export function ChatPage() {
       setAgents(a);
       setConversations(c);
       const usable = a.filter((x) => x.current_published_version_id);
-      const def = usable.find((x) => x.is_default_parent) ?? usable[0];
+      // 智能体恢复：上次选中的仍在可用列表则优先，否则回退默认父智能体 / 第一个
+      const rememberedAgentId = readSelectedId(AGENT_KEY);
+      const rememberedAgent = rememberedAgentId ? usable.find((x) => x.id === rememberedAgentId) : null;
+      const def = rememberedAgent ?? usable.find((x) => x.is_default_parent) ?? usable[0];
       if (def && !agentId) setAgentId(def.id);
-      // 默认展示第一个会话，避免进入页面主区空白（仅首次生效，不干扰切智能体的新对话）
+      // 会话恢复：跳转回来时优先回到上次会话；记忆为空串表示上次停留在新对话（保持空白）；
+      // 从未有记录或记忆会话已不存在（删除/归档）则默认展示第一个，避免主区空白
       if (!autoSelectedRef.current && c.length > 0 && !conversationId) {
         autoSelectedRef.current = true;
-        selectConversation(c[0]);
+        const remembered = readSelectedId(CONV_KEY);
+        if (remembered !== "") {
+          const target = (remembered && c.find((x) => x.id === remembered)) || c[0];
+          selectConversation(target);
+        }
       }
     } catch (err) {
       setError(errorText(err, "加载失败"));
@@ -403,6 +424,9 @@ export function ChatPage() {
     stopStream();
     setConversationId(c.id);
     setAgentId(c.agent_id);
+    // 选中记忆：跳转后返回恢复上次会话与对应智能体
+    writeSelectedId(CONV_KEY, c.id);
+    writeSelectedId(AGENT_KEY, c.agent_id);
     conversationIdRef.current = c.id;
     setTask(null);
     setSteps([]);
@@ -569,6 +593,9 @@ export function ChatPage() {
   function applyAgentSwitch(nextId: string) {
     setAgentId(nextId);
     setConversationId(null);
+    // 选中记忆：记住切到的智能体；会话记忆记为空串（新对话态），返回时保持空白
+    writeSelectedId(AGENT_KEY, nextId);
+    writeSelectedId(CONV_KEY, "");
     setMessages([]);
     setTask(null);
     setAttachments([]);
@@ -627,6 +654,12 @@ export function ChatPage() {
     if (runningId) {
       try {
         await request(`/api/z-torque/tasks/${runningId}/cancel`, { method: "POST" });
+        // 取消请求已被后端受理（同步收敛）：立即收起执行块并延迟拉取消息——
+        // 后端已写入"任务已取消"提示气泡；不依赖 SSE 事件时序，实时反馈有保障
+        setActiveRun((prev) => (prev?.taskId === runningId ? null : prev));
+        window.setTimeout(() => {
+          void loadMessages(conversationIdRef.current ?? conversationId ?? "", { quiet: true });
+        }, 600);
       } catch (err) {
         setError(errorText(err, "取消失败"));
       }
@@ -725,6 +758,14 @@ export function ChatPage() {
         if (TERMINAL.has(toState)) {
           setWaitingConfirm(false);
           applyRun((prev) => ({ ...prev, waiting: false }));
+        }
+        // 取消/拒绝收尾：按事件类型触发（后端事件流不带 to_state，不能用终态状态判断）。
+        // 与完整回复一致——执行块收起，刷新消息展示后端写入的提示气泡（带「查看执行过程」入口）
+        if (eventType === "TASK_CANCELLED" || eventType === "TASK_APPROVAL_REJECTED") {
+          setWaitingConfirm(false);
+          applyRun((prev) => ({ ...prev, waiting: false, status: "CANCELLED" }));
+          setActiveRun((prev) => (prev?.taskId === taskId ? null : prev));
+          void loadMessages(options?.convId ?? conversationId ?? "", { quiet: true });
         }
       },
       onDone: () => {
@@ -1044,6 +1085,28 @@ export function ChatPage() {
 
   // 是否有正在推进的执行链路（内联执行块运行中且未被停止）
   const runLive = activeRun !== null && !TERMINAL.has(activeRun.status) && !activeRun.stopped;
+
+  // SSE 终端事件兜底：执行中状态下每 10s 核对任务真实状态。
+  // 后端重启 / 网络中断 / 快速取消竞态可能让终端事件（TASK_CANCELLED / FAILED）丢失，
+  // 不兜底会导致界面"执行中"永久悬挂（库内任务实际已是终态）。
+  useEffect(() => {
+    const taskId = activeRun?.taskId ?? (taskRunning && task ? task.id : null);
+    if (!taskId) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const t = await request<Task>(`/api/z-torque/tasks/${taskId}`);
+        if (!TERMINAL.has(t.status)) return;
+        setTask((prev) => (prev && prev.id === taskId ? { ...prev, status: t.status, error_code: t.error_code, error_message: t.error_message } : prev));
+        setActiveRun((prev) => (prev && prev.taskId === taskId ? { ...prev, status: t.status, waiting: false } : prev));
+        const convId = conversationIdRef.current;
+        if (convId) void loadMessages(convId); // 拉取取消/失败通知气泡
+      } catch {
+        /* 轮询失败忽略，下一周期重试 */
+      }
+    }, 10_000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRun?.taskId, task?.id, taskRunning, runLive]);
 
   // Agent meta 标签：默认父 Agent / 官方 / 我的
   const agentMetaTag = currentAgent
@@ -1414,7 +1477,7 @@ export function ChatPage() {
                       {activeRun && (
                         <RunBlock
                           activeRun={activeRun}
-                          taskError={task?.id === activeRun.taskId && task.error_message ? { message: task.error_message, code: task.error_code } : null}
+                          taskError={task?.id === activeRun.taskId && task.error_message ? { message: taskErrorText(task.error_message, task.error_code), code: task.error_code } : null}
                           onResolve={(approved) => void resolveConfirm(approved)}
                         />
                       )}
@@ -1554,7 +1617,7 @@ export function ChatPage() {
               )}
               {task.error_message && (
                 <div className="chat-error-box">
-                  {task.error_message}{task.error_code ? `（${task.error_code}）` : ""}
+                  {taskErrorText(task.error_message, task.error_code)}{task.error_code ? `（${task.error_code}）` : ""}
                 </div>
               )}
             </div>
@@ -1697,13 +1760,15 @@ export function ChatPage() {
           ) : (
             <table className="table">
               <thead>
-                <tr><th>状态</th><th>原因</th><th>关联任务</th><th>操作</th></tr>
+                <tr><th>状态</th><th>原因</th><th>发起人</th><th>关联任务</th><th>操作</th></tr>
               </thead>
               <tbody>
                 {confList.map((c) => (
                   <tr key={c.id}>
                     <td><StatusTag status={c.status} /></td>
                     <td className="text-sm">{c.reason ?? "—"}</td>
+                    {/* 管理员可见同租户他人确认单：优先展示用户名，缺失时回退短 ID */}
+                    <td className="text-sm">{c.requested_by_username || `${c.requested_by_user_id.slice(0, 8)}…`}</td>
                     <td className="text-sm">{c.task_id ? `${c.task_id.slice(0, 8)}…` : "—"}</td>
                     <td><button className="btn btn-ghost btn-sm" onClick={() => void openConfRecord(c.id)}>查看</button></td>
                   </tr>
@@ -1724,7 +1789,12 @@ export function ChatPage() {
             </div>
             <div className="text-sm"><span className="text-muted">原因：</span>{confRecord.reason ?? "—"}</div>
             <div className="text-sm"><span className="text-muted">关联任务：</span>{confRecord.task_id ?? "—"}</div>
-            <div className="text-sm"><span className="text-muted">发起人：</span>{confRecord.requested_by_user_id || "—"}</div>
+            <div className="text-sm">
+              <span className="text-muted">发起人：</span>
+              {confRecord.requested_by_username
+                ? `${confRecord.requested_by_username}（${confRecord.requested_by_user_id}）`
+                : confRecord.requested_by_user_id || "—"}
+            </div>
             <div className="text-sm"><span className="text-muted">确认人：</span>{confRecord.confirmed_by_user_id ?? "—"}</div>
             {confRecord.skill_version_id && <div className="text-sm"><span className="text-muted">技能版本：</span>{confRecord.skill_version_id}</div>}
             {confRecord.tool_version_id && <div className="text-sm"><span className="text-muted">工具版本：</span>{confRecord.tool_version_id}</div>}

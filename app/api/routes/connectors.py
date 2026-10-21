@@ -12,12 +12,14 @@ from app.core.responses import success_response, trace_id_from
 from app.core.servertime import iso_utc
 from app.db.session import get_db
 from app.kernel.audit.service import record_audit
-from app.kernel.skill_service import _snapshot_hash
+from app.kernel.skill_service import _snapshot_hash, normalize_tags
 from app.models import Connector, ConnectorTool, Tool, ToolVersion, User
 from app.schemas.connector import (
+    ConnectorCompositeToolRegisterRequest,
     ConnectorCreateRequest,
     ConnectorOpenapiImportRequest,
     ConnectorPatchRequest,
+    ConnectorToolReconfigureRequest,
     ConnectorToolRegisterRequest,
 )
 from app.security.permissions import require_permissions
@@ -62,9 +64,13 @@ async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = No
     gateway = getattr(request.app.state, "skill_gateway", None)
     if gateway is None:
         raise ApiError("AI_CONNECTOR_UNAVAILABLE", "skill gateway is unavailable", 503)
+    # 主机白名单经 policy.source Port 提供（P2-14 真实调用缝），缺失时退回配置
+    registry = getattr(request.app.state, "port_registry", None)
+    policy = registry.try_get("policy.source") if registry is not None else None
+    allowed_hosts = policy.mcp_allowed_hosts() if policy is not None else settings.mcp_allowed_hosts
     return await gateway.probe_mcp_http(
         endpoint,
-        allowed_hosts=settings.mcp_allowed_hosts,
+        allowed_hosts=allowed_hosts,
         timeout_seconds=max(min(timeout, MCP_PROBE_TIMEOUT_SECONDS), 1.0),
         max_response_bytes=settings.mcp_max_response_bytes,
         secret_ref=secret_ref,
@@ -146,8 +152,13 @@ async def _probe_rest(config: dict, secret_ref: str | None) -> dict:
         _p.hostname and _p.hostname.startswith("169.254.")
     ):
         from app.config import get_settings
+        from app.kernel.registry.active import try_port
+
         settings = get_settings()
-        allowed = {str(t).strip().lower() for t in (settings.connector_allowed_targets or [])}
+        # 目标白名单经 policy.source Port 提供（P2-14），缺失时退回配置
+        policy = try_port("policy.source")
+        targets = policy.connector_allowed_targets() if policy is not None else settings.connector_allowed_targets
+        allowed = {str(t).strip().lower() for t in (targets or [])}
         if not settings.app_debug and str(_p.hostname).lower() not in allowed:
             raise ApiError(
                 "AI_CONNECTOR_FORBIDDEN_HOST",
@@ -227,7 +238,7 @@ async def _probe_rest(config: dict, secret_ref: str | None) -> dict:
         origin = "中间代理" if proxy_hint else "远端服务"
         raise ApiError(
             "AI_CONNECTOR_UNAVAILABLE",
-            f"{origin}返回 {status}（{method_used} {parsed.netloc}"
+            f"{origin}返回 {status}（{method_used} {parsed.netloc}"  # pyright: ignore[reportImplicitStringConcatenation]
             f"；server={server[:60] or 'unknown'}"
             f"；{'已绕过代理' if bypass_proxy else '经环境代理'}）"
             + ("：该状态码来自代理而非目标服务，请检查本机 http_proxy 设置" if proxy_hint else ""),
@@ -542,56 +553,123 @@ async def discover_connector(connector_id: UUID, request: Request, user: ReadUse
     return success_response(request, {"connector_id": str(item.id), "tools": tools, "requires_approval": True})
 
 
-@router.post("/{connector_id}/tools/register", summary="注册连接器工具")
-async def register_connector_tool(connector_id: UUID, payload: ConnectorToolRegisterRequest, request: Request, user: ManageUser, db: DbSession):
+def _resolve_tool_register_config(connector: Connector, *, tool_type: str, payload_config: dict, sql_template: str | None, input_schema: dict | None, external_name: str | None, fallback_name: str) -> tuple[dict, str, bool, dict]:
+    """构造工具执行配置快照（注册与更新配置共用）；DB_SQL 注册期即校验 SQL。
+
+    返回 (config_snapshot, tool_type, is_write, input_schema)；is_write 仅 DB_SQL 有意义。
+    DB_SQL 的入参 Schema 自动补全：SQL 模板 {{参数}} 未声明时按 string 骨架补齐，
+    用户已声明的属性（类型/描述）原样保留——非专业用户不填参数也能被模型正确传参。
+    """
     from app.kernel.db_executor import validate_sql_statement
 
-    connector = get_owned(db, user, connector_id)
-    if connector.status != "ENABLED":
-        raise ApiError("AI_CONNECTOR_UNAVAILABLE", "connector is disabled", 503)
-    if payload.tool_type == "DB_SQL":
-        # DB 工具：必须注册在 DB 连接上；SQL 模板注册期即校验（单条语句 + 表白名单 + 参数声明）
+    if tool_type == "DB_SQL":
+        # DB 工具：必须注册在 DB 连接上；SQL 模板注册期即校验（单条语句 + 表白名单）
         if connector.connector_type != "DB":
             raise ApiError("AI_PARAM_INVALID", "DB_SQL 工具只能注册在数据库连接上", 400)
         allowed = sorted({str(t).strip() for t in (connector.config or {}).get("allowed_tables") or [] if str(t).strip()})
         if not allowed:
             raise ApiError("AI_REQUEST_INVALID", "请先完成数据库连接探测并保存允许的表（allowed_tables）", 400)
-        sql_template = (payload.sql_template or "").strip()
-        if not sql_template:
+        sql = (sql_template or "").strip()
+        if not sql:
             raise ApiError("AI_PARAM_INVALID", "SQL 模板不能为空", 400)
         driver = str((connector.config or {}).get("driver") or "postgresql").lower()
         try:
-            _sql, params, is_write = validate_sql_statement(sql_template, set(allowed), driver=driver, allow_write=True)
+            _sql, params, is_write = validate_sql_statement(sql, set(allowed), driver=driver, allow_write=True)
         except ValueError as exc:
             raise ApiError("AI_PARAM_INVALID", str(exc), 400)
-        declared = set((payload.input_schema or {}).get("properties") or {})
-        missing = [name for name in params if name not in declared]
-        if missing:
-            raise ApiError("AI_PARAM_INVALID", f"SQL 模板参数未在输入 Schema 中声明：{', '.join(missing)}", 400)
-        raw_max_rows = payload.config.get("max_rows")
+        raw_max_rows = (payload_config or {}).get("max_rows")
         max_rows = raw_max_rows if isinstance(raw_max_rows, int) and not isinstance(raw_max_rows, bool) else 100
-        config_snapshot = {"kind": "sql", "sql_template": sql_template, "allowed_tables": allowed, "max_rows": min(max(max_rows, 1), 1000), "write": is_write, "connector_id": str(connector.id)}
-        tool_type = "DB_SQL"
-    else:
-        config = {**connector.config, **payload.config, "connector_id": str(connector.id), "connector_type": connector.connector_type}
-        config["target_policy"] = connector.target_policy
-        if payload.external_name:
-            config["external_name"] = payload.external_name
-        # MCP 工具执行期按 config.tool_name 发起 tools/call；缺省取外部名，再退回注册名
-        if payload.tool_type == "MCP":
-            config["tool_name"] = payload.external_name or payload.name
-        config_snapshot = config
-        tool_type = payload.tool_type
-    tool = Tool(tenant_id=user.tenant_id, owner_user_id=user.id, name=payload.name, description=payload.description, tool_type=tool_type, source_type="CONNECTOR", status="ACTIVE", official=False)
+        snapshot = {"kind": "sql", "sql_template": sql, "allowed_tables": allowed, "max_rows": min(max(max_rows, 1), 1000), "write": is_write, "connector_id": str(connector.id)}
+        # 参数骨架自动补全：以 {{参数}} 为准，用户声明合并保留
+        declared = dict(input_schema) if isinstance(input_schema, dict) else {}
+        declared_props = dict(declared.get("properties")) if isinstance(declared.get("properties"), dict) else {}
+        declared_required = [str(r) for r in (declared.get("required") or [])] if isinstance(declared.get("required"), list) else []
+        for name in params:
+            if str(name) not in declared_props:
+                declared_props[str(name)] = {"type": "string", "description": "SQL 模板参数"}
+        required = list(dict.fromkeys(declared_required + [str(p) for p in params]))
+        filled_schema = {**declared, "type": "object", "properties": declared_props, "required": required}
+        return snapshot, "DB_SQL", is_write, filled_schema
+    config = {**connector.config, **(payload_config or {}), "connector_id": str(connector.id), "connector_type": connector.connector_type}
+    config["target_policy"] = connector.target_policy
+    if external_name:
+        config["external_name"] = external_name
+    # MCP 工具执行期按 config.tool_name 发起 tools/call；缺省取外部名，再退回注册名
+    if tool_type == "MCP":
+        config["tool_name"] = external_name or fallback_name
+    return config, tool_type, False, dict(input_schema or {})
+
+
+@router.post("/{connector_id}/tools/register", summary="注册连接器工具")
+async def register_connector_tool(connector_id: UUID, payload: ConnectorToolRegisterRequest, request: Request, user: ManageUser, db: DbSession):
+    connector = get_owned(db, user, connector_id)
+    if connector.status != "ENABLED":
+        raise ApiError("AI_CONNECTOR_UNAVAILABLE", "connector is disabled", 503)
+    config_snapshot, tool_type, is_write, filled_schema = _resolve_tool_register_config(
+        connector, tool_type=payload.tool_type, payload_config=payload.config, sql_template=payload.sql_template,
+        input_schema=payload.input_schema, external_name=payload.external_name, fallback_name=payload.name,
+    )
+    tool = Tool(tenant_id=user.tenant_id, owner_user_id=user.id, name=payload.name, description=payload.description, tool_type=tool_type, source_type="CONNECTOR", status="ACTIVE", official=False, tags=normalize_tags(payload.tags), is_business_tool=payload.is_business_tool)
     db.add(tool); db.flush()
     # 写入类 SQL 语句（INSERT/UPDATE/DELETE）强制人工审批：执行前必须经确认暂停/重放流程
-    version = ToolVersion(tenant_id=user.tenant_id, tool_id=tool.id, version_number=1, status="PUBLISHED", config_snapshot=config_snapshot, input_schema=payload.input_schema, output_schema=payload.output_schema, required_permissions=payload.required_permissions, requires_confirmation=is_write if payload.tool_type == "DB_SQL" else False, snapshot_hash=_snapshot_hash(config_snapshot))
+    version = ToolVersion(tenant_id=user.tenant_id, tool_id=tool.id, version_number=1, status="PUBLISHED", config_snapshot=config_snapshot, input_schema=filled_schema, output_schema=payload.output_schema, required_permissions=payload.required_permissions, requires_confirmation=is_write if tool_type == "DB_SQL" else False, snapshot_hash=_snapshot_hash(config_snapshot))
     db.add(version); db.flush(); tool.current_published_version_id = version.id
     link = ConnectorTool(tenant_id=user.tenant_id, connector_id=connector.id, tool_id=tool.id, external_name=payload.external_name, approved=True)
     db.add(link)
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_TOOL_REGISTERED", resource_type="CONNECTOR", resource_id=connector.id, summary="connector tool registered", detail={"tool_id": str(tool.id), "tool_version_id": str(version.id)})
     db.commit()
     return success_response(request, {"tool_id": str(tool.id), "tool_version_id": str(version.id), "connector_id": str(connector.id)})
+
+
+def _get_reconfigurable_tool(db: Session, user: User, connector: Connector, tool_id: UUID, *, composite: bool) -> Tool:
+    """更新配置的公共前置校验：连接器下、所有者、非官方、ACTIVE、类型匹配。"""
+    tool = db.get(Tool, tool_id)
+    if not tool or tool.tenant_id != user.tenant_id:
+        raise ApiError("AI_RESOURCE_NOT_FOUND", "tool not found", 404)
+    if tool.official:
+        raise ApiError("AI_RESOURCE_FORBIDDEN", "official resources cannot be modified", 403)
+    if tool.status != "ACTIVE":
+        raise ApiError("AI_REQUEST_INVALID", "archived tool cannot be modified", 409)
+    if tool.owner_user_id != user.id:
+        raise ApiError("AI_RESOURCE_FORBIDDEN", "only the tool owner can reconfigure it", 403)
+    link = db.scalar(select(ConnectorTool).where(ConnectorTool.connector_id == connector.id, ConnectorTool.tool_id == tool.id, ConnectorTool.tenant_id == user.tenant_id))
+    if link is None:
+        raise ApiError("AI_PARAM_INVALID", "tool does not belong to this connector", 400)
+    if composite != (tool.tool_type == "COMPOSITE"):
+        raise ApiError("AI_PARAM_INVALID", "tool type does not match the reconfigure endpoint", 400)
+    return tool
+
+
+def _next_version_number(db: Session, tool_id: UUID) -> int:
+    return (db.scalar(select(func.max(ToolVersion.version_number)).where(ToolVersion.tool_id == tool_id)) or 0) + 1
+
+
+@router.post("/{connector_id}/tools/{tool_id}/reconfigure", summary="更新工具配置（生成新发布版本）")
+async def reconfigure_connector_tool(connector_id: UUID, tool_id: UUID, payload: ConnectorToolReconfigureRequest, request: Request, user: ManageUser, db: DbSession):
+    """不改历史：以新配置生成 v(n+1) 并发布，既有 Skill 绑定仍 pin 旧版本，可在 Skill 草稿中升级。"""
+    connector = get_owned(db, user, connector_id)
+    if connector.status != "ENABLED":
+        raise ApiError("AI_CONNECTOR_UNAVAILABLE", "connector is disabled", 503)
+    tool = _get_reconfigurable_tool(db, user, connector, tool_id, composite=False)
+    config_snapshot, tool_type, is_write, filled_schema = _resolve_tool_register_config(
+        connector, tool_type=tool.tool_type, payload_config=payload.config, sql_template=payload.sql_template,
+        input_schema=payload.input_schema, external_name=payload.external_name, fallback_name=tool.name,
+    )
+    link = db.scalar(select(ConnectorTool).where(ConnectorTool.connector_id == connector.id, ConnectorTool.tool_id == tool.id, ConnectorTool.tenant_id == user.tenant_id))
+    if link and payload.external_name is not None:
+        link.external_name = payload.external_name.strip() or None
+    number = _next_version_number(db, tool.id)
+    version = ToolVersion(
+        tenant_id=user.tenant_id, tool_id=tool.id, version_number=number, status="PUBLISHED",
+        config_snapshot=config_snapshot, input_schema=filled_schema, output_schema=payload.output_schema,
+        required_permissions=payload.required_permissions,
+        requires_confirmation=is_write if tool_type == "DB_SQL" else bool(payload.requires_confirmation),
+        snapshot_hash=_snapshot_hash(config_snapshot),
+    )
+    db.add(version); db.flush(); tool.current_published_version_id = version.id
+    record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_TOOL_RECONFIGURED", resource_type="TOOL", resource_id=tool.id, summary="connector tool reconfigured", detail={"tool_id": str(tool.id), "tool_version_id": str(version.id), "version_number": number})
+    db.commit()
+    return success_response(request, {"tool_id": str(tool.id), "tool_version_id": str(version.id), "version_number": number, "connector_id": str(connector.id)})
 
 
 @router.get("/{connector_id}/tools", summary="获取连接器工具列表")
@@ -603,6 +681,35 @@ async def connector_tools(connector_id: UUID, request: Request, user: ReadUser, 
     if tool_ids:
         rows = db.scalars(select(Tool).where(Tool.id.in_(tool_ids))).all()
         tool_map = {t.id: t for t in rows}
+    # 业务封装登记需要精确 pin 已发布 ToolVersion：提供默认发布版本供前端选择
+    published_version: dict[UUID, UUID] = {}
+    published_number: dict[UUID, int] = {}
+    published_schema: dict[UUID, dict] = {}
+    if tool_ids:
+        for version in db.scalars(
+            select(ToolVersion)
+            .where(ToolVersion.tool_id.in_(tool_ids), ToolVersion.tenant_id == user.tenant_id, ToolVersion.status == "PUBLISHED")
+            .order_by(ToolVersion.version_number)
+        ).all():
+            published_version[version.tool_id] = version.id
+            published_number[version.id] = version.version_number
+            published_schema[version.id] = version.input_schema if isinstance(version.input_schema, dict) else {}
+        for tool in tool_map.values():
+            if tool.current_published_version_id and tool.current_published_version_id in published_version.values():
+                published_version[tool.id] = tool.current_published_version_id
+
+    def _required_params(tool_id: UUID) -> list[dict]:
+        version_id = published_version.get(tool_id)
+        schema = published_schema.get(version_id) if version_id else {}
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        params = []
+        for name in required:
+            name = str(name)
+            if name in props:
+                prop = props[name] if isinstance(props[name], dict) else {}
+                params.append({"name": name, "type": str(prop.get("type") or "string"), "description": prop.get("description")})
+        return params
     return success_response(request, [
         {
             "id": str(x.tool_id),
@@ -610,11 +717,166 @@ async def connector_tools(connector_id: UUID, request: Request, user: ReadUser, 
             "approved": x.approved,
             "name": tool_map[x.tool_id].name if x.tool_id in tool_map else None,
             "tool_type": tool_map[x.tool_id].tool_type if x.tool_id in tool_map else None,
+            "status": tool_map[x.tool_id].status if x.tool_id in tool_map else None,
             "description": tool_map[x.tool_id].description if x.tool_id in tool_map else None,
+            "tags": list(tool_map[x.tool_id].tags or []) if x.tool_id in tool_map else [],
+            "is_business_tool": bool(tool_map[x.tool_id].is_business_tool) if x.tool_id in tool_map else False,
+            "published_version_id": str(published_version[x.tool_id]) if x.tool_id in published_version else None,
+            "published_version_number": published_number.get(published_version[x.tool_id]) if x.tool_id in published_version else None,
+            "required_params": _required_params(x.tool_id) if x.tool_id in published_version else [],
             "registered_at": iso_utc(x.created_at),
         }
         for x in links
     ])
+
+
+def _build_composite_steps(db: Session, *, tenant_id: UUID, connector: Connector, steps_payload: list, linked_tool_ids: set[UUID]) -> tuple[list[dict], bool, dict]:
+    """构造组合工具步骤（登记与更新共用）；返回 (steps, child_requires_confirmation, derived_input_props)。
+
+    非专业用户常把步骤参数留空：自动把子工具必填参数映射为 $input.<name> 透传，
+    并派生组合工具的入参 Schema，让模型知道要传什么。
+    """
+    seen_keys: set[str] = set()
+    steps: list[dict] = []
+    child_requires_confirmation = False
+    derived_input_props: dict[str, dict] = {}
+    for step in steps_payload:
+        key = step.key.strip()
+        if key in seen_keys:
+            raise ApiError("AI_PARAM_INVALID", f"组合步骤 key 重复：{key}", 400)
+        seen_keys.add(key)
+        version = db.get(ToolVersion, step.tool_version_id)
+        if not version or version.tenant_id != tenant_id or version.status != "PUBLISHED":
+            raise ApiError("AI_TOOL_VERSION_NOT_FOUND", f"子工具版本不存在或未发布：{step.tool_version_id}", 404)
+        if version.tool_id not in linked_tool_ids:
+            raise ApiError("AI_PARAM_INVALID", f"子工具不属于当前连接器：{step.tool_version_id}", 400)
+        child_tool = db.get(Tool, version.tool_id)
+        if child_tool is None or child_tool.tool_type == "COMPOSITE":
+            raise ApiError("AI_PARAM_INVALID", "业务封装工具不允许嵌套组合工具", 400)
+        # 任一子步骤需审批时，组合工具整体必须审批（执行期只挂一个 checkpoint）
+        child_requires_confirmation = child_requires_confirmation or bool(version.requires_confirmation)
+        # 入参 Schema 派生与参数填充解耦：只要用户未提供组合 Schema，
+        # 所有子步骤的必填参数都进入派生（arguments 可能已被前端预填，不能因此跳过）
+        child_schema = version.input_schema if isinstance(version.input_schema, dict) else {}
+        child_props = child_schema.get("properties") if isinstance(child_schema.get("properties"), dict) else {}
+        child_required = child_schema.get("required") if isinstance(child_schema.get("required"), list) else []
+        for name in child_required:
+            name = str(name)
+            if name in child_props and name not in derived_input_props:
+                prop = dict(child_props.get(name) or {})
+                prop.setdefault("type", "string")
+                derived_input_props[name] = prop
+        # 参数自动填充仅在留空时生效；前端预填/用户显式配置原样保留
+        arguments = step.arguments or {}
+        if not arguments:
+            for name in child_required:
+                name = str(name)
+                if name in child_props:
+                    arguments[name] = f"$input.{name}"
+        steps.append({
+            "key": key,
+            "tool_version_id": str(version.id),
+            "tool_name": child_tool.name,
+            "arguments": arguments,
+        })
+    return steps, child_requires_confirmation, derived_input_props
+
+
+@router.post("/{connector_id}/composite-tools", summary="登记业务封装工具")
+async def register_composite_tool(connector_id: UUID, payload: ConnectorCompositeToolRegisterRequest, request: Request, user: ManageUser, db: DbSession):
+    """把同一连接器下的多个已发布工具登记为一个线性组合 Tool。
+
+    安全边界：仅支持线性、无分支、深度 1；子步骤必须精确 pin 已发布 ToolVersion，
+    且执行期仍经过 SkillGateway 的权限、审批、审计与熔断。
+    """
+    connector = get_owned(db, user, connector_id)
+    linked_tool_ids = {
+        link.tool_id
+        for link in db.scalars(select(ConnectorTool).where(ConnectorTool.connector_id == connector.id, ConnectorTool.tenant_id == user.tenant_id)).all()
+    }
+    steps, child_requires_confirmation, derived_input_props = _build_composite_steps(
+        db, tenant_id=user.tenant_id, connector=connector, steps_payload=payload.steps, linked_tool_ids=linked_tool_ids,
+    )
+    config_snapshot = {
+        "kind": "composite",
+        "connector_id": str(connector.id),
+        "connector_type": connector.connector_type,
+        "steps": steps,
+        "output_path": payload.output_path,
+        "max_steps": 10,
+    }
+    tool = Tool(
+        tenant_id=user.tenant_id, owner_user_id=user.id, name=payload.name, description=payload.description,
+        tool_type="COMPOSITE", source_type="CONNECTOR", status="ACTIVE", official=False,
+        tags=normalize_tags(payload.tags), is_business_tool=True,
+    )
+    db.add(tool); db.flush()
+    # 用户未提供入参 Schema 时，用派生的必填参数兜底（模型据此知道组合工具要传什么）
+    input_schema = payload.input_schema or (
+        {"type": "object", "properties": derived_input_props, "required": list(derived_input_props)}
+        if derived_input_props
+        else {}
+    )
+    version = ToolVersion(
+        tenant_id=user.tenant_id, tool_id=tool.id, version_number=1, status="PUBLISHED",
+        config_snapshot=config_snapshot, input_schema=input_schema, output_schema=payload.output_schema or {},
+        required_permissions=[], requires_confirmation=payload.requires_confirmation or child_requires_confirmation,
+        snapshot_hash=_snapshot_hash(config_snapshot),
+    )
+    db.add(version); db.flush(); tool.current_published_version_id = version.id
+    db.add(ConnectorTool(tenant_id=user.tenant_id, connector_id=connector.id, tool_id=tool.id, external_name=payload.name, approved=True))
+    record_audit(
+        db, tenant_id=user.tenant_id, actor_user_id=user.id,
+        action="CONNECTOR_COMPOSITE_TOOL_REGISTERED", resource_type="CONNECTOR", resource_id=connector.id,
+        summary="composite tool registered", detail={"tool_id": str(tool.id), "tool_version_id": str(version.id), "steps": len(steps)},
+    )
+    db.commit()
+    return success_response(request, {"tool_id": str(tool.id), "tool_version_id": str(version.id), "connector_id": str(connector.id)})
+
+
+@router.post("/{connector_id}/composite-tools/{tool_id}/reconfigure", summary="更新业务封装工具（生成新发布版本）")
+async def reconfigure_composite_tool(connector_id: UUID, tool_id: UUID, payload: ConnectorCompositeToolRegisterRequest, request: Request, user: ManageUser, db: DbSession):
+    """更新组合工具的步骤/参数/输出选取：生成 v(n+1) 并发布，不改历史版本与既有绑定。
+
+    名称、说明、标签不在本接口范围（分别走技能元数据 PATCH / 编辑标签）。
+    """
+    connector = get_owned(db, user, connector_id)
+    tool = _get_reconfigurable_tool(db, user, connector, tool_id, composite=True)
+    linked_tool_ids = {
+        link.tool_id
+        for link in db.scalars(select(ConnectorTool).where(ConnectorTool.connector_id == connector.id, ConnectorTool.tenant_id == user.tenant_id)).all()
+    }
+    steps, child_requires_confirmation, derived_input_props = _build_composite_steps(
+        db, tenant_id=user.tenant_id, connector=connector, steps_payload=payload.steps, linked_tool_ids=linked_tool_ids,
+    )
+    config_snapshot = {
+        "kind": "composite",
+        "connector_id": str(connector.id),
+        "connector_type": connector.connector_type,
+        "steps": steps,
+        "output_path": payload.output_path,
+        "max_steps": 10,
+    }
+    input_schema = payload.input_schema or (
+        {"type": "object", "properties": derived_input_props, "required": list(derived_input_props)}
+        if derived_input_props
+        else {}
+    )
+    number = _next_version_number(db, tool.id)
+    version = ToolVersion(
+        tenant_id=user.tenant_id, tool_id=tool.id, version_number=number, status="PUBLISHED",
+        config_snapshot=config_snapshot, input_schema=input_schema, output_schema=payload.output_schema or {},
+        required_permissions=[], requires_confirmation=payload.requires_confirmation or child_requires_confirmation,
+        snapshot_hash=_snapshot_hash(config_snapshot),
+    )
+    db.add(version); db.flush(); tool.current_published_version_id = version.id
+    record_audit(
+        db, tenant_id=user.tenant_id, actor_user_id=user.id,
+        action="CONNECTOR_COMPOSITE_TOOL_RECONFIGURED", resource_type="TOOL", resource_id=tool.id,
+        summary="composite tool reconfigured", detail={"tool_id": str(tool.id), "tool_version_id": str(version.id), "version_number": number, "steps": len(steps)},
+    )
+    db.commit()
+    return success_response(request, {"tool_id": str(tool.id), "tool_version_id": str(version.id), "version_number": number, "connector_id": str(connector.id)})
 
 
 # ---- OpenAPI 批量导入（仅 REST） ----
@@ -822,6 +1084,7 @@ async def import_openapi_tools(connector_id: UUID, payload: ConnectorOpenapiImpo
                 tenant_id=user.tenant_id, owner_user_id=user.id,
                 name=tool_name, description=description,
                 tool_type="HTTP", source_type="CONNECTOR", status="ACTIVE", official=False,
+                tags=normalize_tags([str(tag) for tag in tags]), is_business_tool=False,
             )
             db.add(tool); db.flush()
             version = ToolVersion(

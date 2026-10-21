@@ -120,10 +120,17 @@
   --skill-file-icon-fg: var(--warning);
   --skill-code-bg: #0f172a;
   --skill-code-fg: #e2e8f0;
-  --skill-tool-op-col-w: 88px;
+  --skill-tool-op-col-w: 156px;
   --skill-picker-gap: 8px;
   --skill-picker-max-h: 320px;
   --skill-picker-item-pad: 10px 12px;
+  --skill-bind-query-min-w: 220px;
+  --skill-bind-select-w: 170px;
+  --skill-bind-list-max-h: 400px;
+  --skill-bind-panel-w: 300px;
+  --skill-bind-gap: 16px;
+  --skill-bind-panel-bg: var(--bg-elevated);
+  --skill-bind-limit-fg: var(--success);
   --skill-md-preview-bg: color-mix(in srgb, var(--bg-elevated) 60%, var(--bg));
   --skill-search-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236b7484' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='M21 21l-4.35-4.35'/%3E%3C/svg%3E");
   --skill-focus-ring: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
@@ -1169,7 +1176,9 @@ body {
   color: var(--text-muted);
   line-height: 1.5;
   display: -webkit-box;
+  line-clamp: 2;
   -webkit-line-clamp: 2;
+  
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -2497,6 +2506,7 @@ body {
   font-size: 12px;
   color: var(--text-muted);
   display: -webkit-box;
+   line-clamp: 2;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
@@ -2832,6 +2842,23 @@ body {
   line-height: 1.6;
 }
 
+/* 技能选择器（编辑草稿内，按技能分组单选） */
+.agent-skill-picker {
+  margin-top: 12px;
+}
+.agent-skill-picker .skill-bind-toolbar {
+  align-items: center;
+}
+.agent-skill-picker .skill-bind-limit {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.agent-skill-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
 /* ---- 规则编辑 ---- */
 .agent-rules-editor {
   border: 1px solid var(--border-strong);
@@ -3061,6 +3088,7 @@ body {
   font-size: 12px;
   color: var(--text-muted);
   display: -webkit-box;
+  line-clamp: 2;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
@@ -3575,6 +3603,192 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+/* ---- 绑定选择器（分组 / 多选 / 已选区） ---- */
+.skill-bind-toolbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.skill-bind-toolbar .input:first-child {
+  flex: 1;
+  min-width: var(--skill-bind-query-min-w);
+}
+.skill-bind-toolbar select.input {
+  width: var(--skill-bind-select-w);
+  flex-shrink: 0;
+}
+.skill-bind-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--skill-bind-panel-w);
+  gap: var(--skill-bind-gap);
+  align-items: start;
+}
+.skill-bind-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--skill-bind-gap);
+  max-height: var(--skill-bind-list-max-h);
+  overflow-y: auto;
+  padding-right: 2px;
+}
+.skill-bind-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--skill-picker-gap);
+}
+.skill-bind-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding-bottom: 2px;
+}
+.skill-bind-picked {
+  display: flex;
+  flex-direction: column;
+  gap: var(--skill-picker-gap);
+  max-height: var(--skill-bind-list-max-h);
+  overflow-y: auto;
+  padding: var(--skill-card-pad);
+  border: 1px solid var(--border);
+  border-radius: var(--skill-card-radius);
+  background: var(--skill-bind-panel-bg);
+}
+.skill-bind-pick-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: var(--skill-picker-item-pad);
+  border: 1px solid var(--border);
+  border-radius: var(--skill-card-radius);
+  background: var(--bg-elevated);
+}
+.skill-bind-pick-card .pick-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.skill-bind-pick-card .pick-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.skill-bind-pick-card .pick-head .t-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-bind-pick-card .pick-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.skill-bind-pick-card .pick-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.skill-bind-count {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+  align-self: center;
+}
+.skill-bind-limit {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--skill-bind-limit-fg);
+}
+.skill-bind-limit.danger {
+  color: var(--danger);
+}
+.skill-tool-picker-item .t-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.skill-tool-picker-item .t-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.skill-tool-picker-item .t-params {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-tool-picker-item .t-params-list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.skill-tool-picker-item .t-params-list .skill-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+.skill-tool-picker-item .t-more {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* 已绑定工具表：顺序与标签 */
+.skill-tool-table .skill-tool-order-col {
+  width: 48px;
+  text-align: center;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.skill-tool-table .tool-name .skill-tag {
+  margin-left: 6px;
+}
+.skill-tool-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+}
+.skill-tool-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.skill-tool-upgrade {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+}
+.skill-tool-op-col .btn + .btn {
+  margin-left: 4px;
 }
 
 /* ---- 告警条 ---- */
@@ -4359,6 +4573,7 @@ body {
   color: var(--text-muted);
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   margin-bottom: 8px;
@@ -4630,6 +4845,87 @@ body {
 }
 .connector-op-table tr:last-child td { border-bottom: none; }
 .connector-op-table .op-name { font-weight: 500; color: var(--text); }
+.connector-op-table .op-name .skill-tag { margin-left: 6px; }
+.connector-tool-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.connector-op-table td.connector-tool-op {
+  white-space: nowrap;
+  text-align: right;
+}
+.connector-op-table td.connector-tool-op .btn + .btn {
+  margin-left: 4px;
+}
+.connector-tool-ver {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.connector-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.connector-check input[type="checkbox"] {
+  accent-color: var(--primary);
+}
+.connector-composite-step {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: var(--skill-card-pad);
+  border: 1px solid var(--border);
+  border-radius: var(--skill-card-radius);
+  margin-bottom: 8px;
+}
+.connector-composite-step .step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.connector-composite-step .step-head .input {
+  width: 120px;
+  flex-shrink: 0;
+}
+.connector-composite-step .step-head .select {
+  flex: 1;
+  min-width: 0;
+}
+.connector-composite-step .step-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.connector-step-params {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.connector-step-params .skill-tag {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+.connector-step-params-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+}
 
 /* ---- 数据库表清单勾选网格（健康检查页签） ---- */
 .connector-table-grid {

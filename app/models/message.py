@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Column, ForeignKey, JSON, String, Table, Text, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, JSON, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import TenantModel
@@ -17,7 +17,8 @@ message_file = Table(
 
 class Message(TenantModel):
     __tablename__ = "zr_message"
-    __table_args__ = (UniqueConstraint("id", "conversation_id"),)
+    # 原 (id, conversation_id) 唯一约束是 id 主键的冗余组合，数据库层从未创建，
+    # 也无复合外键引用它（task 的 trigger/result_message_id 均单列引用 id），故移除声明。
     conversation_id: Mapped[UUID] = mapped_column(ForeignKey("zr_conversation.id", ondelete="RESTRICT"), nullable=False, index=True)
     sender_type: Mapped[str] = mapped_column(String(16), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)

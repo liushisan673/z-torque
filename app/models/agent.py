@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import TenantModel, UUIDModel
@@ -10,6 +10,19 @@ from app.db.base import TenantModel, UUIDModel
 
 class Agent(TenantModel):
     __tablename__ = "zr_agent"
+    # 默认父 Agent 的租户级部分唯一索引（P0-3）：必须带 tenant_id，
+    # 且 PG 需要显式 postgresql_where，否则布尔列退化为全表唯一
+    # （每个租户只能有一行 true / 一行 false，第二个 Agent 就插不进去）。
+    __table_args__ = (
+        Index(
+            "uq_zr_agent_default_parent",
+            "tenant_id",
+            "is_default_parent",
+            unique=True,
+            sqlite_where=text("is_default_parent = 1"),
+            postgresql_where=text("is_default_parent"),
+        ),
+    )
     owner_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("zr_user.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

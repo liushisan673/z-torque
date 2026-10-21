@@ -34,27 +34,120 @@ function fmtTime(iso: string | null | undefined): string {
 // 展示用映射（仅渲染层，不改存储值）：资源类型 → 中文
 const RESOURCE_TYPE_LABEL: Record<string, string> = {
   AGENT: "智能体",
+  AGENT_VERSION: "智能体版本",
   SKILL: "技能",
+  SKILL_VERSION: "技能版本",
   TOOL: "工具",
+  TOOL_VERSION: "工具版本",
   MODEL: "模型",
+  MODEL_PROVIDER: "模型供应商",
+  MODEL_ENDPOINT: "模型接入点",
+  MODEL_RESOURCE: "模型资源",
   CONNECTOR: "连接器",
   FILE: "文件",
   TASK: "任务",
+  CONVERSATION: "会话",
   USER: "用户",
   CONFIRMATION: "确认",
+  PORT: "内核能力",
 };
 
-// 展示用映射：审计动作（后缀动词）→ 中文
+// 展示用映射：审计动作（后缀动词，兜底未知 action）→ 中文
 const ACTION_VERB_LABEL: Record<string, string> = {
   CREATED: "创建",
   UPDATED: "更新",
   DELETED: "删除",
+  DISABLED: "停用",
+  ENABLED: "启用",
   LOGIN: "登录",
   LOGOUT: "登出",
   TESTED: "测试",
   EXECUTED: "执行",
   PUBLISHED: "发布",
   ARCHIVED: "归档",
+  READ: "读取",
+  UPLOADED: "上传",
+  CANCELLED: "取消",
+};
+
+// 展示用映射：审计动作全量枚举 → 中文（后端 record_audit 全部写入点已覆盖）
+const ACTION_LABEL: Record<string, string> = {
+  // 智能体
+  AGENT_CREATED: "创建",
+  AGENT_COPIED: "复制",
+  AGENT_ARCHIVED: "归档",
+  AGENT_DELETED: "删除",
+  DEFAULT_PARENT_SET: "设置父级",
+  DEFAULT_PARENT_BOOTSTRAPPED: "初始化父级",
+  AGENT_VERSION_CREATED: "创建版本",
+  AGENT_VERSION_PUBLISHED: "发布版本",
+  AGENT_VERSION_ARCHIVED: "归档版本",
+  AGENT_SKILL_ATTACHED: "挂载技能",
+  AGENT_SKILL_DETACHED: "卸载技能",
+  // 技能 / 工具
+  SKILL_CREATED: "创建",
+  SKILL_UPDATED: "更新",
+  SKILL_DELETED: "删除",
+  SKILL_ARCHIVED: "归档",
+  TOOL_CREATED: "创建",
+  TOOL_UPDATED: "更新",
+  TOOL_DELETED: "删除",
+  TOOL_ARCHIVED: "归档",
+  TOOL_VERSION_PUBLISHED: "发布版本",
+  SKILL_TOOL_BINDING_UPGRADED: "升级绑定",
+  SKILL_EXECUTED: "执行",
+  MD_SKILL_UPLOADED: "上传",
+  MD_SKILL_DRAFT_CREATED: "发现草稿",
+  MD_SKILL_REGISTERED: "注册",
+  // 模型
+  MODEL_PROVIDER_CREATED: "创建",
+  MODEL_PROVIDER_UPDATED: "更新",
+  MODEL_PROVIDER_DISABLED: "停用",
+  MODEL_PROVIDER_ENABLED: "启用",
+  MODEL_ENDPOINT_CREATED: "创建",
+  MODEL_ENDPOINT_UPDATED: "更新",
+  MODEL_ENDPOINT_DISABLED: "停用",
+  MODEL_ENDPOINT_ENABLED: "启用",
+  MODEL_RESOURCE_CREATED: "创建",
+  MODEL_RESOURCE_UPDATED: "更新",
+  MODEL_RESOURCE_DISABLED: "停用",
+  MODEL_RESOURCE_ENABLED: "启用",
+  MODEL_CALL_COMPLETED: "模型调用",
+  MODEL_CALL_FAILED: "模型调用失败",
+  // 连接器
+  CONNECTOR_CREATED: "创建",
+  CONNECTOR_UPDATED: "更新",
+  CONNECTOR_DISABLED: "停用",
+  CONNECTOR_ENABLED: "启用",
+  CONNECTOR_ARCHIVED: "归档",
+  CONNECTOR_DELETED: "删除",
+  CONNECTOR_TESTED: "连接测试",
+  CONNECTOR_DISCOVERED: "发现工具",
+  CONNECTOR_TOOL_REGISTERED: "注册工具",
+  CONNECTOR_TOOL_RECONFIGURED: "重配工具",
+  CONNECTOR_COMPOSITE_TOOL_REGISTERED: "注册封装工具",
+  CONNECTOR_COMPOSITE_TOOL_RECONFIGURED: "重配封装工具",
+  CONNECTOR_OPENAPI_IMPORTED: "导入工具",
+  // 文件
+  FILE_UPLOADED: "上传",
+  FILE_READ: "读取",
+  FILE_DELETED: "删除",
+  // 任务 / 会话
+  TASK_CANCELLED: "取消任务",
+  TASK_CANCEL: "取消任务请求",
+  // 安全
+  AUTHORIZATION_DENIED: "权限拒绝",
+  // 用户
+  USER_CREATED: "创建",
+  USER_UPDATED: "更新",
+  USER_DELETED: "删除",
+  USER_PASSWORD_RESET: "重置密码",
+  USER_UNLOCKED: "解锁",
+  // 确认
+  CONFIRMATION_REQUESTED: "发起确认",
+  CONFIRMATION_RESOLVED: "处理确认",
+  // 内核能力
+  CAPABILITY_UNAVAILABLE: "能力不可用",
 };
 
 function resourceTypeLabel(t: string): string {
@@ -62,9 +155,104 @@ function resourceTypeLabel(t: string): string {
 }
 
 function actionLabel(action: string): string {
-  const i = action.lastIndexOf("_");
-  const verb = i > 0 ? ACTION_VERB_LABEL[action.slice(i + 1)] : undefined;
-  return verb ?? ACTION_VERB_LABEL[action] ?? action;
+  return ACTION_LABEL[action] ?? (() => {
+    const i = action.lastIndexOf("_");
+    const verb = i > 0 ? ACTION_VERB_LABEL[action.slice(i + 1)] : undefined;
+    return verb ?? action;
+  })();
+}
+
+// 展示用映射：审计摘要（后端 summary 原文）→ 中文
+const SUMMARY_LABEL: Record<string, string> = {
+  // 智能体
+  "agent created": "创建智能体",
+  "agent copied": "复制智能体",
+  "agent archived": "归档智能体",
+  "agent deleted": "删除智能体",
+  "default parent set": "设置默认父智能体",
+  "default parent bootstrapped": "初始化默认父智能体",
+  "agent version draft created": "创建智能体草稿版本",
+  "agent version published": "发布智能体版本",
+  "agent version archived": "归档智能体版本",
+  "required permissions are missing": "缺少所需权限",
+  "task cancel requested": "请求取消任务",
+  "skill version attached to agent version": "将技能版本挂载至智能体版本",
+  "skill version detached from agent version": "将技能版本从智能体版本卸载",
+  // 技能 / 工具
+  "skill created": "创建技能",
+  "skill updated": "更新技能",
+  "skill deleted": "删除技能",
+  "resource archived": "归档资源",
+  "tool created": "创建工具",
+  "tool metadata updated": "更新工具元数据",
+  "tool deleted": "删除工具",
+  "tool version published": "发布工具版本",
+  "tool binding upgraded": "升级工具绑定",
+  "skill execution completed": "技能执行完成",
+  "MD-Skill uploaded": "上传 MD-Skill",
+  "MD-Skill draft discovered": "发现 MD-Skill 草稿",
+  "MD-Skill registered": "注册 MD-Skill",
+  // 模型
+  "model provider created": "创建模型供应商",
+  "model provider updated": "更新模型供应商",
+  "model provider disabled": "停用模型供应商",
+  "model provider enabled": "启用模型供应商",
+  "model endpoint created": "创建模型接入点",
+  "model endpoint updated": "更新模型接入点",
+  "model endpoint disabled": "停用模型接入点",
+  "model endpoint enabled": "启用模型接入点",
+  "model resource created": "创建模型资源",
+  "model resource updated": "更新模型资源",
+  "model resource disabled": "停用模型资源",
+  "model resource enabled": "启用模型资源",
+  "model call completed": "模型调用完成",
+  "model call completed (tool calls)": "模型调用完成（触发工具调用）",
+  "model task failed": "模型任务执行失败",
+  "model stream failed": "模型流式调用失败",
+  "model stream returned empty response": "模型流式返回空响应",
+  // 连接器
+  "connector created": "创建连接器",
+  "connector updated": "更新连接器",
+  "connector disabled": "停用连接器",
+  "connector enabled": "启用连接器",
+  "connector archived": "归档连接器",
+  "connector deleted": "删除连接器",
+  "connector test completed": "连接器测试完成",
+  "connector test failed": "连接器测试失败",
+  "connector tools discovered": "发现连接器工具",
+  "connector tool registered": "注册连接器工具",
+  "connector tool reconfigured": "重新配置连接器工具",
+  "composite tool registered": "注册业务封装工具",
+  "composite tool reconfigured": "更新业务封装工具",
+  "openapi tools imported": "导入 OpenAPI 工具",
+  // 文件
+  "file uploaded": "上传文件",
+  "file content read": "读取文件内容",
+  "file deleted": "删除文件",
+  // 任务 / 会话
+  "task cancelled by user": "用户取消任务",
+  // 用户
+  "user created": "创建用户",
+  "user updated": "更新用户",
+  "user password reset": "重置用户密码",
+  "user unlocked": "解锁用户",
+  "user deleted": "删除用户",
+  "user roles set": "设置用户角色",
+  // 确认
+  "execution confirmation requested": "发起执行确认",
+  "execution confirmation resolved": "处理执行确认",
+};
+
+// 动态摘要：能力不可用（summary 内嵌端口名，无法静态枚举）
+const CAPABILITY_SUMMARY_RE = /^capability (\S+) is unavailable$/;
+
+function summaryLabel(summary: string | null | undefined): string {
+  if (!summary) return "—";
+  const direct = SUMMARY_LABEL[summary];
+  if (direct) return direct;
+  const m = CAPABILITY_SUMMARY_RE.exec(summary);
+  if (m) return `能力 ${m[1]} 不可用`;
+  return summary;
 }
 
 // action → 类型标签（展示用，前缀映射）
@@ -497,7 +685,7 @@ export function AuditPage() {
                         <td><span className={`audit-tag ${tg.cls}`}>{tg.label}</span></td>
                         <td>{actionLabel(e.action)}</td>
                         <td>{e.actor_username ?? "系统"}</td>
-                        <td className="summary-cell" title={e.summary}>{resourceTypeLabel(e.resource_type)} · {e.summary}</td>
+                        <td className="summary-cell" title={summaryLabel(e.summary)}>{resourceTypeLabel(e.resource_type)} · {summaryLabel(e.summary)}</td>
                         <td><span className={`audit-result ${rs.cls}`}>{rs.label}</span></td>
                         {scope === "all" && (
                           <>
@@ -646,7 +834,7 @@ export function AuditPage() {
 
                 <div className="audit-detail-section">
                   <h3>摘要（已脱敏）</h3>
-                  <p style={{ fontSize: 12, color: "var(--text)", margin: "0 0 8px" }}>{detail.summary}</p>
+                  <p style={{ fontSize: 12, color: "var(--text)", margin: "0 0 8px" }}>{summaryLabel(detail.summary)}</p>
                   {detail.detail && Object.keys(detail.detail).length > 0 ? (
                     (() => {
                       // 参数键值对标签化展示：平铺基础类型字段（中文键名 + 值翻译）；
@@ -696,7 +884,7 @@ export function AuditPage() {
                         >
                           <span className="t">{fmtTime(s.created_at)}</span>
                           <span className={`audit-tag ${tagOf(s).cls}`}>{tagOf(s).label}</span>
-                          <span className="s">{s.summary}</span>
+                          <span className="s">{summaryLabel(s.summary)}</span>
                         </div>
                       ))
                     )}

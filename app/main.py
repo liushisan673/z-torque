@@ -1,18 +1,26 @@
 import logging
+import re
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+from app.api.deps import get_db, get_optional_user
+from app.models import User
+from app.security.permissions import is_admin_user
 
 from app.assembly import assemble
 from app.core.errors import ApiError
 from app.core.responses import error_response, success_response
 from app.db.session import check_database
 from app.api.router import router as api_router
+from app.kernel.audit.service import set_request_trace_id
 from app.kernel.capabilities import derive_stage
+from app.kernel.registry.port_registry import PortState
 from app.kernel.task.runtime import TaskRuntime
 from app.kernel.md_skill_watcher import MdSkillWatcher
 from app.db.session import SessionLocal, engine
@@ -87,13 +95,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Dev CORS: allow console(vite) to call API with cookies/Authorization headers.
+# CORS：允许来源由 CORS_ALLOW_ORIGINS 配置（生产填控制台域名），默认仅本地 vite dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=get_settings().cors_origin_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -102,9 +107,17 @@ app.add_middleware(
 app.include_router(api_router)
 
 
+# 外部 trace 只接受限长、受限字符集；非法值（换行/超长/任意文本）一律重新生成，
+# 避免客户端伪造或写入超长值污染审计列（P2-17）
+_TRACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+
+
 @app.middleware("http")
 async def trace_middleware(request: Request, call_next):
-    request.state.trace_id = request.headers.get("X-Trace-ID", str(uuid4()))
+    supplied = request.headers.get("X-Trace-ID", "")
+    request.state.trace_id = supplied if _TRACE_ID_PATTERN.fullmatch(supplied) else str(uuid4())
+    # 注入请求级 ContextVar：服务层内部审计点未显式传 trace 时由 record_audit 兜底回填
+    set_request_trace_id(request.state.trace_id)
     response = await call_next(request)
     response.headers["X-Trace-ID"] = request.state.trace_id
     return response
@@ -128,12 +141,40 @@ async def unexpected_error_handler(request: Request, exc: Exception):
 
 @app.get("/health")
 async def health(request: Request):
-    database_ok = check_database()
-    return success_response(request, {"status": "ok" if database_ok else "degraded", "database": database_ok})
+    """就绪探针：DB 不可达必须返回 503，否则 LB 无法摘除故障实例（P2-17）。"""
+    try:
+        database_ok = check_database()
+    except Exception:
+        logger.exception("health check failed")
+        database_ok = False
+    payload = success_response(request, {"status": "ok" if database_ok else "degraded", "database": database_ok})
+    if not database_ok:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
+
+
+_FEATURE_PORT_DEPS = {"working_memory": "memory.working", "short_term_memory": "memory.short"}
+_FEATURES = ["health", "configuration", "chat", "model_gateway", "function_calling", "model_selector", "task_sse", "task_recovery_and_cancel", "delegation", "md_skill_discovery", "md_skill_versions", "md_skill_watch", "connectors", "rest_connector", "readonly_db_connector", "mcp_connector", "secret_provider", "working_memory", "short_term_memory", "file_upload", "file_parsing", "audit_query", "admin_iam", "plugin_circuit_breaker", "plugin_sdk", "module_assembly"]
+
+
+def _available_features(registry) -> list[str]:
+    """features 必须反映 Port 真实解析状态：依赖的 Port 不可用时不能继续宣称可用（P2-14）。"""
+    if registry is None:
+        return list(_FEATURES)
+    available: list[str] = []
+    for feature in _FEATURES:
+        port_name = _FEATURE_PORT_DEPS.get(feature)
+        if port_name is None:
+            available.append(feature)
+            continue
+        resolution = registry.resolution(port_name)
+        if resolution is not None and resolution.state == PortState.RESOLVED:
+            available.append(feature)
+    return available
 
 
 @app.get("/api/z-torque/capabilities")
-async def capabilities(request: Request):
+async def capabilities(request: Request, user: User | None = Depends(get_optional_user), db: Session = Depends(get_db)):
     settings = get_settings()
     # Port 能力来自注册表真实解析状态（阶段00 §3.5），不再是静态清单；
     # stage 由装配状态推导（P2-5），不再硬编码
@@ -141,4 +182,16 @@ async def capabilities(request: Request):
     ports = registry.status() if registry is not None else []
     model_resolution = registry.resolution("model.provider") if registry is not None else None
     model_implementation = model_resolution.label if model_resolution is not None else None
-    return success_response(request, {"stage": derive_stage(registry), "features": ["health", "configuration", "chat", "model_gateway", "function_calling", "model_selector", "task_sse", "task_recovery_and_cancel", "delegation", "md_skill_discovery", "md_skill_versions", "md_skill_watch", "connectors", "rest_connector", "readonly_db_connector", "mcp_connector", "secret_provider", "working_memory", "short_term_memory", "file_upload", "file_parsing", "audit_query", "admin_iam", "plugin_circuit_breaker", "plugin_sdk", "module_assembly"], "ports": ports, "md_skill": {"directory": str(settings.md_skills_dir), "script_enabled": settings.md_skill_script_enabled}, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled}, "files": {"storage_dir": str(settings.file_storage_dir), "max_upload_mb": settings.max_upload_size_mb}, "connectors": {"allowed_targets": settings.connector_allowed_targets, "max_response_bytes": settings.connector_max_response_bytes}})
+    # 敏感细节（绝对路径、出站白名单）仅管理员可见（P2-15）：
+    # 该接口此前无需认证即可返回部署路径与放行目标，等于给探测者送地图。
+    # 匿名访问时 user 为 None（该端点保留公开可读，供前端探测能力），必须显式判定，
+    # 否则会因访问 user.tenant_id 抛 AttributeError 变成 500。
+    is_admin = user is not None and is_admin_user(db, tenant_id=user.tenant_id, user_id=user.id)
+    md_skill = {"script_enabled": settings.md_skill_script_enabled}
+    files = {"max_upload_mb": settings.max_upload_size_mb}
+    connectors = {"max_response_bytes": settings.connector_max_response_bytes}
+    if is_admin:
+        md_skill["directory"] = str(settings.md_skills_dir)
+        files["storage_dir"] = str(settings.file_storage_dir)
+        connectors["allowed_targets"] = settings.connector_allowed_targets
+    return success_response(request, {"stage": derive_stage(registry), "features": _available_features(registry), "ports": ports, "md_skill": md_skill, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled}, "files": files, "connectors": connectors})

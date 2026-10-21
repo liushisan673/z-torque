@@ -18,6 +18,7 @@ from app.models.message import message_file
 from app.security.permissions import admin_owned_clause
 from app.services.chat_service import ChatResult
 from app.services.context_builder import assistant_reasoning_parts, build_agent_system_prompt, build_context
+from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
 
 logger = logging.getLogger("z_torque.chat")
@@ -111,11 +112,13 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             # 无工具智能体：同步直答（不建任务），回复随响应返回
             system_prompt = build_agent_system_prompt(db, agent_version)
             settings = get_settings()
-            # 调用参数：版本快照键优先（快照语义），未设置回退全局兜底
+            # 调用参数：版本快照键优先（快照语义），未设置回退模型档案 max_output_tokens，再退全局兜底
             temperature, max_tokens = snapshot_model_params(agent_version.config_snapshot, default_temperature=settings.model_temperature, default_max_tokens=settings.model_max_tokens)
+            model_name = getattr(model_gateway, "default_model", "mock")
+            max_tokens = effective_max_tokens(db, tenant_id=tenant_id, model_identifier=model_name, snapshot_max_tokens=(agent_version.config_snapshot or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
             request = ModelRequest(
                 trace_id=trace_id or str(user_message.id), conversation_id=conversation.id,
-                model=getattr(model_gateway, "default_model", "mock"),
+                model=model_name,
                 temperature=temperature, max_tokens=max_tokens,
                 messages=build_context(db, conversation, system_prompt=system_prompt, attachment_ids=attachment_ids),
                 tools=[], timeout_seconds=settings.model_timeout_seconds,
@@ -147,7 +150,10 @@ async def _maybe_summarize(db: Session, *, conversation: Conversation, user_id: 
     if message_count is not None:
         try:
             await short_memory.summarize(db, conversation=conversation, user_id=user_id, trace_id=trace_id or user_message_id, model_gateway=model_gateway)
+            # provider 不再自行提交，由调用方收口（P2-18）
+            db.commit()
         except Exception as exc:
+            db.rollback()
             logger.warning("summarize failed for conversation %s: %s", conversation.id, exc)
 
 

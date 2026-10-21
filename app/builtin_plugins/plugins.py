@@ -106,6 +106,7 @@ class SkillExecutorPlugin:
             approval_provider=sdk.shared("approval.provider"),
             sandbox_driver=sdk.shared("sandbox.driver"),
             interceptor=sdk.shared("interceptor"),
+            secret_provider=sdk.shared("secret.provider"),
         )
         engine: Engine = sdk.engine
         gateway.register(MockExecutor())

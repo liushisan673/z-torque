@@ -132,8 +132,8 @@ def _apply_role_ids(db: Session, admin: User, user: User, role_ids: list[UUID]) 
 
 
 @router.get("/users", summary="获取用户列表")
-async def list_users(request: Request, _: User = Depends(require_admin), db: Session = Depends(get_db)):
-    rows = db.scalars(select(User).order_by(User.created_at.desc())).all()
+async def list_users(request: Request, admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    rows = db.scalars(select(User).where(User.tenant_id == admin.tenant_id).order_by(User.created_at.desc())).all()
 
     # Preload all roles/permissions for users in one pass to avoid N+1 on frontend.
     user_ids = [u.id for u in rows]

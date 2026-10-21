@@ -31,15 +31,17 @@ def test_circuit_breaker_opens_after_threshold_and_closes_on_success():
 
 def test_circuit_breaker_reopens_after_failed_half_open_probe():
     """冷却耗尽后的半开探测失败必须重新打开熔断器（修复前落入逻辑空档，永不重开）。"""
-    breaker = CircuitBreaker(failure_threshold=2, cooldown_seconds=0.05)
+    # 冷却窗口留出足够余量（0.1s 冷却 + 0.15s 等待）：旧值 0.05/0.06 仅差 10ms，
+    # 在定时器精度较差的平台上会偶发「冷却未耗尽」而误判半开。
+    breaker = CircuitBreaker(failure_threshold=2, cooldown_seconds=0.1)
     breaker.record_failure()
     breaker.record_failure()
     assert breaker.open
-    time.sleep(0.06)  # 冷却耗尽 → 放行探测
+    time.sleep(0.15)  # 冷却耗尽 → 放行探测
     assert breaker.allow()
     breaker.record_failure()  # 探测失败 → 重新打开
     assert breaker.open
-    time.sleep(0.06)
+    time.sleep(0.15)
     breaker.record_success()  # 探测成功 → 关闭
     assert not breaker.open and breaker.allow()
 

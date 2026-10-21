@@ -274,7 +274,10 @@ def _parse_sse_events(raw: str) -> list[tuple[str | None, str | None, dict]]:
 
 
 @pytest.mark.asyncio
-async def test_sse_snapshot_includes_parent_child_fields_and_isolation(baseline):
+async def test_sse_snapshot_includes_parent_child_fields_and_isolation(baseline, monkeypatch):
+    # 任务无 worker 会保持 QUEUED，长连接需等满 _MAX_STREAM_SECONDS 才断开；
+    # ASGITransport 会缓冲整个响应体，客户端无法提前中断，故把上限压到 1s
+    monkeypatch.setattr("app.services.task_stream._MAX_STREAM_SECONDS", 1.0)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         owner_token = await _login(client, "owner", "pass")
         other_token = await _login(client, "other", "pass")

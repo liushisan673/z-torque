@@ -76,6 +76,21 @@ def test_put_is_rejected(fake_http):
     assert result.status == "FAILED" and result.error_code == "AI_HTTP_METHOD_NOT_ALLOWED"
 
 
+def test_json_response_body_is_parsed_for_step_references(fake_http):
+    """成功响应解析出 json 字段：组合工具步骤间可引用内层字段；非 JSON 响应为 None。"""
+    # 用公网 IP 字面量避免测试环境 DNS 解析（与 BASE_CONFIG 同一地址族）
+    config = {**BASE_CONFIG, "method": "GET", "url": "https://192.168.2.10/search", "target_policy": {"allow_private_network": True}}
+    fake_http.response = FakeResponse(status_code=200, text='{"code":"200","location":[{"name":"宝鸡","id":"101110901"}]}')
+    result = HttpExecutor().execute(config, {"location": "宝鸡"}, 5)
+    assert result.status == "SUCCEEDED"
+    assert result.data["json"]["location"][0]["id"] == "101110901"
+
+    fake_http.response = FakeResponse(status_code=200, text="plain text not json")
+    result = HttpExecutor().execute(config, {}, 5)
+    assert result.status == "SUCCEEDED"
+    assert result.data["json"] is None
+
+
 def test_private_http_blocked_without_policy(fake_http):
     """未声明 allow_private_network 时内网 http 目标维持默认拦截。"""
     config = {**BASE_CONFIG, "target_policy": {}}

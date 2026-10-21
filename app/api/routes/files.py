@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from uuid import UUID
 
@@ -20,6 +21,7 @@ from app.kernel.ports.object_store import ObjectStore
 from app.services.file_parser import SUPPORTED, parse_file
 
 router = APIRouter(prefix="/files", tags=["files"])
+logger = logging.getLogger("z_torque.files")
 
 
 def _object_store(request: Request) -> ObjectStore:
@@ -103,7 +105,14 @@ async def remove(file_id: UUID, request: Request, user: User = Depends(get_curre
     item = owned_file(db, user, file_id)
     if db.scalar(select(message_file.c.message_id).where(message_file.c.file_id == item.id).limit(1)) is not None:
         raise ApiError("AI_RESOURCE_IN_USE", "file is still referenced by a message", 409)
-    target = _object_store(request).local_path(item.storage_key)
+    # 经 Port 删除物理对象：先删对象再提交记录（delete 幂等，DB 失败可安全重试）；
+    # 反向顺序一旦删除记录失败会留下无法追踪的孤儿文件。
+    store = _object_store(request)
+    try:
+        store.delete(item.storage_key)
+    except Exception:
+        logger.exception("failed to delete object %s for file %s", item.storage_key, item.id)
+        raise ApiError("AI_FILE_DELETE_FAILED", "failed to delete stored file", 500) from None
     item.status = "DELETED"
     item.extracted_text = None
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="FILE_DELETED", resource_type="FILE", resource_id=item.id, summary="file deleted", trace_id=request.state.trace_id)

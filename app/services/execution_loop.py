@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID
 from datetime import datetime, timezone
@@ -7,14 +7,16 @@ import asyncio
 from sqlalchemy import select, update
 
 from app.core.errors import ApiError
-from app.kernel.model_gateway import ModelGateway, ModelMessage, ModelRequest, ModelResponse
+from app.kernel.model_gateway import ModelGateway, ModelGatewayError, ModelMessage, ModelRequest, ModelResponse
 from app.kernel.ports.model_selector import ModelSelector, resolve_model_selection
 from app.kernel.ports.skill_executor import ExecutionResult
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
+from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import append_task_event
 from app.models import Task, TaskCheckpoint
 from app.services.function_calling import ToolMapping, map_tool_calls
+from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
 
 MAX_ROUNDS = 5
@@ -100,6 +102,7 @@ class AgentExecutionLoop:
                         delegation_depth=delegation_depth,
                         cancellation_event=cancellation_event,
                         deadline_at=deadline_at,
+                        task_id=task_id,
                     )
                     messages.append(ModelMessage("tool", child_content, tool_call_id=call.id))
                     if task is not None:
@@ -124,7 +127,7 @@ class AgentExecutionLoop:
                     info["arguments"] = arguments
                     info["task_id"] = str(task_id) if task_id else None
                     if task is not None:
-                        checkpoint = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == task_id))
+                        checkpoint = latest_checkpoint(db, task_id)
                         if checkpoint is not None:
                             context = dict(checkpoint.execution_context or {})
                             context["chat_context"] = {
@@ -154,8 +157,13 @@ class AgentExecutionLoop:
         delegation_depth: int,
         cancellation_event: asyncio.Event | None,
         deadline_at: datetime | None,
+        task_id: UUID | None = None,
     ) -> str:
-        """执行子智能体：以子版本 system_prompt + 委派任务构建独立会话，跑一轮完整执行循环。"""
+        """执行子智能体：以子版本 system_prompt + 委派任务构建独立会话，跑一轮完整执行循环。
+
+        `task_id` 透传父任务标识：子智能体的工具调用同样计入该任务的
+        SkillExecutionLog 与任务事件流，保证「每次执行必须记账」（契约红线1）。
+        """
         import json
 
         from app.config import get_settings
@@ -195,7 +203,7 @@ class AgentExecutionLoop:
                 system_prompt = (system_prompt + "\n\n" if system_prompt else "") + "\n\n".join(instructions)
         child_messages = [ModelMessage("system", system_prompt)] if system_prompt else []
         child_messages.append(ModelMessage("user", task_text))
-        # 子版本快照绑定优先（模型 + 调用参数），未设置回退全局兜底（文档 §6.1）
+        # 子版本快照绑定优先（模型 + 调用参数），未设置回退模型档案 max_output_tokens，再退全局兜底（文档 §6.1）
         child_snapshot = child.config_snapshot or {}
         child_selection = resolve_model_selection(
             self.model_selector,
@@ -206,6 +214,16 @@ class AgentExecutionLoop:
             default_model=settings.model_name,
             default_temperature=settings.model_temperature,
             default_max_tokens=settings.model_max_tokens,
+        )
+        child_selection = replace(
+            child_selection,
+            max_tokens=effective_max_tokens(
+                db,
+                tenant_id=ctx.tenant_id,
+                model_identifier=child_selection.model,
+                snapshot_max_tokens=child_snapshot.get("max_tokens"),
+                default_max_tokens=settings.model_max_tokens,
+            ),
         )
         child_request = ModelRequest(
             trace_id=f"delegate-{child_agent_version_id}-{delegation_depth}",
@@ -228,6 +246,7 @@ class AgentExecutionLoop:
                     cancellation_event=cancellation_event,
                     deadline_at=deadline_at,
                     delegation_depth=delegation_depth + 1,
+                    task_id=task_id,
                 )
                 content = loop_result.response.content
             else:

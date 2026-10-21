@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Table
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Table, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import TenantModel, UUIDModel
@@ -41,9 +41,15 @@ class User(TenantModel):
 
 class Role(TenantModel):
     __tablename__ = "zr_role"
-    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    # 角色名在租户内唯一（与 admin_iam 的按租户查重一致）；全局唯一会让第二个租户建同名角色时
+    # 绕过应用层校验后在 DB 层抛 IntegrityError
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_zr_role_tenant_name"),)
+
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
 
 
 class Permission(TenantModel):
     __tablename__ = "zr_permission"
-    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_zr_permission_tenant_name"),)
+
+    name: Mapped[str] = mapped_column(String(128), nullable=False)

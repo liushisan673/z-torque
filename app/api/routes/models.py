@@ -7,6 +7,7 @@ import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from urllib.parse import urlparse
 
 from app.api.deps import get_current_user
 from app.core.errors import ApiError
@@ -36,6 +37,30 @@ ModelManageUser = Annotated[User, Depends(require_permissions(["model.manage"]))
 INTERFACE_TYPES = {"openai_compatible", "anthropic", "custom"}
 PROBE_MODES = {"readiness", "models_list", "minimal_chat"}
 UPSTREAM_TIMEOUT_SECONDS = 10.0
+
+
+_ALLOWED_URL_SCHEMES = {"http", "https"}
+# 明确拒绝云厂商元数据服务：任何合法模型网关都不会指向这些地址，
+# 而它们一旦被探测即可泄露实例凭据（P2-14）。内网/本机地址保留放行，
+# 因为社区版默认部署就是本机 ollama / 内网网关。
+_BLOCKED_HOSTS = {"169.254.169.254", "metadata.google.internal", "metadata", "fd00:ec2::254"}
+
+
+def _validate_outbound_url(value: str | None, *, field: str) -> None:
+    """校验模型侧出站地址（P2-14）：协议、主机与凭据形态。"""
+    if not value or not value.strip():
+        return
+    value = value.strip()
+    parsed = urlparse(value)
+    if parsed.scheme.lower() not in _ALLOWED_URL_SCHEMES:
+        raise ApiError("AI_PARAM_INVALID", f"{field} must use http or https", 400)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ApiError("AI_PARAM_INVALID", f"{field} must include a host", 400)
+    if host in _BLOCKED_HOSTS:
+        raise ApiError("AI_PARAM_INVALID", f"{field} must not target cloud metadata endpoints", 400)
+    if parsed.username or parsed.password:
+        raise ApiError("AI_PARAM_INVALID", f"{field} must not embed credentials", 400)
 
 
 def _validate_interface_type(value: str | None) -> None:
@@ -142,6 +167,7 @@ async def list_providers(request: Request, user: CurrentUser, db: DbSession):
 @router.post("/providers", summary="创建模型供应商")
 async def create_provider(payload: ModelProviderCreate, request: Request, user: ModelManageUser, db: DbSession):
     _validate_secret_ref(payload.secret_ref)
+    _validate_outbound_url(payload.base_url, field="base_url")
     item = ModelProvider(
         tenant_id=user.tenant_id,
         created_by=user.id,
@@ -170,6 +196,8 @@ async def patch_provider(provider_id: UUID, payload: ModelProviderPatch, request
     values = payload.model_dump(exclude_unset=True)
     if "secret_ref" in values:
         _validate_secret_ref(values["secret_ref"])
+    if "base_url" in values:
+        _validate_outbound_url(values["base_url"], field="base_url")
     for key, value in values.items(): setattr(item, key, value)
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="MODEL_PROVIDER_UPDATED", resource_type="MODEL_PROVIDER", resource_id=item.id, summary="model provider updated", detail={"fields": list(values)}, trace_id=request.state.trace_id)
     db.commit(); db.refresh(item)
@@ -210,6 +238,7 @@ async def create_endpoint(payload: ModelEndpointCreate, request: Request, user: 
     model = get_owned_model(db, user, UUID(payload.model_id))
     if model.provider_id != provider.id:
         raise ApiError("AI_PARAM_INVALID", "model does not belong to provider", 400)
+    _validate_outbound_url(payload.endpoint_url, field="endpoint_url")
     item = ModelEndpoint(
         tenant_id=user.tenant_id,
         provider_id=provider.id,
@@ -242,6 +271,8 @@ async def patch_endpoint(endpoint_id: UUID, payload: ModelEndpointPatch, request
     if "model_id" in values and values["model_id"] is not None:
         model = get_owned_model(db, user, UUID(values["model_id"]))
         values["model_id"] = model.id
+    if "endpoint_url" in values:
+        _validate_outbound_url(values["endpoint_url"], field="endpoint_url")
     for key, value in values.items(): setattr(item, key, value)
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="MODEL_ENDPOINT_UPDATED", resource_type="MODEL_ENDPOINT", resource_id=item.id, summary="model endpoint updated", detail={"fields": list(values)}, trace_id=request.state.trace_id)
     db.commit(); db.refresh(item)

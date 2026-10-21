@@ -49,7 +49,7 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
         tool_links = db.query(SkillVersionTool).filter(
             SkillVersionTool.skill_version_id == skill.id,
             SkillVersionTool.tenant_id == tenant_id,
-        ).all()
+        ).order_by(SkillVersionTool.sort_order, SkillVersionTool.created_at).all()
         for tool_link in tool_links:
             tool_version = db.get(ToolVersion, tool_link.tool_version_id)
             tool = db.get(Tool, tool_version.tool_id) if tool_version else None

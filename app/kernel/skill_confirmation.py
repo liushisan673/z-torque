@@ -10,9 +10,12 @@ from app.core.errors import ApiError
 from app.kernel.audit.service import record_audit
 from app.core.ids import new_uuid7
 from app.kernel.ports.approval_provider import ApprovalProvider
+from app.kernel.registry.active import call_optional
+from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import transition_task
 from app.kernel.task.states import TaskStatus
-from app.models import Confirmation, Outbox, Role, Task, TaskCheckpoint, User, user_role
+from app.models import Confirmation, Conversation, Message, Outbox, Task, TaskCheckpoint
+from app.security.permissions import is_admin_user
 
 
 class BuiltinApprovalProvider(ApprovalProvider):
@@ -44,7 +47,7 @@ def pause_task_for_confirmation(db: Session, *, tenant_id: UUID, user_id: UUID, 
         raise ApiError("AI_TASK_NOT_FOUND", "task not found", 404)
     if task.status != TaskStatus.RUNNING:
         raise ApiError("AI_TASK_STATE_CONFLICT", "task is not running", 409)
-    existing = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == task.id))
+    existing = latest_checkpoint(db, task.id)
     if existing and existing.status == "WAITING_APPROVAL":
         confirmation = db.get(Confirmation, existing.confirmation_id) if existing.confirmation_id else None
         if confirmation:
@@ -70,6 +73,20 @@ def pause_task_for_confirmation(db: Session, *, tenant_id: UUID, user_id: UUID, 
         db.add(checkpoint)
     transition_task(db, task, TaskStatus.WAITING_HUMAN, "TASK_WAITING_HUMAN", "task is waiting for human approval")
     db.flush()
+    # 审批待办通知经 notify.channel Port（可选能力：不可用则审计后降级，P2-14）
+    call_optional(
+        db,
+        audit_tenant_id=tenant_id,
+        port_name="notify.channel",
+        method="send",
+        actor_user_id=user_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        title="任务等待人工审批",
+        body=reason,
+        level="warning",
+        meta={"task_id": str(task.id), "confirmation_id": str(confirmation.id)},
+    )
     return confirmation
 
 
@@ -82,7 +99,7 @@ def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID,
         if item.status == desired:
             return item
         raise ApiError("AI_REQUEST_INVALID", "confirmation is already resolved", 422)
-    if item.requested_by_user_id == user_id and not _is_admin(db, user_id):
+    if item.requested_by_user_id == user_id and not is_admin_user(db, tenant_id=tenant_id, user_id=user_id):
         raise ApiError("AI_CONFIRMATION_SELF_APPROVAL", "requester cannot resolve own confirmation", 403)
     item.status = "APPROVED" if approved else "REJECTED"
     item.confirmed_by_user_id = user_id
@@ -90,7 +107,7 @@ def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID,
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="CONFIRMATION_RESOLVED", resource_type="CONFIRMATION", resource_id=item.id, summary="execution confirmation resolved", detail={"approved": approved})
     if item.task_id:
         task = db.get(Task, item.task_id)
-        checkpoint = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == item.task_id))
+        checkpoint = latest_checkpoint(db, item.task_id)
         if task and checkpoint and task.status == TaskStatus.WAITING_HUMAN:
             if approved:
                 checkpoint.status = "APPROVED"
@@ -99,13 +116,24 @@ def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID,
             else:
                 checkpoint.status = "REJECTED"
                 task.error_code = "AI_CONFIRMATION_REJECTED"
-                task.error_message = "human approval was rejected"
+                task.error_message = "用户拒绝工具执行，任务终止"
                 transition_task(db, task, TaskStatus.CANCELLED, "TASK_APPROVAL_REJECTED", "task approval rejected")
+                # 拒绝以模型气泡告知（对齐取消气泡模式）：会话流出现提示，前端收起执行块；
+                # 消息带 task_id，保留「查看执行过程」入口
+                if task.conversation_id is not None:
+                    reject_text = "您已拒绝该工具执行，本次任务已终止。"
+                    result_message = db.query(Message).filter(Message.task_id == task.id, Message.sender_type == "ASSISTANT").first()
+                    if result_message is not None:
+                        result_message.content = reject_text
+                    else:
+                        db.add(Message(
+                            tenant_id=task.tenant_id, conversation_id=task.conversation_id, sender_type="ASSISTANT",
+                            content=reject_text, status="COMPLETED", task_id=task.id,
+                        ))
+                    conversation = db.get(Conversation, task.conversation_id)
+                    if conversation is not None:
+                        conversation.last_message_at = datetime.now(timezone.utc)
     return item
-
-
-def _is_admin(db: Session, user_id: UUID) -> bool:
-    return db.query(User).join(user_role, user_role.c.user_id == User.id).join(Role, Role.id == user_role.c.role_id).filter(User.id == user_id, Role.name == "admin").first() is not None
 
 
 def _call_hash(call: dict) -> str:

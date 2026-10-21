@@ -153,3 +153,44 @@ def test_community_assembly_resolves_model_selector(tmp_path):
     settings = SimpleNamespace(model_base_url=None, model_api_key=None, model_name="mock", model_allowed_names=[], file_storage_dir=tmp_path / "files")
     result = assemble(settings, create_engine("sqlite://"))
     assert result.registry.resolution("model.selector").state == PortState.RESOLVED
+
+
+def test_effective_max_tokens_precedence():
+    """模型档案 max_output_tokens 兜底（模型页配置生效链路）：
+
+    快照显式值 > 模型档案上限（ENABLED 且 >0，按租户隔离）> 全局默认。
+    """
+    from uuid import UUID
+
+    from sqlalchemy.orm import sessionmaker
+
+    import app.models  # noqa: F401 确保全部表注册到 metadata
+    from app.db.base import Base
+    from app.models import ModelResource
+    from app.services.model_limits import effective_max_tokens
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    tenant = UUID(int=1)
+
+    def add_model(identifier: str, max_output: int | None, status: str = "ENABLED") -> None:
+        db.add(ModelResource(tenant_id=tenant, provider_id=uuid4(), name=identifier, model_identifier=identifier, status=status, max_output_tokens=max_output, config={}))
+
+    add_model("m1", 8192)
+    add_model("m-disabled", 999, status="DISABLED")
+    add_model("m-zero", 0)
+    db.commit()
+
+    # 快照显式值最高优先（智能体版本逐键配置语义不变）
+    assert effective_max_tokens(db, tenant_id=tenant, model_identifier="m1", snapshot_max_tokens=512, default_max_tokens=4096) == 512
+    # 模型页配置兜底
+    assert effective_max_tokens(db, tenant_id=tenant, model_identifier="m1", snapshot_max_tokens=None, default_max_tokens=4096) == 8192
+    # 无匹配档案 → 全局默认
+    assert effective_max_tokens(db, tenant_id=tenant, model_identifier="missing", snapshot_max_tokens=None, default_max_tokens=4096) == 4096
+    # 租户隔离：他租户档案不生效
+    assert effective_max_tokens(db, tenant_id=UUID(int=2), model_identifier="m1", snapshot_max_tokens=None, default_max_tokens=4096) == 4096
+    # 停用档案不生效
+    assert effective_max_tokens(db, tenant_id=tenant, model_identifier="m-disabled", snapshot_max_tokens=None, default_max_tokens=4096) == 4096
+    # 非正值视为未配置
+    assert effective_max_tokens(db, tenant_id=tenant, model_identifier="m-zero", snapshot_max_tokens=None, default_max_tokens=4096) == 4096

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_session
+from app.config import get_settings
 from app.core.errors import ApiError
 from app.core.responses import success_response
 from app.db.session import get_db
@@ -16,10 +17,15 @@ from app.services.auth_service import authenticate
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _cookie_secure() -> bool:
+    settings = get_settings()
+    return settings.cookie_secure or settings.app_env == "production"
+
+
 @router.post("/login", summary="登录")
 async def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     access, refresh, _ = authenticate(db, payload.username, payload.password)
-    response.set_cookie("access_token", access, httponly=True, samesite="lax")
+    response.set_cookie("access_token", access, httponly=True, samesite="lax", secure=_cookie_secure())
     return success_response(request, {"access_token": access, "refresh_token": refresh, "token_type": "bearer"})
 
 
@@ -34,7 +40,7 @@ async def refresh(payload: RefreshRequest, request: Request, response: Response,
     session.last_used_at = datetime.now(timezone.utc)
     db.commit()
     access = create_access_token(str(user.id), str(session.id), str(user.tenant_id))
-    response.set_cookie("access_token", access, httponly=True, samesite="lax")
+    response.set_cookie("access_token", access, httponly=True, samesite="lax", secure=_cookie_secure())
     return success_response(request, {"access_token": access, "refresh_token": new_refresh, "token_type": "bearer"})
 
 

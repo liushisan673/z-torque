@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { request, uploadFile } from "../services/api";
 import { errorText } from "../services/errorText";
-import type { SkillListItem, SkillDetail, SkillVersionDetail, SkillToolLink, SkillVersionRef, ToolListItem } from "../types";
+import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
+import type { SkillListItem, SkillDetail, SkillVersionDetail, SkillToolLink, SkillVersionRef, SelectableTool, SelectableToolGroup, SelectableToolResponse } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -10,7 +11,24 @@ import { GuideCallout } from "../components/GuideCallout";
 import { isAdminUser } from "../components/AppTopbar";
 import { useAuth } from "../stores/auth";
 
+// 选中记忆：跳转页面后返回时恢复上次选中的技能（sessionStorage 按标签页隔离）
+const SELECTED_KEY = "zt.skills.selectedId";
+
 type Tab = "overview" | "content" | "scripts" | "load" | "tools" | "versions";
+
+type BindPick = {
+  tool: SelectableTool;
+  tool_version_id: string;
+  version_number: number;
+  role: string;
+  note: string;
+};
+
+const BIND_ROLE_LABELS: Record<string, string> = {
+  prerequisite: "前置",
+  normal: "常规",
+  followup: "后续",
+};
 // 筛选维度对齐 skill.html 规范：全部 / MD-Skill / 纯指令 / 脚本 / 待确认启用
 type Filter = "all" | "md" | "instruction" | "script" | "pending";
 
@@ -123,11 +141,16 @@ export function SkillsPage() {
   const [tools, setTools] = useState<SkillToolLink[]>([]);
   const [loadingTools, setLoadingTools] = useState(false);
 
-  // 绑定 Tool
+  // 绑定 Tool（分组选择器 + 多选 + 顺序/角色/备注）
   const [bindOpen, setBindOpen] = useState(false);
-  const [availableTools, setAvailableTools] = useState<ToolListItem[]>([]);
+  const [selectableGroups, setSelectableGroups] = useState<SelectableToolGroup[]>([]);
   const [loadingAvail, setLoadingAvail] = useState(false);
-  const [selectedToolVersionId, setSelectedToolVersionId] = useState<string | null>(null);
+  const [bindLimit, setBindLimit] = useState(30);
+  const [bindQuery, setBindQuery] = useState("");
+  const [bindConnector, setBindConnector] = useState("all");
+  const [bindTag, setBindTag] = useState("all");
+  const [binding, setBinding] = useState(false);
+  const [selectedBindings, setSelectedBindings] = useState<BindPick[]>([]);
   const [unbindingId, setUnbindingId] = useState<string | null>(null);
 
   const [filter, setFilter] = useState<Filter>("all");
@@ -155,6 +178,7 @@ export function SkillsPage() {
   // 编辑草稿
   const [editing, setEditing] = useState<SkillVersionDetail | null>(null);
   const [editInstructions, setEditInstructions] = useState("");
+  const [editOrchestration, setEditOrchestration] = useState("");
   const [editScript, setEditScript] = useState("");
   const [editPerms, setEditPerms] = useState("");
   const [editConfirm, setEditConfirm] = useState(false);
@@ -182,10 +206,13 @@ export function SkillsPage() {
     void load();
   }, [load]);
 
-  // 默认展示列表第一项，避免主区空白（仅当前无选中时生效；删除当前选中后自动补选）
+  // 默认展示列表第一项，避免主区空白；跳转回来时优先恢复上次选中（记忆 id 已不存在则回退第一项）
   useEffect(() => {
     if (loading || selectedId) return;
-    if (skills.length > 0) void openDetail(skills[0]);
+    if (skills.length === 0) return;
+    const remembered = readSelectedId(SELECTED_KEY);
+    const target = (remembered && skills.find((s) => s.id === remembered)) || skills[0];
+    void openDetail(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, skills, selectedId]);
 
@@ -216,6 +243,7 @@ export function SkillsPage() {
 
   async function openDetail(s: SkillListItem) {
     setSelectedId(s.id);
+    writeSelectedId(SELECTED_KEY, s.id);
     setDetail(null);
     setVersionDetail(null);
     setTools([]);
@@ -448,27 +476,28 @@ export function SkillsPage() {
   function openEditor(v: SkillVersionDetail) {
     setEditing(v);
     setEditInstructions(v.instructions ?? "");
+    setEditOrchestration(v.orchestration_hint ?? "");
     setEditScript(v.script_source ?? "");
     setEditPerms(v.required_permissions.join("\n"));
     setEditConfirm(v.requires_confirmation);
     setTab("content");
   }
 
-  async function saveVersion() {
-    if (!editing) return;
-    setBusy(true);
-    setError(null);
+  // 持久化草稿表单（不含 busy 管理，供"保存草稿"与"发布"共用）
+  async function persistVersion(): Promise<SkillVersionDetail | null> {
+    if (!editing) return null;
+    const perms = editPerms
+      .split("\n")
+      .map((p) => p.trim())
+      .filter(Boolean);
     try {
-      const perms = editPerms
-        .split("\n")
-        .map((p) => p.trim())
-        .filter(Boolean);
       const v = await request<SkillVersionDetail>(
         `/api/z-torque/skills-tools/skill-versions/${editing.id}`,
         {
           method: "PATCH",
           body: {
             instructions: editInstructions.trim() || null,
+            orchestration_hint: editOrchestration.trim() || null,
             script_source: editScript.trim() || null,
             required_permissions: perms,
             requires_confirmation: editConfirm,
@@ -478,11 +507,18 @@ export function SkillsPage() {
       setEditing(v);
       setVersionDetail(v);
       setError(null);
+      return v;
     } catch (err) {
       setError(errorText(err, "保存失败"));
-    } finally {
-      setBusy(false);
+      return null;
     }
+  }
+
+  async function saveVersion() {
+    if (!editing) return;
+    setBusy(true);
+    await persistVersion();
+    setBusy(false);
   }
 
   // 发布前预检：指令内容为空时给出提示（可强制跳过）
@@ -497,6 +533,20 @@ export function SkillsPage() {
       return;
     }
     void doPublish(versionId);
+  }
+
+  // 编辑态发布：先持久化表单（确认开关、指令等未保存修改），再走发布预检——
+  // 避免"勾选确认后直接点发布"导致开关只存在于内存、发布版本不带确认
+  async function saveAndPublish() {
+    if (!editing) return;
+    setBusy(true);
+    const saved = await persistVersion();
+    setBusy(false);
+    if (!saved) {
+      toast("error", "草稿保存失败，已取消发布");
+      return;
+    }
+    publishVersion(saved.id);
   }
 
   async function doPublish(versionId: string) {
@@ -524,40 +574,150 @@ export function SkillsPage() {
   // 当前草稿版本已绑定的 tool_version_id，用于选择器禁用重复项
   const boundVersionIds = useMemo(() => new Set(tools.map((t) => t.tool_version_id)), [tools]);
 
+  // 选择器标签候选：来自工具持久化 tags，用于前端快速过滤
+  const bindTagOptions = useMemo(() => {
+    const set = new Set<string>();
+    selectableGroups.forEach((group) => group.tools.forEach((tool) => (tool.tags ?? []).forEach((tag) => set.add(tag))));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  }, [selectableGroups]);
+
+  // 选择器连接器候选：按后端分组结果去重
+  const bindConnectorOptions = useMemo(
+    () =>
+      selectableGroups.map((group) => ({
+        value: group.connector_id ?? "none",
+        label: group.connector_name,
+      })),
+    [selectableGroups],
+  );
+
+  // 前端过滤：关键字（名称/说明/标签/参数）+ 连接器 + 标签
+  const filteredBindGroups = useMemo(() => {
+    const kw = bindQuery.trim().toLowerCase();
+    return selectableGroups
+      .filter((group) => {
+        if (bindConnector === "all") return true;
+        const value = group.connector_id ?? "none";
+        return value === bindConnector;
+      })
+      .map((group) => ({
+        ...group,
+        tools: group.tools.filter((tool) => {
+          if (bindTag !== "all" && !(tool.tags ?? []).includes(bindTag)) return false;
+          if (!kw) return true;
+          return (
+            tool.name.toLowerCase().includes(kw) ||
+            (tool.description ?? "").toLowerCase().includes(kw) ||
+            (tool.tags ?? []).some((tag) => tag.toLowerCase().includes(kw)) ||
+            (tool.param_summary ?? "").toLowerCase().includes(kw)
+          );
+        }),
+      }))
+      .filter((group) => group.tools.length > 0);
+  }, [selectableGroups, bindQuery, bindConnector, bindTag]);
+
+  // 已选上限：已绑定 + 本次已选 不能超过单版本上限
+  const bindTotalCount = tools.length + selectedBindings.length;
+
   async function openBindModal() {
+    if (!viewVersion) return;
     setBindOpen(true);
     setError(null);
     setLoadingAvail(true);
-    setSelectedToolVersionId(null);
+    setSelectedBindings([]);
+    setBindQuery("");
+    setBindConnector("all");
+    setBindTag("all");
     try {
-      const list = await request<ToolListItem[]>("/api/z-torque/skills-tools/tools");
-      // 仅可绑定已发布版本
-      const bindable = list.filter((t) => t.versions.some((v) => v.status === "PUBLISHED"));
-      setAvailableTools(bindable);
-      const firstPub = bindable[0]?.versions.find((v) => v.status === "PUBLISHED");
-      setSelectedToolVersionId(firstPub ? firstPub.id : null);
+      const data = await request<SelectableToolResponse>(
+        `/api/z-torque/skills-tools/tools/selectable?size=1000&skill_version_id=${viewVersion.id}`,
+      );
+      setSelectableGroups(data.groups);
+      setBindLimit(data.limit || 30);
     } catch (err) {
       setError(errorText(err, "加载可用工具失败"));
+      setSelectableGroups([]);
     } finally {
       setLoadingAvail(false);
     }
   }
 
-  async function bindTool() {
-    if (!viewVersion || !selectedToolVersionId) return;
-    setBusy(true);
+  function toggleBinding(tool: SelectableTool) {
+    const alreadyBound = tool.bound_to_current_version || boundVersionIds.has(tool.default_tool_version_id);
+    if (alreadyBound) return;
+    if (selectedBindings.some((pick) => pick.tool.tool_id === tool.tool_id)) {
+      setSelectedBindings((prev) => prev.filter((pick) => pick.tool.tool_id !== tool.tool_id));
+      return;
+    }
+    if (tools.length + selectedBindings.length >= bindLimit) {
+      toast("info", `单个技能版本最多绑定 ${bindLimit} 个工具`);
+      return;
+    }
+    const version =
+      tool.published_versions.find((v) => v.tool_version_id === tool.default_tool_version_id) ??
+      tool.published_versions[tool.published_versions.length - 1];
+    if (!version) return;
+    setSelectedBindings((prev) => [
+      ...prev,
+      { tool, tool_version_id: version.tool_version_id, version_number: version.version_number, role: "normal", note: "" },
+    ]);
+  }
+
+  function changePickVersion(toolId: string, toolVersionId: string) {
+    setSelectedBindings((prev) =>
+      prev.map((pick) => {
+        if (pick.tool.tool_id !== toolId) return pick;
+        const version = pick.tool.published_versions.find((v) => v.tool_version_id === toolVersionId);
+        return version ? { ...pick, tool_version_id: version.tool_version_id, version_number: version.version_number } : pick;
+      }),
+    );
+  }
+
+  function updatePick(toolId: string, patch: Partial<Pick<BindPick, "role" | "note">>) {
+    setSelectedBindings((prev) => prev.map((pick) => (pick.tool.tool_id === toolId ? { ...pick, ...patch } : pick)));
+  }
+
+  async function bindTools() {
+    if (!viewVersion || selectedBindings.length === 0) return;
+    setBinding(true);
     setError(null);
     try {
-      await request(`/api/z-torque/skills-tools/skill-versions/${viewVersion.id}/tools`, {
-        method: "POST",
-        body: { tool_version_id: selectedToolVersionId },
-      });
+      // 顺序提交：sort_order 由后端按当前最大值 +1 递增，保持已选区顺序
+      for (const pick of selectedBindings) {
+        await request(`/api/z-torque/skills-tools/skill-versions/${viewVersion.id}/tools`, {
+          method: "POST",
+          body: { tool_version_id: pick.tool_version_id, role: pick.role, note: pick.note.trim() || undefined },
+        });
+      }
+      const count = selectedBindings.length;
       setBindOpen(false);
       await refreshTools(viewVersion.id);
+      toast("success", `已绑定 ${count} 个工具`);
     } catch (err) {
       setError(errorText(err, "绑定失败"));
+      // 顺序提交可能部分成功：刷新已绑定列表，避免界面与实际状态不一致
+      await refreshTools(viewVersion.id);
     } finally {
-      setBusy(false);
+      setBinding(false);
+    }
+  }
+
+  async function moveTool(index: number, delta: number) {
+    if (!viewVersion) return;
+    const target = index + delta;
+    if (target < 0 || target >= tools.length) return;
+    const next = [...tools];
+    [next[index], next[target]] = [next[target], next[index]];
+    setTools(next);
+    try {
+      await request(`/api/z-torque/skills-tools/skill-versions/${viewVersion.id}/tools/order`, {
+        method: "PUT",
+        body: { tool_version_ids: next.map((item) => item.tool_version_id) },
+      });
+    } catch (err) {
+      setError(errorText(err, "调整执行顺序失败"));
+    } finally {
+      await refreshTools(viewVersion.id);
     }
   }
 
@@ -571,6 +731,27 @@ export function SkillsPage() {
       await refreshTools(viewVersion.id);
     } catch (err) {
       setError(errorText(err, "解绑失败"));
+    } finally {
+      setBusy(false);
+      setUnbindingId(null);
+    }
+  }
+
+  // 一键升级：绑定保留顺序/角色/备注，仅换指向同一工具的新发布版本（仅草稿可操作）
+  async function upgradeToolBinding(t: SkillToolLink) {
+    if (!viewVersion || !t.current_published_version_id) return;
+    setBusy(true);
+    setUnbindingId(t.tool_version_id);
+    setError(null);
+    try {
+      await request(`/api/z-torque/skills-tools/skill-versions/${viewVersion.id}/tools/${t.tool_version_id}/upgrade`, {
+        method: "POST",
+        body: { new_tool_version_id: t.current_published_version_id },
+      });
+      await refreshTools(viewVersion.id);
+      toast("success", `已升级到 v${t.current_version_number}`);
+    } catch (err) {
+      setError(errorText(err, "升级绑定失败"));
     } finally {
       setBusy(false);
       setUnbindingId(null);
@@ -596,6 +777,8 @@ export function SkillsPage() {
   // 详情操作按钮（状态驱动，对齐 skill.html 按钮组）
   const detailActions = useMemo(() => {
     if (!selected) return null;
+    // MD-Skill 内容源自目录文件，平台侧不可编辑（改 name 会导致下次扫描建出重复技能）
+    const isMd = selected.skill_type === "MD_SKILL";
     const isOfficial = sourceOf(selected, meId) === "official";
     const verStatus = (selected.latest_version_status ?? "").toUpperCase();
     if (isPendingEnable(selected)) {
@@ -640,8 +823,8 @@ export function SkillsPage() {
     if (verStatus === "DRAFT") {
       return (
         <>
-          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>编辑信息</button>
-          {versionDetail && (
+          {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>编辑信息</button>}
+          {!isMd && versionDetail && (
             <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEditor(versionDetail)}>继续编辑</button>
           )}
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void publishVersion(selected.latest_version_id!)}>发布</button>
@@ -652,8 +835,8 @@ export function SkillsPage() {
     // 已发布
     return (
       <>
-        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>编辑信息</button>
-        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>
+        {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>编辑信息</button>}
+        {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>}
         <button className="skill-btn-danger-outline" disabled={busy} onClick={() => void archiveSkill(selected.id)}>停用</button>
       </>
     );
@@ -830,7 +1013,7 @@ export function SkillsPage() {
                         {sourceOf(selected, meId) === "official" ? "平台" : "我的"}
                       </span>
                       <span className={`skill-mode-tag skill-mode-tag-lg ${modeOf(selected) === "script" ? "skill-mode-script" : "skill-mode-instruction"}`}>
-                        {modeOf(selected) === "script" ? "allow_scripts: true" : "纯指令"}
+                        {modeOf(selected) === "script" ? "允许脚本" : "纯指令"}
                       </span>
                       {detailPending ? (
                         <span className="skill-tag skill-tag-lg skill-tag-pending">待管理员确认启用</span>
@@ -849,7 +1032,11 @@ export function SkillsPage() {
               </div>
 
               <div className="skill-tabs">
-                {(["overview", "content", "scripts", "load", "tools", "versions"] as Tab[]).map((t) => (
+                {/* 页签按技能类型裁剪：scripts/load 为 MD-Skill 目录机制专属，标准技能不展示 */}
+                {(detailIsMd
+                  ? (["overview", "content", "scripts", "load", "tools", "versions"] as Tab[])
+                  : (["overview", "content", "tools", "versions"] as Tab[])
+                ).map((t) => (
                   <button
                     key={t}
                     className={`skill-tab${tab === t ? " active" : ""}`}
@@ -857,11 +1044,11 @@ export function SkillsPage() {
                     onClick={() => setTab(t)}
                   >
                     {t === "overview"
-                      ? "概览 · front-matter"
+                      ? "概览 · 元数据"
                       : t === "content"
                         ? "正文（操作手册）"
                         : t === "scripts"
-                          ? "scripts / examples"
+                          ? "脚本 / 示例"
                           : t === "load"
                             ? "加载与生效"
                             : t === "tools"
@@ -886,40 +1073,49 @@ export function SkillsPage() {
                         </span>
                       </div>
                     )}
-                    {!detailIsMd && (
+                    {!detailIsMd && sourceOf(selected, meId) === "official" && (
                       <div className="skill-alert skill-alert-info">
                         <span>ℹ</span>
-                        <span>该技能为控制台创建的非目录来源技能；平台资源只读，修改前请复制到个人空间。</span>
+                        <span>该技能为平台官方技能，资源只读；修改前请先复制到个人空间。</span>
                       </div>
                     )}
 
                     <div className="skill-section">
-                      <h3>SKILL.md front-matter 字段</h3>
+                      <h3>{detailIsMd ? "SKILL.md 元数据字段（front-matter）" : "技能配置"}</h3>
                       <div className="skill-form-grid">
                         <div className="skill-field">
-                          <label>name（唯一标识）</label>
+                          <label>唯一标识（name）</label>
                           <input type="text" value={detail?.name ?? selected.name} disabled />
                         </div>
-                        <div className="skill-field">
-                          <label>implementation（实现方式）</label>
-                          <input type="text" value={implementationLabel(viewVersion?.implementation)} disabled />
-                        </div>
+                        {detailIsMd && (
+                          <div className="skill-field">
+                            <label>实现方式（implementation）</label>
+                            <input type="text" value={implementationLabel(viewVersion?.implementation)} disabled />
+                          </div>
+                        )}
                         <div className="skill-field full">
-                          <label>description</label>
+                          <label>描述（description）</label>
                           <textarea value={detail?.description ?? selected.description ?? ""} disabled rows={2} />
                         </div>
-                        <div className="skill-field">
-                          <label>allow_scripts</label>
-                          <input type="text" value={viewVersion?.allow_scripts != null ? String(viewVersion.allow_scripts) : "—"} disabled />
-                        </div>
-                        <div className="skill-field">
-                          <label>requires_confirmation</label>
-                          <input type="text" value={viewVersion ? String(viewVersion.requires_confirmation) : "—"} disabled />
-                        </div>
-                        <div className="skill-field">
-                          <label>declared_version（文件内 version）</label>
-                          <input type="text" value={viewVersion?.declared_version ?? "—"} disabled />
-                        </div>
+                        {detailIsMd ? (
+                          <>
+                            <div className="skill-field">
+                              <label>允许脚本（allow_scripts）</label>
+                              <input type="text" value={viewVersion?.allow_scripts != null ? (viewVersion.allow_scripts ? "是" : "否") : "—"} disabled />
+                              <div className="help">md_script 技能发布与执行的前置闸门</div>
+                            </div>
+                            <div className="skill-field">
+                              <label>文件内版本（declared_version）</label>
+                              <input type="text" value={viewVersion?.declared_version ?? "—"} disabled />
+                            </div>
+                          </>
+                        ) : (
+                          <div className="skill-field">
+                            <label>需要确认（requires_confirmation）</label>
+                            <input type="text" value={viewVersion ? (viewVersion.requires_confirmation ? "是" : "否") : "—"} disabled />
+                            <div className="help">开启后任务执行到该技能会挂起，等待人工审批后继续</div>
+                          </div>
+                        )}
                         <div className="skill-field">
                           <label>来源目录</label>
                           <input
@@ -931,25 +1127,29 @@ export function SkillsPage() {
                       </div>
                     </div>
 
-                    <div className="skill-section">
-                      <h3>params（JSON Schema · 工具入参）<span className="hint">input_schema</span></h3>
-                      <div className="skill-schema-box">{prettyJson(viewVersion?.input_schema ?? { type: "object", properties: {} })}</div>
-                      <p className="skill-field help" style={{ marginTop: "10px" }}>
-                        执行前按 schema 校验入参；注册制路径下作为工具入参描述。
-                      </p>
-                    </div>
+                    {detailIsMd && (
+                      <>
+                        <div className="skill-section">
+                          <h3>params（JSON Schema · 工具入参）<span className="hint">input_schema</span></h3>
+                          <div className="skill-schema-box">{prettyJson(viewVersion?.input_schema ?? { type: "object", properties: {} })}</div>
+                          <p className="skill-field help" style={{ marginTop: "10px" }}>
+                            执行前按 schema 校验入参；注册制路径下作为工具入参描述。
+                          </p>
+                        </div>
 
-                    <div className="skill-section">
-                      <h3>output_schema（输出约束）</h3>
-                      <div className="skill-schema-box">{prettyJson(viewVersion?.output_schema ?? { type: "object", properties: {} })}</div>
-                    </div>
+                        <div className="skill-section">
+                          <h3>output_schema（输出约束）</h3>
+                          <div className="skill-schema-box">{prettyJson(viewVersion?.output_schema ?? { type: "object", properties: {} })}</div>
+                        </div>
+                      </>
+                    )}
 
                     <div className="skill-section">
                       <h3>运行标志</h3>
                       <div className="skill-flag-grid">
                         <div className="skill-flag-card">
-                          <div className="label">skill_type</div>
-                          <div className="value">{selected.skill_type}</div>
+                          <div className="label">技能类型</div>
+                          <div className="value">{selected.skill_type === "MD_SKILL" ? "MD-Skill（目录导入）" : "标准技能"}</div>
                         </div>
                         <div className="skill-flag-card">
                           <div className="label">当前版本状态</div>
@@ -989,9 +1189,12 @@ export function SkillsPage() {
                 ) : tab === "content" ? (
                   <div className="tab-panel">
                     <div className="skill-section">
-                      <h3>
+                      <h3 style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         正文 · 给模型看的操作手册
                         <span className="hint">不可信输入，不能覆盖系统策略 / PEP</span>
+                        {!detailIsMd && !editing && viewVersion?.status === "DRAFT" && (
+                          <button className="btn btn-secondary btn-sm" style={{ marginLeft: "auto" }} disabled={busy} onClick={() => openEditor(viewVersion)}>编辑</button>
+                        )}
                       </h3>
                       {editing ? (
                         <div className="skill-rules-editor">
@@ -1010,10 +1213,68 @@ export function SkillsPage() {
                         <div className="skill-readonly-banner">暂无指令内容。</div>
                       )}
                     </div>
+                    <div className="skill-section">
+                      <h3>
+                        调用提示
+                        <span className="hint">orchestration_hint · 工具顺序与协作提示，发布时固化</span>
+                      </h3>
+                      {editing ? (
+                        <textarea
+                          className="textarea"
+                          value={editOrchestration}
+                          onChange={(e) => setEditOrchestration(e.target.value)}
+                          disabled={busy}
+                          maxLength={2000}
+                          placeholder="例如：先调用「查询账户」确认身份，再按需调用「创建工单」；不要重复查询。"
+                        />
+                      ) : viewVersion?.orchestration_hint ? (
+                        <div className="skill-md-preview">
+                          <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{viewVersion.orchestration_hint}</pre>
+                        </div>
+                      ) : (
+                        <div className="skill-readonly-banner">暂无调用提示；绑定的工具顺序与角色会自动注入模型提示。</div>
+                      )}
+                    </div>
+                    {editing && (
+                      <div className="skill-section">
+                        <h3>版本参数</h3>
+                        <div className="skill-form-grid">
+                          <div className="skill-field full">
+                            <label>脚本源（script_source）</label>
+                            <textarea
+                              className="textarea"
+                              style={{ fontFamily: "var(--mono)" }}
+                              value={editScript}
+                              onChange={(e) => setEditScript(e.target.value)}
+                              disabled={busy}
+                              placeholder="scripts/summarize.py（留空则为纯指令模式）"
+                            />
+                            <div className="help">填入脚本路径则为脚本模式，留空为纯指令模式</div>
+                          </div>
+                          <div className="skill-field full">
+                            <label>权限要求（每行一个）</label>
+                            <textarea
+                              className="textarea"
+                              style={{ fontFamily: "var(--mono)", minHeight: 80 }}
+                              value={editPerms}
+                              onChange={(e) => setEditPerms(e.target.value)}
+                              disabled={busy}
+                              placeholder={"skill.execute\nfile.read"}
+                            />
+                          </div>
+                          <div className="skill-field full">
+                            <label style={{ cursor: "pointer", display: "inline-flex", alignItems: "center" }}>
+                              <input type="checkbox" checked={editConfirm} onChange={(e) => setEditConfirm(e.target.checked)} disabled={busy} style={{ marginRight: 6 }} />
+                              需要用户确认（requires_confirmation）：执行到该技能时挂起，等待人工审批
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     {editing ? (
                       <div className="skill-section" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
                         <button className="btn btn-secondary" disabled={busy} onClick={() => void saveVersion()}>保存草稿</button>
-                        <button className="btn btn-primary" disabled={busy} onClick={() => void publishVersion(editing.id)}>发布</button>
+                        <button className="btn btn-primary" disabled={busy} onClick={() => void saveAndPublish()}>发布</button>
                         <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
                       </div>
                     ) : (
@@ -1172,6 +1433,7 @@ export function SkillsPage() {
                         <table className="skill-tool-table">
                           <thead>
                             <tr>
+                              <th className="skill-tool-order-col">顺序</th>
                               <th>工具</th>
                               <th>版本</th>
                               <th>说明</th>
@@ -1180,14 +1442,65 @@ export function SkillsPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {tools.map((t) => (
+                            {tools.map((t, index) => (
                               <tr key={t.tool_version_id}>
-                                <td className="tool-name">{t.tool_name}</td>
-                                <td>v{t.version_number}</td>
-                                <td>{t.description ?? "—"}</td>
+                                <td className="skill-tool-order-col">{index + 1}</td>
+                                <td className="tool-name">
+                                  {t.tool_name}
+                                  {t.is_business_tool && <span className="skill-tag skill-tag-mine">业务封装</span>}
+                                  {t.tags && t.tags.length > 0 && (
+                                    <span className="skill-tool-tags">
+                                      {t.tags.map((tag) => (
+                                        <span key={tag} className="skill-tag skill-tag-neutral">{tag}</span>
+                                      ))}
+                                    </span>
+                                  )}
+                                </td>
+                                <td>
+                                  v{t.version_number}
+                                  {t.current_version_number != null && t.current_version_number > t.version_number && (
+                                    <span className="skill-tool-upgrade">
+                                      <span className="skill-tag skill-tag-pending">新版本 v{t.current_version_number}</span>
+                                      {canEditTools && (
+                                        <button
+                                          className="btn btn-ghost btn-sm"
+                                          disabled={busy}
+                                          onClick={() => void upgradeToolBinding(t)}
+                                          title="升级到最新发布版本（保留顺序/角色/备注）"
+                                        >
+                                          升级
+                                        </button>
+                                      )}
+                                    </span>
+                                  )}
+                                </td>
+                                <td>
+                                  <div className="skill-tool-note">
+                                    {t.role && <span className="skill-tag skill-tag-neutral">{BIND_ROLE_LABELS[t.role] ?? t.role}</span>}
+                                    <span>{t.note || t.description || "—"}</span>
+                                  </div>
+                                </td>
                                 <td><span className={`skill-tag ${statusInfo(t.status).cls}`}>{statusInfo(t.status).label}</span></td>
                                 {canEditTools && (
                                   <td className="skill-tool-op-col">
+                                    <button
+                                      className="btn btn-ghost btn-sm"
+                                      disabled={busy || index === 0}
+                                      onClick={() => void moveTool(index, -1)}
+                                      aria-label="上移"
+                                      title="上移"
+                                    >
+                                      ↑
+                                    </button>
+                                    <button
+                                      className="btn btn-ghost btn-sm"
+                                      disabled={busy || index === tools.length - 1}
+                                      onClick={() => void moveTool(index, 1)}
+                                      aria-label="下移"
+                                      title="下移"
+                                    >
+                                      ↓
+                                    </button>
                                     <button
                                       className="skill-btn-danger-outline btn-sm"
                                       disabled={busy}
@@ -1242,6 +1555,7 @@ export function SkillsPage() {
                                     v{v.version_number}
                                     {isCurrent && <span className="skill-tag skill-tag-published">当前发布</span>}
                                     <span className={`skill-tag ${statusInfo(v.status).cls}`}>{statusInfo(v.status).label}</span>
+                                    {v.requires_confirmation && <span className="skill-tag skill-tag-confirm" title="被调用时需人工确认后才会执行">需确认</span>}
                                   </div>
                                   <div className="v-meta">
                                     {fmtTime(v.published_at)}
@@ -1251,7 +1565,7 @@ export function SkillsPage() {
                                 <div className="v-actions">
                                   {v.status === "DRAFT" ? (
                                     <>
-                                      <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void loadVersionDetail(v.id).then((sv) => { if (sv) openEditor(sv); })}>编辑</button>
+                                      {!detailIsMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void loadVersionDetail(v.id).then((sv) => { if (sv) openEditor(sv); })}>编辑</button>}
                                       <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void publishVersion(v.id)}>发布</button>
                                     </>
                                   ) : (
@@ -1360,58 +1674,174 @@ export function SkillsPage() {
         )}
       </Modal>
 
-      {/* 绑定 Tool 弹窗 */}
+      {/* 绑定 Tool 弹窗：连接器分组 + 多选 + 版本/角色/备注 + 上限计数 */}
       <Modal
         open={bindOpen}
         title="绑定工具（已发布版本）"
         onClose={() => setBindOpen(false)}
-        width={520}
+        width={880}
         footer={
           <>
+            <span className="skill-bind-count">
+              已绑定 {tools.length} · 本次已选 {selectedBindings.length} · 上限 {bindLimit}
+            </span>
             <button className="btn btn-secondary" onClick={() => setBindOpen(false)}>取消</button>
-            <button className="btn btn-primary" disabled={busy || !selectedToolVersionId} onClick={() => void bindTool()}>绑定</button>
+            <button className="btn btn-primary" disabled={binding || selectedBindings.length === 0} onClick={() => void bindTools()}>
+              {binding ? "绑定中…" : `绑定 ${selectedBindings.length || ""}`.trim()}
+            </button>
           </>
         }
       >
+        <div className="skill-bind-toolbar">
+          <input
+            className="input"
+            value={bindQuery}
+            onChange={(e) => setBindQuery(e.target.value)}
+            placeholder="搜索工具名称、说明、标签或参数"
+            aria-label="搜索工具"
+          />
+          <select className="input" value={bindConnector} onChange={(e) => setBindConnector(e.target.value)} aria-label="按连接器过滤">
+            <option value="all">全部连接器</option>
+            {bindConnectorOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+          <select className="input" value={bindTag} onChange={(e) => setBindTag(e.target.value)} aria-label="按标签过滤">
+            <option value="all">全部标签</option>
+            {bindTagOptions.map((tag) => (
+              <option key={tag} value={tag}>{tag}</option>
+            ))}
+          </select>
+        </div>
+
         {loadingAvail ? (
           <Loading />
-        ) : availableTools.length === 0 ? (
-          <div className="skill-readonly-banner">当前没有可绑定的工具（需要有已发布版本的工具）。</div>
+        ) : filteredBindGroups.length === 0 ? (
+          <div className="skill-readonly-banner">当前没有可绑定的工具（需要有已发布版本的工具，或调整筛选条件）。</div>
         ) : (
-          <div className="skill-tool-picker">
-            {availableTools.flatMap((tool) =>
-              tool.versions
-                .filter((v) => v.status === "PUBLISHED")
-                .map((v) => {
-                  const vid = v.id;
-                  const already = boundVersionIds.has(vid);
-                  const checked = selectedToolVersionId === vid;
-                  return (
-                    <label
-                      key={vid}
-                      className={`skill-tool-picker-item${checked ? " selected" : ""}${already ? " disabled" : ""}`}
-                      title={already ? "已绑定当前草稿版本" : undefined}
-                    >
-                      <input
-                        type="radio"
-                        name="bind-tool-version"
-                        disabled={already}
-                        checked={checked}
-                        onChange={() => setSelectedToolVersionId(vid)}
-                      />
-                      <span className="t-name">{tool.name}</span>
-                      {tool.official && <span className="skill-tag skill-tag-official">平台</span>}
-                      <span className="t-ver">v{v.version_number}</span>
-                      <span className="t-desc">{tool.description ?? "—"}</span>
-                      {already && <span className="t-bound">已绑定</span>}
-                    </label>
-                  );
-                }),
-            )}
+          <div className="skill-bind-layout">
+            <div className="skill-bind-list">
+              {filteredBindGroups.map((group) => (
+                <div key={group.connector_id ?? "none"} className="skill-bind-group">
+                  <div className="skill-bind-group-title">
+                    <span>{group.connector_name}</span>
+                    <span className="hint">{group.tools.length} 个</span>
+                  </div>
+                  {group.tools.map((tool) => {
+                    const alreadyBound = tool.bound_to_current_version || boundVersionIds.has(tool.default_tool_version_id);
+                    const picked = selectedBindings.some((pick) => pick.tool.tool_id === tool.tool_id);
+                    const disabled = alreadyBound || (!picked && bindTotalCount >= bindLimit);
+                    return (
+                      <label
+                        key={tool.tool_id}
+                        className={`skill-tool-picker-item${picked ? " selected" : ""}${disabled ? " disabled" : ""}`}
+                        title={alreadyBound ? "已绑定当前草稿版本" : undefined}
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={disabled}
+                          checked={picked || alreadyBound}
+                          onChange={() => toggleBinding(tool)}
+                        />
+                        <div className="t-main">
+                          <div className="t-row">
+                            <span className="t-name">{tool.name}</span>
+                            {tool.is_business_tool && <span className="skill-tag skill-tag-mine">业务封装</span>}
+                            {tool.requires_confirmation && <span className="skill-tag skill-tag-confirm">需审批</span>}
+                            {tool.tags.map((tag) => (
+                              <span key={tag} className="skill-tag skill-tag-neutral">{tag}</span>
+                            ))}
+                            {alreadyBound && <span className="t-bound">已绑定</span>}
+                          </div>
+                          <div className="t-desc">{tool.description || tool.param_summary || "—"}</div>
+                          {tool.params && tool.params.length > 0 && (
+                            <div className="t-params-list">
+                              {tool.params.slice(0, 6).map((p) => (
+                                <span
+                                  key={p.name}
+                                  className={`skill-tag ${p.required ? "skill-tag-confirm" : "skill-tag-neutral"}`}
+                                  title={`${p.type}${p.description ? " · " + p.description : ""}${p.required ? "（必填）" : "（可选）"}`}
+                                >
+                                  {p.name}
+                                  {!p.required && "?"}
+                                </span>
+                              ))}
+                              {tool.params.length > 6 && <span className="t-more">+{tool.params.length - 6}</span>}
+                            </div>
+                          )}
+                        </div>
+                        <span className="t-ver">v{tool.published_versions[tool.published_versions.length - 1]?.version_number ?? 1}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+
+            <div className="skill-bind-picked">
+              <div className="skill-bind-group-title">
+                <span>本次已选</span>
+                <span className={bindTotalCount >= bindLimit ? "skill-bind-limit danger" : "skill-bind-limit"}>
+                  {bindTotalCount} / {bindLimit}
+                </span>
+              </div>
+              {selectedBindings.length === 0 ? (
+                <div className="skill-readonly-banner">从左侧勾选工具；勾选后在此设置版本、执行角色与说明。</div>
+              ) : (
+                selectedBindings.map((pick, index) => (
+                  <div key={pick.tool.tool_id} className="skill-bind-pick-card">
+                    <div className="pick-head">
+                      <span className="pick-index">{tools.length + index + 1}</span>
+                      <span className="t-name">{pick.tool.name}</span>
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setSelectedBindings((prev) => prev.filter((item) => item.tool.tool_id !== pick.tool.tool_id))}
+                        aria-label={`移除 ${pick.tool.name}`}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                    <div className="pick-fields">
+                      <label>
+                        <span>版本</span>
+                        <select
+                          className="input"
+                          value={pick.tool_version_id}
+                          onChange={(e) => changePickVersion(pick.tool.tool_id, e.target.value)}
+                        >
+                          {pick.tool.published_versions.map((version) => (
+                            <option key={version.tool_version_id} value={version.tool_version_id}>v{version.version_number}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label>
+                        <span>角色</span>
+                        <select
+                          className="input"
+                          value={pick.role}
+                          onChange={(e) => updatePick(pick.tool.tool_id, { role: e.target.value })}
+                        >
+                          {Object.entries(BIND_ROLE_LABELS).map(([value, label]) => (
+                            <option key={value} value={value}>{label}</option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
+                    <input
+                      className="input"
+                      value={pick.note}
+                      onChange={(e) => updatePick(pick.tool.tool_id, { note: e.target.value })}
+                      placeholder="调用说明（可选，注入模型提示）"
+                      maxLength={200}
+                    />
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         )}
         <p className="skill-field help" style={{ marginTop: "10px" }}>
-          仅可选择已发布状态的工具版本；绑定后随草稿保存，发布时固化进快照。
+          仅可选择已发布状态的工具版本；按勾选顺序作为默认执行顺序，发布时固化进快照。
         </p>
       </Modal>
 
@@ -1438,50 +1868,6 @@ export function SkillsPage() {
         <p className="skill-field help">仅修改技能基本信息；版本内容（指令、脚本、工具绑定）在对应草稿版本中编辑。</p>
       </Modal>
 
-      {/* 编辑草稿的脚本源编辑弹窗 */}
-      {editing && (
-        <Modal
-          open={true}
-          title={`编辑草稿 v${editing.version_number}`}
-          onClose={() => setEditing(null)}
-          footer={
-            <>
-              <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
-              <button className="btn btn-secondary" disabled={busy} onClick={() => void saveVersion()}>保存草稿</button>
-              <button className="btn btn-primary" disabled={busy} onClick={() => void publishVersion(editing.id)}>发布</button>
-            </>
-          }
-        >
-          <div className="form-field">
-            <label>脚本源 script_source</label>
-            <textarea
-              className="textarea"
-              style={{ fontFamily: "var(--mono)", minHeight: "120px" }}
-              value={editScript}
-              onChange={(e) => setEditScript(e.target.value)}
-              placeholder="scripts/summarize.py（留空则为纯指令模式）"
-            />
-            <span className="hint">填入脚本路径则为脚本模式，留空为纯指令模式</span>
-          </div>
-          <div className="form-field">
-            <label>权限要求（每行一个）</label>
-            <textarea
-              className="textarea"
-              style={{ fontFamily: "var(--mono)", minHeight: "80px" }}
-              value={editPerms}
-              onChange={(e) => setEditPerms(e.target.value)}
-              placeholder="skill.execute&#10;file.read"
-            />
-          </div>
-          <div className="form-field">
-            <label>
-              <input type="checkbox" checked={editConfirm} onChange={(e) => setEditConfirm(e.target.checked)} style={{ marginRight: 6 }} />
-              需要用户确认 requires_confirmation
-            </label>
-          </div>
-        </Modal>
-      )}
-
       {/* 停用：可逆操作，轻确认 */}
       <ConfirmDialog
         open={confirmArchive !== null}
@@ -1489,7 +1875,7 @@ export function SkillsPage() {
         confirmText="停用"
         busy={busy}
         onCancel={() => setConfirmArchive(null)}
-        onConfirm={() => { if (confirmArchive) void archiveSkill(confirmArchive.id); }}
+        onConfirm={() => { if (confirmArchive) { const { id } = confirmArchive; setConfirmArchive(null); void archiveSkill(id); } }}
       >
         <p>技能「{confirmArchive?.name ?? ""}」将进入「已停用」状态，不再被智能体调用。已发布版本与绑定关系保留，后续可在列表中重新启用。</p>
       </ConfirmDialog>
@@ -1504,7 +1890,7 @@ export function SkillsPage() {
         requireLabel="请输入技能名称以确认删除"
         busy={busy}
         onCancel={() => setConfirmDelete(null)}
-        onConfirm={() => { if (confirmDelete) void deleteSkill(confirmDelete.id); }}
+        onConfirm={() => { if (confirmDelete) { const { id } = confirmDelete; setConfirmDelete(null); void deleteSkill(id); } }}
       >
         <p>技能「{confirmDelete?.name ?? ""}」的<strong>全部版本与工具绑定将被级联删除</strong>，且不可恢复。如不再使用，建议改用「停用」。</p>
       </ConfirmDialog>

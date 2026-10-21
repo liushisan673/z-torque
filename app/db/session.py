@@ -18,7 +18,11 @@ engine = create_engine(_database_url(), future=True, pool_pre_ping=True)
 
 
 def _ensure_sqlite_columns() -> None:
-    """项目无迁移机制：对既有 SQLite 库幂等补充新增列（可空列，ALTER 安全）。"""
+    """历史 SQLite 开发库的兜底补列。
+
+    正式表结构以 alembic 迁移为准（alembic upgrade head）。这里只服务尚未执行迁移的本地
+    dev 库，做幂等 ALTER；非 SQLite 方言不做任何打补丁，避免掩盖迁移缺失。
+    """
     url = _database_url()
     if not url.startswith("sqlite:///"):
         return

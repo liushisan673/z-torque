@@ -7,6 +7,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.kernel.ports.lock_provider import LockProvider
+from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import transition_task
 from app.kernel.task.states import TaskStatus
 from app.models import Confirmation, Conversation, Message, Outbox, Task, TaskCheckpoint, TaskEvent
@@ -105,7 +106,7 @@ def execute_simulated(db: Session, task_id: UUID) -> None:
     if task is None:
         return
     db.refresh(task)
-    checkpoint = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == task.id))
+    checkpoint = latest_checkpoint(db, task.id)
     if checkpoint is not None:
         if checkpoint.status not in {"APPROVED", "RESUMED"}:
             transition_task(db, task, TaskStatus.FAILED, "TASK_CHECKPOINT_INVALID", "task checkpoint is not approved")

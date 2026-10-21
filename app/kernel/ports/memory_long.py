@@ -6,8 +6,8 @@ class LongTermMemoryStore(ABC):
     """memory.long Port 契约：用户级长期记忆 KV（契约 §3 信息族）。
 
     以 (tenant, user, key) 存取文本事实；社区版内置进程内 KV（单机、进程重启
-    即失，memory_long_enabled 默认关闭且当前无调用方），企业版可替换为
-    DB / 向量后端（可后续接 vector.store）。
+    即失，memory_long_enabled 默认关闭）。调用方：context_builder 召回会话摘要、
+    runtime._maybe_summarize 写入摘要；企业版可替换为 DB / 向量后端。
     """
 
     @abstractmethod

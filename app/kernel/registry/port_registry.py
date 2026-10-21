@@ -64,7 +64,8 @@ class UnavailableCapability:
     """可选 Port 缺失时的占位对象：任何属性访问都抛 AI_CAPABILITY_UNAVAILABLE。
 
     调用方拿到它即视为"能力显式不可用"，不会伪装成功（阶段00 §3.8 约束 9）。
-    审计链接入由调用侧网关在捕获该错误时落库。
+    审计链路由 `app.kernel.registry.active.call_optional` 在捕获该错误时落库
+    （CAPABILITY_UNAVAILABLE），并降级返回 None。
     """
 
     def __init__(self, port_name: str) -> None:
@@ -126,7 +127,10 @@ class PortRegistry:
         try:
             resolution.instance = top.factory()
         except Exception as exc:
+            # 工厂失败必须降级状态，否则 status() 会报告 available=true 而实例为 None（P2-16）
             resolution.error = f"port {name} factory failed: {exc}"
+            resolution.state = PortState.UNAVAILABLE
+            resolution.instance = None
         return resolution
 
     # ---- 访问 ----

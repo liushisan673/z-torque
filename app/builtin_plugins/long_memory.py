@@ -1,8 +1,8 @@
 """memory.long Port 的内置实现：进程内 KV 长期记忆（契约 §3.5 对照表「内置简单 KV，可后续接向量」）。
 
-单机进程内存储、进程重启即失（诚实语义）；memory_long_enabled 默认 False 且
-社区版当前无调用方。企业版可经 PortRegistry 以 PLUGIN/EXPLICIT 优先级替换为
-DB / 向量后端（可后续接 vector.store）。
+单机进程内存储、进程重启即失（诚实语义）；memory_long_enabled 默认 False。
+调用方：context_builder 召回（build_context）与 runtime 摘要写入（_maybe_summarize）。
+企业版可经 PortRegistry 以 PLUGIN/EXPLICIT 优先级替换为 DB / 向量后端（可后续接 vector.store）。
 """
 
 from uuid import UUID

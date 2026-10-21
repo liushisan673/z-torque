@@ -17,8 +17,9 @@ from app.kernel.registry.port_registry import PortPriority
 
 
 class BuiltinAuthzProvider(AuthzProvider):
-    def __init__(self) -> None:
-        self._checker = PermissionChecker()
+    def __init__(self, policy_source: object | None = None) -> None:
+        # 权限来源走 policy.source Port（P2-14）；缺失时 PermissionChecker 自查内置图
+        self._checker = PermissionChecker(policy_source)
 
     def has_all(self, db: Session, user_id: UUID | None, required: Iterable[str]) -> bool:
         return self._checker.has_all(db, user_id, required)
@@ -34,6 +35,6 @@ class AuthzProviderPlugin:
     def contribute(self, sdk) -> None:
         # 装配期对象共享（与 secret.provider 同模式）：skill_executors 在 contribute
         # 阶段即需注入裁决器，而 Port 实例化要等 resolve()。
-        provider = BuiltinAuthzProvider()
+        provider = BuiltinAuthzProvider(sdk.shared("policy.source"))
         sdk.publish("authz.provider", provider)
         sdk.register_port("authz.provider", lambda: provider, label="builtin_rbac_checker")

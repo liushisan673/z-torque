@@ -190,6 +190,242 @@ async def test_import_openapi_respects_method_filter_and_prefix():
 
 
 @pytest.mark.asyncio
+async def test_register_composite_tool_accepts_linked_published_versions():
+    """业务封装登记按 ConnectorTool.tool_id 校验归属，不应访问不存在的 tool_version_id。"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        cid = await _create_rest_connector(client, token, "CRM-COMBO", "https://crm.example.com/api/v2")
+        imported = await client.post(
+            f"{CONNECTORS}/{cid}/tools/import-openapi",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"source": "json", "spec": SPEC, "only_methods": ["GET"]},
+        )
+        assert imported.status_code == 200, imported.text
+        versions = [item["tool_version_id"] for item in imported.json()["data"]["registered"]]
+        assert len(versions) == 2
+
+        resp = await client.post(
+            f"{CONNECTORS}/{cid}/composite-tools",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "crm_combo",
+                "description": "组合查询",
+                "tags": ["combo"],
+                "steps": [
+                    {"key": "step1", "tool_version_id": versions[0], "arguments": {}},
+                    {"key": "step2", "tool_version_id": versions[1], "arguments": {"user_id": "$steps.step1.output.id"}},
+                ],
+                "output_path": "$steps.step2.output",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+
+        listed = await client.get(f"{CONNECTORS}/{cid}/tools", headers={"Authorization": f"Bearer {token}"})
+        assert listed.status_code == 200, listed.text
+        combo = next(item for item in listed.json()["data"] if item["id"] == data["tool_id"])
+        assert combo["tool_type"] == "COMPOSITE"
+        assert combo["is_business_tool"] is True
+        assert combo["published_version_id"] == data["tool_version_id"]
+
+
+@pytest.mark.asyncio
+async def test_register_composite_tool_autoderives_arguments_and_input_schema():
+    """步骤参数留空时：必填参数自动映射 $input.<name>，入参 Schema 自动派生（非专业用户兜底）。"""
+    from sqlalchemy import select as sa_select
+
+    from app.models import ToolVersion as ToolVersionModel
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        cid = await _create_rest_connector(client, token, "CRM-AUTO", "https://crm.example.com/api/v2")
+        # 注册一个带必填参数 location 的 HTTP 工具
+        reg = await client.post(
+            f"{CONNECTORS}/{cid}/tools/register",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "search_city",
+                "description": "城市搜索",
+                "tool_type": "HTTP",
+                "config": {"method": "GET", "url": "https://geo.example.com/search"},
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string", "description": "中文城市名"}},
+                    "required": ["location"],
+                },
+            },
+        )
+        assert reg.status_code == 200, reg.text
+        child_version = reg.json()["data"]["tool_version_id"]
+
+        resp = await client.post(
+            f"{CONNECTORS}/{cid}/composite-tools",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "weather_combo",
+                "steps": [{"key": "step1", "tool_version_id": child_version, "arguments": {}}],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        composite_version = resp.json()["data"]["tool_version_id"]
+
+        with SessionLocal() as db:
+            tv = db.scalar(sa_select(ToolVersionModel).where(ToolVersionModel.id == composite_version))
+            assert tv is not None
+            schema = tv.input_schema or {}
+            assert schema.get("required") == ["location"]
+            assert schema["properties"]["location"]["type"] == "string"
+            step = tv.config_snapshot["steps"][0]
+            assert step["arguments"] == {"location": "$input.location"}
+
+
+@pytest.mark.asyncio
+async def test_register_composite_tool_derives_schema_even_when_arguments_prefilled():
+    """前端预填步骤参数时，入参 Schema 仍应自动派生（派生与预填解耦）。"""
+    from sqlalchemy import select as sa_select
+
+    from app.models import ToolVersion as ToolVersionModel
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        cid = await _create_rest_connector(client, token, "CRM-PREFILL", "https://crm.example.com/api/v2")
+        reg = await client.post(
+            f"{CONNECTORS}/{cid}/tools/register",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "search_city",
+                "tool_type": "HTTP",
+                "config": {"method": "GET", "url": "https://geo.example.com/search"},
+                "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+            },
+        )
+        assert reg.status_code == 200, reg.text
+        child_version = reg.json()["data"]["tool_version_id"]
+
+        resp = await client.post(
+            f"{CONNECTORS}/{cid}/composite-tools",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "prefilled_combo",
+                "steps": [{"key": "step1", "tool_version_id": child_version, "arguments": {"location": "$input.location"}}],
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        composite_version = resp.json()["data"]["tool_version_id"]
+
+        with SessionLocal() as db:
+            tv = db.scalar(sa_select(ToolVersionModel).where(ToolVersionModel.id == composite_version))
+            assert tv is not None
+            schema = tv.input_schema or {}
+            # 预填不应阻止派生：组合工具入参 Schema 必须包含 location
+            assert schema.get("required") == ["location"]
+            assert "location" in (schema.get("properties") or {})
+            assert tv.config_snapshot["steps"][0]["arguments"] == {"location": "$input.location"}
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_connector_tool_publishes_new_version():
+    """更新配置生成 v(n+1) 并发布：current 指向新版本，历史版本保留。"""
+    from sqlalchemy import select as sa_select
+
+    from app.models import Tool as ToolModel
+    from app.models import ToolVersion as ToolVersionModel
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        cid = await _create_rest_connector(client, token, "CRM-RECONF", "https://crm.example.com/api/v2")
+        reg = await client.post(
+            f"{CONNECTORS}/{cid}/tools/register",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "search_city",
+                "tool_type": "HTTP",
+                "config": {"method": "GET", "url": "https://geo.example.com/v1/search"},
+                "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+            },
+        )
+        assert reg.status_code == 200, reg.text
+        v1 = reg.json()["data"]["tool_version_id"]
+        tool_id = reg.json()["data"]["tool_id"]
+
+        resp = await client.post(
+            f"{CONNECTORS}/{cid}/tools/{tool_id}/reconfigure",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "external_name": "search_city_v2",
+                "config": {"method": "GET", "url": "https://geo.example.com/v2/search"},
+                "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        assert data["version_number"] == 2
+
+        with SessionLocal() as db:
+            tool = db.get(ToolModel, tool_id)
+            assert tool is not None and str(tool.current_published_version_id) == data["tool_version_id"]
+            versions = db.scalars(sa_select(ToolVersionModel).where(ToolVersionModel.tool_id == tool_id).order_by(ToolVersionModel.version_number)).all()
+            assert [v.version_number for v in versions] == [1, 2]
+            assert versions[0].config_snapshot["url"] == "https://geo.example.com/v1/search"
+            assert versions[1].config_snapshot["url"] == "https://geo.example.com/v2/search"
+            assert versions[1].config_snapshot["external_name"] == "search_city_v2"
+            # 列表应显示新版本号
+        listed = await client.get(f"{CONNECTORS}/{cid}/tools", headers={"Authorization": f"Bearer {token}"})
+        assert listed.status_code == 200
+        item = next(x for x in listed.json()["data"] if x["id"] == tool_id)
+        assert item["published_version_number"] == 2
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_composite_tool_publishes_new_version():
+    """组合工具更新步骤参数生成新版本：新版本生效，旧版本快照不变。"""
+    from sqlalchemy import select as sa_select
+
+    from app.models import ToolVersion as ToolVersionModel
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client)
+        cid = await _create_rest_connector(client, token, "CRM-COMBO2", "https://crm.example.com/api/v2")
+        imported = await client.post(
+            f"{CONNECTORS}/{cid}/tools/import-openapi",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"source": "json", "spec": SPEC, "only_methods": ["GET"]},
+        )
+        assert imported.status_code == 200, imported.text
+        versions = [item["tool_version_id"] for item in imported.json()["data"]["registered"]]
+        reg = await client.post(
+            f"{CONNECTORS}/{cid}/composite-tools",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"name": "combo_tool", "steps": [{"key": "step1", "tool_version_id": versions[0], "arguments": {}}]},
+        )
+        assert reg.status_code == 200, reg.text
+        combo_tool = reg.json()["data"]["tool_id"]
+
+        resp = await client.post(
+            f"{CONNECTORS}/{cid}/composite-tools/{combo_tool}/reconfigure",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "name": "combo_tool",
+                "steps": [
+                    {"key": "step1", "tool_version_id": versions[0], "arguments": {}},
+                    {"key": "step2", "tool_version_id": versions[1], "arguments": {"user_id": "$steps.step1.output.id"}},
+                ],
+                "output_path": "$steps.step2.output",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        assert data["version_number"] == 2
+
+        with SessionLocal() as db:
+            vs = db.scalars(sa_select(ToolVersionModel).where(ToolVersionModel.tool_id == combo_tool).order_by(ToolVersionModel.version_number)).all()
+            assert [v.version_number for v in vs] == [1, 2]
+            assert len(vs[0].config_snapshot["steps"]) == 1
+            assert len(vs[1].config_snapshot["steps"]) == 2
+            assert vs[1].config_snapshot["output_path"] == "$steps.step2.output"
+
+
+@pytest.mark.asyncio
 async def test_import_openapi_rejects_non_rest_connector():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client)

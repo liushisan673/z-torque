@@ -20,6 +20,9 @@ PLUGIN_API_VERSION = "zsoftym.ai/plugin.v1"
 # 访问裸数据库引擎所需的权限（契约 §5.4：未声明即拒绝）
 ENGINE_PERMISSION = "db.query"
 
+# 装配上下文共享键：skill.executor Port 的实现实例（跨插件挂载 stdio 注册表用）
+SKILL_GATEWAY_KEY = "__skill_gateway__"
+
 
 @dataclass(frozen=True)
 class PluginManifest:
@@ -43,20 +46,21 @@ class PluginSdk:
     - expose_skill_gateway / attach_stdio_registry：装配产出物挂载。
     """
 
-    def __init__(self, *, settings: Any = None, engine: Any = None, registry: Any = None, objects: dict[str, Any] | None = None, manifest: PluginManifest | None = None) -> None:
+    def __init__(self, *, settings: Any = None, engine: Any = None, registry: Any = None, objects: dict[str, Any] | None = None, manifest: PluginManifest | None = None, builtin: bool = True) -> None:
         self._settings = settings
         self._engine = engine
         self._registry = registry
         self._objects = objects if objects is not None else {}
+        self._builtin = builtin
         # 直构/测试场景未传 manifest 时使用宽松占位（生产装配始终传真实 manifest）
         self._manifest = manifest or PluginManifest(name="adhoc", description="", provides=(), permissions=(ENGINE_PERMISSION,))
         self._skill_gateway: Any = None
         self._stdio_registry: Any = None
 
     @classmethod
-    def of(cls, plugin: Any, *, settings: Any = None, engine: Any = None, registry: Any = None, objects: dict[str, Any] | None = None) -> "PluginSdk":
+    def of(cls, plugin: Any, *, settings: Any = None, engine: Any = None, registry: Any = None, objects: dict[str, Any] | None = None, builtin: bool = True) -> "PluginSdk":
         """按插件 manifest 构造 SDK（测试/直构便利；生产装配由 assembly 逐插件构造）。"""
-        return cls(settings=settings, engine=engine, registry=registry, objects=objects, manifest=plugin.manifest)
+        return cls(settings=settings, engine=engine, registry=registry, objects=objects, manifest=plugin.manifest, builtin=builtin)
 
     @property
     def settings(self) -> Any:
@@ -73,8 +77,14 @@ class PluginSdk:
             raise PermissionError(f"plugin {self._manifest.name} lacks '{ENGINE_PERMISSION}' permission; engine access is denied (契约 §5.4)")
         return self._engine
 
-    def register_port(self, port_name: str, factory: Any, *, priority: int = PortPriority.BUILTIN, label: str) -> None:
-        self._registry.register(port_name, factory, priority=priority, label=label, plugin=self._manifest.name)
+    def register_port(self, port_name: str, factory: Any, *, priority: int | None = None, label: str) -> None:
+        """注册 Port：内置插件默认 BUILTIN；第三方插件默认 PLUGIN。
+
+        契约 §3「显式配置 > 插件优先级 > 内置默认」因此无需插件手写 priority
+        即可覆盖内置实现（P2-15）。
+        """
+        resolved_priority = priority if priority is not None else (PortPriority.BUILTIN if self._builtin else PortPriority.PLUGIN)
+        self._registry.register(port_name, factory, priority=resolved_priority, label=label, plugin=self._manifest.name)
 
     def publish(self, key: str, value: Any) -> None:
         self._objects[key] = value
@@ -84,16 +94,26 @@ class PluginSdk:
 
     def expose_skill_gateway(self, gateway: Any) -> None:
         self._skill_gateway = gateway
+        # 跨插件共享（契约 §5.3）：SkillGateway 是 skill.executor Port 的实现体，
+        # 后加载的插件（如 mcp_connector）需要把装配产出挂到同一个实例上。
+        # 每个插件持有独立 SDK，单靠实例字段无法跨插件传递，故同步写入装配上下文。
+        self._objects[SKILL_GATEWAY_KEY] = gateway
 
     @property
     def skill_gateway(self) -> Any:
         return self._skill_gateway
 
     def attach_stdio_registry(self, registry: Any) -> None:
-        """挂载 stdio 传输注册表：同时写入装配产出与已暴露的 SkillGateway。"""
+        """挂载 stdio 传输注册表：同时写入装配产出与已暴露的 SkillGateway。
+
+        mcp_connector 与 skill_executors 由不同插件各自持有 SDK，本 SDK 的
+        `_skill_gateway` 通常为 None；此时回退到装配上下文中的共享实例，
+        否则 stdio 工具在执行期永远取不到注册表（P0-1）。
+        """
         self._stdio_registry = registry
-        if self._skill_gateway is not None:
-            self._skill_gateway.stdio_registry = registry
+        gateway = self._skill_gateway if self._skill_gateway is not None else self._objects.get(SKILL_GATEWAY_KEY)
+        if gateway is not None:
+            gateway.stdio_registry = registry
 
     @property
     def stdio_registry(self) -> Any:

@@ -7,11 +7,13 @@ DB_SQL（连接器目标库执行）仍在 app/kernel/db_executor.py（含注册
 """
 
 import ipaddress
+import json
 import re
 import socket
 from typing import Any
 from urllib.parse import urlparse
 
+import httpcore
 import httpx
 from sqlalchemy import Engine, text
 from sqlglot import exp, parse
@@ -34,6 +36,25 @@ class McpExecutor:
 
     def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
         return ExecutionResult(status="FAILED", error_code="AI_MCP_UNAVAILABLE", error_message="MCP connector is not connected and negotiated")
+
+
+class _PinnedBackend(httpcore.SyncBackend):
+    """把 TCP 连接固定到校验过的 IP，同时保留原主机名用于 TLS SNI 与证书校验。
+
+    httpx/httpcore 默认在连接时再次解析域名：若只做前置 getaddrinfo 校验，攻击者可在
+    校验与连接之间改变 DNS 结果（DNS rebinding TOCTOU）。这里在连接层改写目标地址，
+    域名仅参与 TLS 校验，从根上消除二次解析。
+    """
+
+    def __init__(self, host: str, ip: str) -> None:
+        super().__init__()
+        self._host = host
+        self._ip = ip
+
+    def connect_tcp(self, host: str, port: int, timeout: float | None = None, local_address: str | None = None, socket_options=None):
+        if host != self._host:
+            raise httpcore.ConnectError("connection host differs from the validated host")
+        return super().connect_tcp(self._ip, port, timeout=timeout, local_address=local_address, socket_options=socket_options)
 
 
 class HttpExecutor:
@@ -64,10 +85,17 @@ class HttpExecutor:
         # 未声明维持默认 SSRF 收敛（https + 公网）。host 始终必须在 allowed_hosts 白名单内。
         target_policy = config.get("target_policy") if isinstance(config.get("target_policy"), dict) else {}
         allow_private = bool(config.get("allow_private_network") or target_policy.get("allow_private_network"))
-        if not self._allowed_url(url, config.get("allowed_hosts", []), allow_private):
+        target = self._validated_target(url, config.get("allowed_hosts", []), allow_private)
+        if target is None:
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_TARGET_BLOCKED", error_message="HTTP target is not allowed")
+        host, pinned_ip = target
         try:
-            with httpx.Client(follow_redirects=False, timeout=timeout_seconds) as client:
+            client = self._client(timeout_seconds, host, pinned_ip)
+        except RuntimeError:
+            # 无法把连接固定到已校验地址时 fail-closed，避免退化为可被 rebinding 绕过的校验
+            return ExecutionResult(status="FAILED", error_code="AI_HTTP_TARGET_BLOCKED", error_message="HTTP client cannot pin the validated address")
+        try:
+            with client:
                 if method == "POST":
                     # 导入工具约定：requestBody 整体作为 __body__ 参数；其余参数拼 query
                     body = arguments.get("__body__")
@@ -77,7 +105,14 @@ class HttpExecutor:
                     params: dict[str, Any] = {**query_params, **arguments}
                     response = client.get(url, params=params, headers=headers)
             body = response.text[: int(config.get("max_response_bytes", 1_000_000))]
-            return ExecutionResult(status="SUCCEEDED" if response.is_success else "FAILED", data={"status_code": response.status_code, "body": body}, error_code=None if response.is_success else "AI_HTTP_ERROR")
+            # body 为响应原文（截断）；能解析为 JSON 时附加 json 字段，
+            # 组合工具步骤间即可引用内层字段（$steps.<key>.output.json.<path>）
+            data: dict[str, Any] = {"status_code": response.status_code, "body": body}
+            try:
+                data["json"] = json.loads(body)
+            except ValueError:
+                data["json"] = None
+            return ExecutionResult(status="SUCCEEDED" if response.is_success else "FAILED", data=data, error_code=None if response.is_success else "AI_HTTP_ERROR")
         except (httpx.HTTPError, ValueError) as exc:
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_REQUEST_FAILED", error_message=str(exc))
 
@@ -110,20 +145,53 @@ class HttpExecutor:
         return _TEMPLATE.sub(substitute, value)
 
     @staticmethod
-    def _allowed_url(url: str, allowed_hosts: list[str], allow_private_network: bool = False) -> bool:
+    def _client(timeout_seconds: float, host: str, pinned_ip: str | None) -> httpx.Client:
+        """构造 HTTP 客户端；公网目标把连接钉在已校验 IP 上（pinned_ip=None 表示显式放行内网）。"""
+        if pinned_ip is None:
+            return httpx.Client(follow_redirects=False, timeout=timeout_seconds)
+        transport = httpx.HTTPTransport(retries=0)
+        try:
+            transport._pool._network_backend = _PinnedBackend(host, pinned_ip)
+        except AttributeError as exc:  # httpx 内部结构变化：宁可拒绝也不静默退化
+            transport.close()
+            raise RuntimeError("http transport cannot be pinned") from exc
+        return httpx.Client(transport=transport, follow_redirects=False, timeout=timeout_seconds)
+
+    @staticmethod
+    def _validated_target(url: str, allowed_hosts: list[str], allow_private_network: bool = False) -> tuple[str, str | None] | None:
+        """校验目标并返回 (host, 待固定 IP)；None 表示拒绝。
+
+        返回的 IP 由调用方传给 _PinnedBackend，保证连接阶段不再解析域名。
+        """
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.hostname not in set(allowed_hosts):
-            return False
+            return None
         if allow_private_network:
             # 显式放行：连接器 target_policy 声明的内网/明文目标由配置者担责
-            return True
+            return parsed.hostname, None
         if parsed.scheme != "https":
-            return False
+            return None
         try:
             addresses = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
-            return all(not ipaddress.ip_address(item[4][0]).is_private for item in addresses)
         except (OSError, ValueError):
-            return False
+            return None
+        resolved: list[str] = []
+        for item in addresses:
+            try:
+                address = ipaddress.ip_address(item[4][0])
+            except ValueError:
+                return None
+            # 回环/私网/链路本地/保留段全部拒绝（比 is_private 更严格，覆盖 CGNAT 等）
+            if not address.is_global:
+                return None
+            resolved.append(str(address))
+        if not resolved:
+            return None
+        return parsed.hostname, resolved[0]
+
+    @staticmethod
+    def _allowed_url(url: str, allowed_hosts: list[str], allow_private_network: bool = False) -> bool:
+        return HttpExecutor._validated_target(url, allowed_hosts, allow_private_network) is not None
 
 
 class DbQueryExecutor:

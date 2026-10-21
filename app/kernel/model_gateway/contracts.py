@@ -40,9 +40,10 @@ class ModelResponse:
 @dataclass(frozen=True)
 class ModelRequest:
     trace_id: str
-    conversation_id: UUID
     messages: list[ModelMessage]
     model: str
+    # 无会话任务（POST /tasks）没有 conversation_id：上下文改由 task.request_summary 提供
+    conversation_id: UUID | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)
     tool_choice: str | dict[str, Any] = "auto"
     temperature: float | None = None

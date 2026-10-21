@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import Any
 from uuid import UUID
 
@@ -6,16 +7,19 @@ from jsonschema import ValidationError, validate
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
-from app.kernel.audit.service import AuditExecutionInterceptor
+from app.core.redaction import redact_mapping
+from app.kernel.audit.service import AuditExecutionInterceptor, record_audit_detached
 from app.kernel.authz import PermissionChecker
 from app.kernel.md_skill import MdSkillManifest
 from app.kernel.md_skill_runtime import MdSkillRuntime
 from app.kernel.ports.authz_provider import AuthzProvider
-from app.kernel.ports.connector import McpConnector
+from app.kernel.ports.connector import McpConnector, McpProtocolError, McpTransportError
+from app.kernel.ports.secret_provider import SecretProvider
 from app.kernel.ports.interceptor import ExecutionInterceptor
 from app.kernel.ports.sandbox_driver import SandboxDriver
 from app.kernel.ports.skill_executor import ExecutionResult, ToolExecutor
 from app.kernel.plugin_guard import CIRCUIT_OPEN_CODE, QUOTA_EXCEEDED_CODE, PluginGuardRegistry
+from app.kernel.registry.active import try_port
 from app.kernel.security_context import SecurityContext
 from app.services.tool_mapping_builder import _sanitize_schema
 from app.kernel.skill_confirmation import BuiltinApprovalProvider, pause_task_for_confirmation
@@ -35,6 +39,74 @@ _TOOL_TIMEOUT_MESSAGE = "tool execution timed out"
 _TOOL_FAILURE_MESSAGE = "tool execution failed"
 _PERMISSION_MESSAGE = "required permissions are missing"
 
+# 执行器/连接器可能抛出的运行期异常：统一映射为失败结果而非穿透为 500，
+# 否则该次调用不会写入 SkillExecutionLog（契约红线1：每次执行必须记账）。
+_EXECUTION_ERRORS = (OSError, ValueError, RuntimeError, McpTransportError, McpProtocolError)
+
+logger = logging.getLogger("z_torque.skill_gateway")
+
+
+def _path_get(data: Any, path: str) -> Any:
+    """按 a.b[0].c 形式取值；缺键抛 KeyError，越界抛 IndexError。"""
+    current = data
+    for part in path.replace("[", ".").replace("]", "").split("."):
+        if not part:
+            continue
+        if isinstance(current, dict):
+            if part not in current:
+                raise KeyError(part)
+            current = current[part]
+        elif isinstance(current, (list, tuple)):
+            current = current[int(part)]
+        else:
+            raise KeyError(part)
+    return current
+
+
+def _resolve_composite_value(value: Any, inputs: dict[str, Any], step_outputs: dict[str, Any]) -> Any:
+    if isinstance(value, str):
+        if value.startswith("$input."):
+            return _path_get(inputs, value[len("$input."):])
+        if value.startswith("$steps."):
+            expr = value[len("$steps."):]
+            key, sep, rest = expr.partition(".output")
+            if not sep or key not in step_outputs:
+                raise KeyError(key)
+            return _path_get(step_outputs[key], rest.lstrip("."))
+        return value
+    if isinstance(value, dict):
+        return {k: _resolve_composite_value(v, inputs, step_outputs) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_resolve_composite_value(item, inputs, step_outputs) for item in value]
+    return value
+
+
+def _resolve_composite_arguments(arguments: Any, inputs: dict[str, Any], step_outputs: dict[str, Any]) -> dict[str, Any]:
+    resolved = _resolve_composite_value(arguments or {}, inputs, step_outputs)
+    return resolved if isinstance(resolved, dict) else {}
+
+
+def _resolve_step_arguments(raw_arguments: Any, inputs: dict[str, Any], step_outputs: dict[str, Any], child_input_schema: Any) -> dict[str, Any]:
+    """解析单步入参：配置了模板按模板解析；留空则透传本次调用入参
+    （子工具 schema 声明了属性时按其过滤，未声明则原样透传）。
+    """
+    if raw_arguments:
+        return _resolve_composite_arguments(raw_arguments, inputs, step_outputs)
+    props = (child_input_schema or {}).get("properties")
+    if isinstance(props, dict) and props:
+        return {name: value for name, value in inputs.items() if name in props}
+    return dict(inputs)
+
+
+def _select_composite_output(output_path: str, step_outputs: dict[str, Any]) -> Any:
+    if not output_path.startswith("$steps."):
+        raise ValueError("output path must start with $steps.")
+    expr = output_path[len("$steps."):]
+    key, sep, rest = expr.partition(".output")
+    if not sep or key not in step_outputs:
+        raise KeyError(key)
+    return _path_get(step_outputs[key], rest.lstrip("."))
+
 
 class NegotiatedMcpExecutor:
     tool_type = "MCP_NEGOTIATED"
@@ -48,9 +120,13 @@ class NegotiatedMcpExecutor:
             await self.connector.negotiate()
             self.negotiated = True
             return ExecutionResult(status="SUCCEEDED", data={"connected": True})
-        except (OSError, ValueError, RuntimeError) as exc:
+        except _EXECUTION_ERRORS as exc:
             self.negotiated = False
             return ExecutionResult(status="FAILED", error_code="AI_MCP_NEGOTIATION_FAILED", error_message=str(exc))
+        except Exception as exc:  # noqa: BLE001 - 传输实现可插拔，不能让异常穿透为 500
+            logger.exception("unexpected MCP negotiation failure")
+            self.negotiated = False
+            return ExecutionResult(status="FAILED", error_code="AI_MCP_NEGOTIATION_FAILED", error_message=str(exc) or "MCP negotiation failed")
 
     async def execute_async(self, config: dict[str, Any], arguments: dict[str, Any]) -> ExecutionResult:
         if not self.negotiated:
@@ -58,12 +134,15 @@ class NegotiatedMcpExecutor:
         try:
             result = await self.connector.call_tool(str(config["tool_name"]), arguments)
             return ExecutionResult(status="SUCCEEDED", data=result)
-        except (OSError, ValueError, RuntimeError) as exc:
+        except _EXECUTION_ERRORS as exc:
             return ExecutionResult(status="FAILED", error_code="AI_MCP_TOOL_CALL_FAILED", error_message=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unexpected MCP tool call failure")
+            return ExecutionResult(status="FAILED", error_code="AI_MCP_TOOL_CALL_FAILED", error_message=str(exc) or "MCP tool call failed")
 
 
 class SkillGateway:
-    def __init__(self, permission_checker: AuthzProvider | None = None, *, http_connector_factory: Any = None, stdio_registry: Any = None, approval_provider: ApprovalProvider | None = None, sandbox_driver: SandboxDriver | None = None, interceptor: ExecutionInterceptor | None = None, plugin_guard: PluginGuardRegistry | None = None) -> None:
+    def __init__(self, permission_checker: AuthzProvider | None = None, *, http_connector_factory: Any = None, stdio_registry: Any = None, approval_provider: ApprovalProvider | None = None, sandbox_driver: SandboxDriver | None = None, interceptor: ExecutionInterceptor | None = None, plugin_guard: PluginGuardRegistry | None = None, secret_provider: SecretProvider | None = None) -> None:
         # authz.provider Port 解析结果由装配根经插件注入（P1-3）；默认回退保留内置 RBAC
         # 检查器，供无装配的直构场景（测试/脚本）使用，语义与插件包装实现一致
         self.permission_checker = permission_checker or PermissionChecker()
@@ -78,6 +157,9 @@ class SkillGateway:
         # 连接器传输由 connector Port 插件注入（内核不感知实现，阶段00 §3.8 约束 1）
         self.http_connector_factory = http_connector_factory
         self.stdio_registry = stdio_registry
+        # 密钥解密经 secret.provider Port（契约 §2 红线3：内核不得直连具体存储）；
+        # 未注入时回退内置 Fernet 存储，供直构场景（测试/脚本）使用
+        self._secrets = secret_provider
         from app.config import get_settings
         settings = get_settings()
         self._md_runtime = MdSkillRuntime(settings.md_skills_dir, enabled=settings.md_skill_script_enabled, timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output, sandbox_driver=sandbox_driver)
@@ -86,15 +168,35 @@ class SkillGateway:
         self._executors[executor.tool_type] = executor
 
     @staticmethod
-    def _resolve_secret_token(secret_ref: str | None) -> str | None | ExecutionResult:
+    def _audit_permission_denied(*, ctx: SecurityContext, resource_type: str, resource_id: UUID | None) -> None:
+        """拒绝必须留痕：独立事务写入，避免随业务回滚丢失（P2-12）。"""
+        record_audit_detached(
+            tenant_id=ctx.tenant_id,
+            actor_user_id=ctx.user_id,
+            action="AUTHORIZATION_DENIED",
+            resource_type=resource_type,
+            resource_id=resource_id,
+            summary=_PERMISSION_MESSAGE,
+            detail={"error_code": "AI_PERMISSION_DENIED"},
+            trace_id=ctx.trace_id,
+        )
+
+    def _decrypt_secret(self, ciphertext: str) -> str:
+        """经注入的 secret.provider 解密；未注入时回退内置存储（直构场景）。"""
+        if self._secrets is not None:
+            return self._secrets.decrypt(ciphertext)
+        from app.security.secret_store import SecretStore
+
+        return SecretStore().decrypt(ciphertext)
+
+    def _resolve_secret_token(self, secret_ref: str | None) -> str | None | ExecutionResult:
         """解密 Secret URI 为连接器凭证；失败返回 FAILED 结果（含 503 语义错误码）。"""
         if not secret_ref:
             return None
-        from app.security.secret_store import SecretStore, SecretStoreError
-
         try:
-            return SecretStore().decrypt(secret_ref.removeprefix("secret://"))
-        except SecretStoreError:
+            return self._decrypt_secret(secret_ref.removeprefix("secret://"))
+        except Exception:  # noqa: BLE001 - 解密实现可替换（KMS 等），统一降级为凭证无效
+            logger.warning("connector secret decryption failed", exc_info=True)
             return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_SECRET_INVALID", error_message="连接器凭证无法解密")
 
     async def probe_mcp_http(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, secret_ref: str | None = None) -> dict:
@@ -114,7 +216,11 @@ class SkillGateway:
             await connector.negotiate()
             return await connector.list_tools()
         finally:
-            await connector.close()
+            # close 失败不得覆盖握手/发现结果或原始异常
+            try:
+                await connector.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("failed to close MCP connector after probe", exc_info=True)
 
     async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float, *, secret_ref: str | None = None, identity: dict[str, str] | None = None) -> ExecutionResult:
         from app.config import get_settings
@@ -131,7 +237,10 @@ class SkillGateway:
             auth_token = self._resolve_secret_token(secret_ref)
             if isinstance(auth_token, ExecutionResult):
                 return auth_token
-            connector = self.http_connector_factory(endpoint, allowed_hosts=settings.mcp_allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token, extra_headers=self._identity_headers(identity))
+            # 主机白名单经 policy.source Port 提供（P2-14），缺失时退回配置
+            policy = try_port("policy.source")
+            allowed_hosts = policy.mcp_allowed_hosts() if policy is not None else settings.mcp_allowed_hosts
+            connector = self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token, extra_headers=self._identity_headers(identity))
         elif transport == "stdio":
             registry = self.stdio_registry
             server_name = config.get("server_name")
@@ -148,10 +257,16 @@ class SkillGateway:
             return await asyncio.wait_for(executor.execute_async(config, arguments), timeout=timeout_seconds)
         except TimeoutError:
             return ExecutionResult(status="FAILED", error_code="AI_SKILL_TIMEOUT", error_message=_TOOL_TIMEOUT_MESSAGE)
+        except (McpTransportError, McpProtocolError) as exc:
+            logger.warning("MCP tool execution failed: %s", exc)
+            return ExecutionResult(status="FAILED", error_code="AI_MCP_TOOL_CALL_FAILED", error_message=str(exc) or "MCP tool execution failed")
         except (OSError, ValueError, RuntimeError):
             return ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="MCP tool execution failed")
         finally:
-            await connector.close()
+            try:
+                await connector.close()
+            except Exception:  # noqa: BLE001 - 关闭失败不得覆盖执行结果
+                logger.warning("failed to close MCP connector", exc_info=True)
 
     async def _execute_with_retry(self, executor: ToolExecutor, config: dict[str, Any], arguments: dict[str, Any], *, timeout_seconds: float, max_retries: int, backoff_seconds: float, guard_key: str | None = None) -> ExecutionResult:
         if guard_key is not None:
@@ -167,7 +282,10 @@ class SkillGateway:
                     result = await asyncio.wait_for(asyncio.to_thread(executor.execute, config, arguments, timeout_seconds), timeout=timeout_seconds)
             except TimeoutError:
                 result = ExecutionResult(status="FAILED", error_code="AI_SKILL_TIMEOUT", error_message=_TOOL_TIMEOUT_MESSAGE)
-            except (OSError, ValueError, RuntimeError):
+            except _EXECUTION_ERRORS:
+                result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message=_TOOL_FAILURE_MESSAGE)
+            except Exception:  # noqa: BLE001 - 执行器异常统一降级为失败结果并记账
+                logger.exception("unexpected tool executor failure")
                 result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message=_TOOL_FAILURE_MESSAGE)
             if result.status == "SUCCEEDED" or attempt == max_retries or not self._is_retryable(result):
                 break
@@ -229,11 +347,12 @@ class SkillGateway:
         if parent_skill is None or parent_skill.status != "ACTIVE":
             raise ApiError("AI_SKILL_NOT_FOUND", "skill is unavailable", 404)
         if not self.permission_checker.has_all(db, user_id, skill.required_permissions):
+            self._audit_permission_denied(ctx=ctx, resource_type="SKILL", resource_id=skill.id)
             raise ApiError("AI_PERMISSION_DENIED", _PERMISSION_MESSAGE, 403)
-        links = db.query(SkillVersionTool).filter(SkillVersionTool.skill_version_id == skill.id).all()
+        links = db.query(SkillVersionTool).filter(SkillVersionTool.skill_version_id == skill.id).order_by(SkillVersionTool.sort_order, SkillVersionTool.created_at).all()
         if not links:
             result = ExecutionResult(status="SUCCEEDED", data={"instructions": skill.instructions})
-            self._log(db, tenant_id, user_id, skill, None, task_id, result)
+            self._log(db, tenant_id, user_id, skill, None, task_id, result, trace_id=ctx.trace_id)
             return result
         results = []
         for link in links:
@@ -268,20 +387,25 @@ class SkillGateway:
                     approval_provider=self._approvals,
                 )
                 result = ExecutionResult(status="WAITING_HUMAN", requires_confirmation=True, data={"confirmation_id": str(confirmation.id)})
-                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
+                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
                 return result
             owner = db.get(Tool, tool.tool_id)
             # 父级 Tool 已归档时版本不可再执行
             if owner is None or owner.status != "ACTIVE":
                 result = ExecutionResult(status="FAILED", error_code="AI_TOOL_NOT_FOUND", error_message="published tool version not found")
                 results.append(result.data)
-                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
+                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
                 return result
             executor = self._executors.get(owner.tool_type) if owner else None
+            if owner and owner.tool_type == "COMPOSITE":
+                result = ExecutionResult(status="FAILED", error_code="AI_COMPOSITE_ASYNC_REQUIRED", error_message="composite tool execution requires execute_async")
+                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
+                results.append(result.data)
+                return result
             if owner and owner.tool_type == "MCP":
                 result = ExecutionResult(status="FAILED", error_code="AI_MCP_ASYNC_REQUIRED", error_message="MCP execution requires execute_async")
                 results.append(result.data)
-                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
+                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
                 if result.status != "SUCCEEDED":
                     return result
                 continue
@@ -296,13 +420,16 @@ class SkillGateway:
                         result = executor.execute(self._materialize_config(tool, connector, identity=self._identity_meta(ctx, task_id)), arguments, timeout_seconds)
                     except TimeoutError:
                         result = ExecutionResult(status="FAILED", error_code="AI_SKILL_TIMEOUT", error_message="tool execution timed out")
-                    except (OSError, ValueError, RuntimeError):
+                    except _EXECUTION_ERRORS:
+                        result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="tool execution failed")
+                    except Exception:  # noqa: BLE001
+                        logger.exception("unexpected tool executor failure")
                         result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="tool execution failed")
             result = self._validate_output(tool.output_schema, result)
             if executor is not None:
                 self._guard_record(owner.tool_type, result)
             results.append(result.data)
-            self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
+            self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
             if result.status != "SUCCEEDED":
                 return result
         return ExecutionResult(status="SUCCEEDED", data=results)
@@ -337,8 +464,9 @@ class SkillGateway:
         if parent_skill is None or parent_skill.status != "ACTIVE":
             raise ApiError("AI_SKILL_NOT_FOUND", "skill is unavailable", 404)
         if not self.permission_checker.has_all(db, user_id, skill.required_permissions):
+            self._audit_permission_denied(ctx=ctx, resource_type="SKILL", resource_id=skill.id)
             raise ApiError("AI_PERMISSION_DENIED", "required permissions are missing", 403)
-        links = db.query(SkillVersionTool).filter(SkillVersionTool.skill_version_id == skill.id).all()
+        links = db.query(SkillVersionTool).filter(SkillVersionTool.skill_version_id == skill.id).order_by(SkillVersionTool.sort_order, SkillVersionTool.created_at).all()
         if tool_version_id is not None:
             wanted = str(tool_version_id)
             links = [link for link in links if str(link.tool_version_id) == wanted]
@@ -360,7 +488,7 @@ class SkillGateway:
             except ApiError as exc:
                 result = ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)
             self._guard_record("MD_SCRIPT", result)
-            self._log(db, tenant_id, user_id, skill, None, task_id, result)
+            self._log(db, tenant_id, user_id, skill, None, task_id, result, trace_id=ctx.trace_id)
             return result
         for link in links:
             if self._cancelled(cancellation_event):
@@ -377,6 +505,7 @@ class SkillGateway:
                 if not connector or connector.tenant_id != tenant_id or connector.status != "ENABLED":
                     raise ApiError("AI_CONNECTOR_UNAVAILABLE", "connector is unavailable", 503)
             if not self.permission_checker.has_all(db, user_id, tool.required_permissions):
+                self._audit_permission_denied(ctx=ctx, resource_type="TOOL", resource_id=tool.id)
                 raise ApiError("AI_PERMISSION_DENIED", "required permissions are missing", 403)
             self._validate_input(tool.input_schema, arguments)
             if task_id and user_id and not resume_checkpoint_id and (skill.requires_confirmation or tool.requires_confirmation):
@@ -398,15 +527,26 @@ class SkillGateway:
                     approval_provider=self._approvals,
                 )
                 result = ExecutionResult(status="WAITING_HUMAN", requires_confirmation=True, data={"confirmation_id": str(confirmation.id)})
-                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
+                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
                 return result
             executor = self._executors.get(owner.tool_type)
+            if owner.tool_type == "COMPOSITE":
+                result = await self._execute_composite(
+                    db, ctx, skill, tool, arguments, task_id, timeout_seconds, deadline_at,
+                    cancellation_event, resume_checkpoint_id,
+                )
+                result = self._validate_output(tool.output_schema, result)
+                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
+                if result.status != "SUCCEEDED":
+                    return result
+                results.append(result.data)
+                continue
             if owner.tool_type == "MCP":
                 gated = self._guard_gate(owner.tool_type)
                 identity = self._identity_meta(ctx, task_id)
                 result = gated if gated is not None else await self._execute_mcp(tool.config_snapshot, arguments, self._remaining_timeout(timeout_seconds, deadline_at), secret_ref=connector.secret_ref if connector else None, identity=identity)
                 self._guard_record(owner.tool_type, result)
-                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
+                self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
                 if result.status != "SUCCEEDED":
                     return result
                 results.append(result.data)
@@ -416,11 +556,99 @@ class SkillGateway:
             else:
                 result = await self._execute_with_retry(executor, self._materialize_config(tool, connector, identity=self._identity_meta(ctx, task_id)), arguments, timeout_seconds=min(self._remaining_timeout(timeout_seconds, deadline_at), tool.timeout_seconds), max_retries=tool.max_retries, backoff_seconds=tool.retry_backoff_seconds, guard_key=owner.tool_type)
             result = self._validate_output(tool.output_schema, result)
-            self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments)
+            self._log(db, tenant_id, user_id, skill, tool, task_id, result, arguments=arguments, trace_id=ctx.trace_id)
             if result.status != "SUCCEEDED":
                 return result
             results.append(result.data)
         return ExecutionResult(status="SUCCEEDED", data=results or {"instructions": skill.instructions})
+
+    async def _execute_composite(
+        self,
+        db: Session,
+        ctx: SecurityContext,
+        skill: SkillVersion,
+        composite: ToolVersion,
+        arguments: dict[str, Any],
+        task_id: UUID | None,
+        timeout_seconds: float,
+        deadline_at: Any,
+        cancellation_event: asyncio.Event | None,
+        resume_checkpoint_id: UUID | None,
+    ) -> ExecutionResult:
+        """线性执行业务封装 Tool 的步骤（深度 1，无分支），每步复用网关安全链路。"""
+        config = composite.config_snapshot or {}
+        steps = config.get("steps")
+        if not isinstance(steps, list) or not steps or len(steps) > 10:
+            return ExecutionResult(status="FAILED", error_code="AI_COMPOSITE_INVALID", error_message="composite steps are invalid")
+        inputs = arguments if isinstance(arguments, dict) else {}
+        step_outputs: dict[str, Any] = {}
+        for step in steps:
+            if self._cancelled(cancellation_event):
+                return ExecutionResult(status="CANCELLED", error_code="AI_TASK_NOT_CANCELABLE", error_message="task cancellation requested")
+            if not isinstance(step, dict):
+                return ExecutionResult(status="FAILED", error_code="AI_COMPOSITE_INVALID", error_message="composite step is invalid")
+            key = str(step.get("key") or "").strip()
+            if not key or key in step_outputs:
+                return ExecutionResult(status="FAILED", error_code="AI_COMPOSITE_INVALID", error_message="composite step key is invalid")
+            try:
+                child = db.get(ToolVersion, UUID(str(step.get("tool_version_id"))))
+            except (ValueError, TypeError):
+                return ExecutionResult(status="FAILED", error_code="AI_COMPOSITE_INVALID", error_message="composite step references an invalid tool version")
+            owner = db.get(Tool, child.tool_id) if child else None
+            if not child or not owner or child.tenant_id != ctx.tenant_id or child.status != "PUBLISHED" or owner.status != "ACTIVE":
+                return ExecutionResult(status="FAILED", error_code="AI_TOOL_NOT_FOUND", error_message=f"composite step tool is unavailable: {key}")
+            # 注册期已禁止嵌套，这里再兜底一次，避免历史数据绕过
+            if owner.tool_type == "COMPOSITE":
+                return ExecutionResult(status="FAILED", error_code="AI_COMPOSITE_INVALID", error_message="nested composite tools are not allowed")
+            # 子步骤需审批时，必须已有审批 checkpoint 才能继续（fail-closed）
+            if child.requires_confirmation and task_id and not resume_checkpoint_id:
+                return ExecutionResult(status="FAILED", error_code="AI_TOOL_CONFIRMATION_REQUIRED", error_message=f"composite step requires confirmation: {key}")
+            connector = None
+            connector_id = child.config_snapshot.get("connector_id")
+            if connector_id:
+                connector = db.get(Connector, connector_id)
+                if not connector or connector.tenant_id != ctx.tenant_id or connector.status != "ENABLED":
+                    return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message=f"connector is unavailable: {key}")
+            if not self.permission_checker.has_all(db, ctx.user_id, child.required_permissions):
+                return ExecutionResult(status="FAILED", error_code="AI_PERMISSION_DENIED", error_message=_PERMISSION_MESSAGE)
+            try:
+                resolved = _resolve_step_arguments(step.get("arguments"), inputs, step_outputs, child.input_schema)
+                self._validate_input(child.input_schema, resolved)
+            except ApiError as exc:
+                return ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)
+            except (KeyError, IndexError, ValueError):
+                return ExecutionResult(status="FAILED", error_code="AI_COMPOSITE_ARGUMENT_ERROR", error_message=f"composite step argument cannot be resolved: {key}")
+            identity = self._identity_meta(ctx, task_id)
+            if owner.tool_type == "MCP":
+                gated = self._guard_gate(owner.tool_type)
+                result = gated if gated is not None else await self._execute_mcp(
+                    child.config_snapshot, resolved, self._remaining_timeout(timeout_seconds, deadline_at),
+                    secret_ref=connector.secret_ref if connector else None, identity=identity,
+                )
+                self._guard_record(owner.tool_type, result)
+            else:
+                executor = self._executors.get(owner.tool_type)
+                if executor is None:
+                    result = ExecutionResult(status="FAILED", error_code="AI_EXECUTOR_UNAVAILABLE", error_message=f"executor is unavailable: {key}")
+                else:
+                    result = await self._execute_with_retry(
+                        executor, self._materialize_config(child, connector, identity=identity), resolved,
+                        timeout_seconds=min(self._remaining_timeout(timeout_seconds, deadline_at), child.timeout_seconds),
+                        max_retries=child.max_retries, backoff_seconds=child.retry_backoff_seconds,
+                        guard_key=owner.tool_type,
+                    )
+            result = self._validate_output(child.output_schema, result)
+            self._log(db, ctx.tenant_id, ctx.user_id, skill, child, task_id, result, arguments=resolved, trace_id=ctx.trace_id)
+            if result.status != "SUCCEEDED":
+                return result
+            step_outputs[key] = result.data
+        output_path = config.get("output_path")
+        if output_path:
+            try:
+                return ExecutionResult(status="SUCCEEDED", data=_select_composite_output(str(output_path), step_outputs))
+            except (KeyError, IndexError, ValueError):
+                return ExecutionResult(status="FAILED", error_code="AI_COMPOSITE_OUTPUT_ERROR", error_message="composite output path cannot be resolved")
+        return ExecutionResult(status="SUCCEEDED", data={"steps": step_outputs})
 
     @staticmethod
     def _cancelled(event: asyncio.Event | None) -> bool:
@@ -496,11 +724,9 @@ class SkillGateway:
                 merged_headers.update({str(k): str(v) for k, v in auth_headers.items()})
                 config["headers"] = merged_headers
         if connector is not None and connector.secret_ref:
-            from app.security.secret_store import SecretStore, SecretStoreError
-
             try:
-                config["secret_value"] = SecretStore().decrypt(connector.secret_ref.removeprefix("secret://"))
-            except SecretStoreError as exc:
+                config["secret_value"] = self._decrypt_secret(connector.secret_ref.removeprefix("secret://"))
+            except Exception as exc:  # noqa: BLE001 - 解密实现可替换（KMS 等）
                 raise ApiError("AI_CONNECTOR_SECRET_INVALID", "connector secret cannot be decrypted", 503) from exc
         url = str(config.get("url", ""))
         if url:
@@ -540,9 +766,11 @@ class SkillGateway:
             return ExecutionResult(status="FAILED", error_code="AI_TASK_RESULT_INVALID", error_message="tool output does not match its schema")
         return result
 
-    def _log(self, db: Session, tenant_id: UUID, user_id: UUID | None, skill: SkillVersion, tool: ToolVersion | None, task_id: UUID | None, result: ExecutionResult, arguments: dict | None = None) -> None:
-        db.add(SkillExecutionLog(tenant_id=tenant_id, actor_user_id=user_id, skill_version_id=skill.id, tool_version_id=tool.id if tool else None, task_id=task_id, status=result.status, result={**({"data": result.data} if result.data is not None else {}), **({"input": arguments} if arguments else {})}, error_code=result.error_code))
+    def _log(self, db: Session, tenant_id: UUID, user_id: UUID | None, skill: SkillVersion, tool: ToolVersion | None, task_id: UUID | None, result: ExecutionResult, arguments: dict | None = None, trace_id: str | None = None) -> None:
+        # 入参可能含 DB 口令/HTTP 密钥：落库前按键脱敏，与字符串摘要策略保持一致
+        safe_arguments = redact_mapping(arguments) if arguments else None
+        db.add(SkillExecutionLog(tenant_id=tenant_id, actor_user_id=user_id, skill_version_id=skill.id, tool_version_id=tool.id if tool else None, task_id=task_id, status=result.status, result={**({"data": result.data} if result.data is not None else {}), **({"input": safe_arguments} if safe_arguments else {})}, error_code=result.error_code))
         # 审计事件经 interceptor Port 发射（P2 收口，契约红线1 审计不可关闭）；
-        # 默认实现委托 record_audit，行为与直调完全一致
-        self._interceptor.on_execution(db, tenant_id=tenant_id, actor_user_id=user_id, action="SKILL_EXECUTED", resource_type="SKILL_VERSION", resource_id=skill.id, summary="skill execution completed", detail={"status": result.status, "tool_version_id": str(tool.id) if tool else None})
+        # 默认实现委托 record_audit，行为与直调完全一致；trace_id 必传，否则 /audit/by-trace 查不到技能执行
+        self._interceptor.on_execution(db, tenant_id=tenant_id, actor_user_id=user_id, action="SKILL_EXECUTED", resource_type="SKILL_VERSION", resource_id=skill.id, summary="skill execution completed", detail={"status": result.status, "tool_version_id": str(tool.id) if tool else None}, trace_id=trace_id)
         db.flush()

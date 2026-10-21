@@ -49,6 +49,27 @@ def get_current_user(
     return user
 
 
+def get_optional_user(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+) -> User | None:
+    """可选身份：公开接口（如 /capabilities）据此决定返回明细还是脱敏视图。"""
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if token is None:
+        token = request.cookies.get("access_token")
+    if not token:
+        return None
+    try:
+        provider = _identity_provider(request)
+        ctx = provider.authenticate(db, token)
+        return provider.load_user(db, ctx.user_id)
+    except ApiError:
+        return None
+
+
 def get_security_context(
     request: Request,
     authorization: str | None = Header(default=None),

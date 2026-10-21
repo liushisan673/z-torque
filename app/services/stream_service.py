@@ -21,7 +21,7 @@ def sse_event(event_id: str, event: str, data: dict[str, Any]) -> str:
     return f"id: {event_id}\nevent: {event}\ndata: {json.dumps(data, ensure_ascii=True, default=str)}\n\n"
 
 
-async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, conversation_id: Any, user_message_id: str, idempotency_key: str | None, trace_id: str | None) -> AsyncIterator[str]:
+async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, conversation_id: Any, user_message_id: str, idempotency_key: str | None, trace_id: str | None, short_memory=None) -> AsyncIterator[str]:
     """Chat 流式统一入口（阶段05 2.6 分流）：
 
     - 流式期间透传 message.delta；
@@ -142,7 +142,7 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
             yield ev("message.result", {"message_id": str(assistant.id), "content": reply})
             yield ev("message.done", {"status": "COMPLETED"})
             # 会话记忆维护：失败不阻断回复（在 done 之后执行，避免延迟收尾事件）
-            await _maybe_summarize(db, conversation=conversation, user_id=user_id, trace_id=trace_id or str(user_message_id), model_gateway=gateway, user_message_id=str(user_message_id))
+            await _maybe_summarize(db, conversation=conversation, user_id=user_id, trace_id=trace_id or str(user_message_id), model_gateway=gateway, user_message_id=str(user_message_id), short_memory=short_memory)
     except Exception:
         logger.exception("stream chat finalize failed for message %s", user_message_id)
         yield ev("message.error", {"code": "AI_CHAT_FINALIZE_FAILED", "message": "chat finalize failed"})

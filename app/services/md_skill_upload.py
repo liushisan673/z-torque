@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.core.errors import ApiError
 from app.kernel.audit.service import record_audit
-from app.kernel.md_skill import _ALLOWED, _NAME, parse_skill
+from app.kernel.md_skill import _ALLOWED, _NAME, normalize_newlines, parse_skill
 from app.kernel.md_skill_registry import register_skill_dir
 from app.models import Skill
 
@@ -23,6 +23,7 @@ _ZIP_MAGIC = b"PK\x03\x04"
 
 def peek_skill_name(md_text: str) -> str:
     """从 SKILL.md 的 YAML front matter 提取 name（仅用于确定落盘目录名，完整校验仍由 parse_skill 负责）。"""
+    md_text = normalize_newlines(md_text)
     if not md_text.startswith("---\n"):
         raise ApiError("AI_SKILL_INVALID_MANIFEST", "YAML front matter is required", 422)
     marker = md_text.find("\n---\n", 4)

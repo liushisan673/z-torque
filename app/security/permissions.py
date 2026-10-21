@@ -52,22 +52,30 @@ def admin_owned_clause(owner_col, tenant_id: UUID):
     return owner_col.in_(admin_user_ids_subquery(tenant_id))
 
 
-def require_admin(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
-    # Minimal admin definition for community single-tenant deployments:
-    # user has 'admin' role OR 'admin.manage' permission.
+# 「管理员等价」权限前缀：具备任一此类权限即视为可执行管理操作。
+# 注意不能把 user.read / system.read 之类的只读权限算进来，否则普通成员会被提升为管理员。
+ADMIN_LIKE_PREFIXES = ("user.create", "user.update", "user.delete", "role.", "system.config")
+
+def is_admin_user(db: Session, *, tenant_id: UUID, user_id: UUID) -> bool:
+    """统一的「是否管理员」判定，供 require_admin 与各读接口共用。"""
     role = db.execute(
         select(Role.id)
         .select_from(user_role)
         .join(Role, Role.id == user_role.c.role_id)
-        .where(Role.tenant_id == user.tenant_id, user_role.c.user_id == user.id, Role.name == "admin")
+        .where(Role.tenant_id == tenant_id, user_role.c.user_id == user_id, Role.name == "admin")
         .limit(1)
     ).first()
     if role is not None:
-        return user
+        return True
+    perms = list_user_permissions(db, tenant_id=tenant_id, user_id=user_id)
+    if "admin.manage" in perms:
+        return True
+    return any(p.startswith(ADMIN_LIKE_PREFIXES) for p in perms)
 
-    perms = list_user_permissions(db, tenant_id=user.tenant_id, user_id=user.id)
-    admin_like_prefixes = ("user.", "role.", "system.")
-    if "admin.manage" in perms or any(p.startswith(admin_like_prefixes) for p in perms):
-        return user
 
-    raise ApiError("AI_FORBIDDEN", "forbidden", 403)
+def require_admin(user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+    # Minimal admin definition for community single-tenant deployments:
+    # user has 'admin' role OR an admin-level permission.
+    if not is_admin_user(db, tenant_id=user.tenant_id, user_id=user.id):
+        raise ApiError("AI_FORBIDDEN", "forbidden", 403)
+    return user

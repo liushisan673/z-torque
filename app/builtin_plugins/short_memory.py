@@ -49,7 +49,9 @@ class DbShortTermMemoryProvider(ShortTermMemoryProvider):
         if existing:
             existing.status = "SUPERSEDED"
         db.add(item)
-        db.commit()
+        # 由调用方控制事务提交（契约 §2）：Port 实现只负责写入并在本事务内可见，
+        # 自行 commit 会切断调用方的原子边界（P2-18）。
+        db.flush()
         db.refresh(item)
         return item
 

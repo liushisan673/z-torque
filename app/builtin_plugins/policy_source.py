@@ -44,4 +44,8 @@ class PolicySourcePlugin:
     )
 
     def contribute(self, sdk) -> None:
-        sdk.register_port("policy.source", ConfigPolicySource, label="builtin_config_policy")
+        # 装配期对象共享：authz_provider 在 contribute 阶段即需注入策略源，
+        # 而 Port 实例化要等 resolve()（与 authz/secret 同模式）
+        source = ConfigPolicySource()
+        sdk.publish("policy.source", source)
+        sdk.register_port("policy.source", lambda: source, label="builtin_config_policy")

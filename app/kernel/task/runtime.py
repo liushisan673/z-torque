@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -11,14 +12,18 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.core.errors import ApiError
 from app.core.ids import new_uuid7
+from app.core.redaction import redact_mapping
+from app.core.servertime import ensure_utc
 from app.kernel.audit.service import record_audit
-from app.kernel.model_gateway import ModelGateway, ModelGatewayError, ModelRequest
+from app.kernel.model_gateway import ModelGateway, ModelGatewayError, ModelMessage, ModelRequest
 from app.kernel.ports.lock_provider import LockProvider
 from app.kernel.ports.memory_short import ShortTermMemoryProvider
 from app.kernel.ports.model_selector import ModelSelection, ModelSelector, resolve_model_selection
 from app.kernel.ports.queue_driver import QueueDriver
+from app.kernel.registry.active import call_optional, emit_event
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
+from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.dispatcher import OutboxDispatcher, execute_simulated
 from app.kernel.task.service import append_task_event, sanitize_summary, transition_task
 from app.kernel.task.states import TERMINAL_STATES, TaskStatus
@@ -39,9 +44,53 @@ from app.models import (
 )
 from app.services.context_builder import assistant_reasoning_parts, build_agent_system_prompt, build_context
 from app.services.execution_loop import AgentExecutionLoop
+from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
 
 logger = logging.getLogger("z_torque.task_worker")
+
+
+def _duration_ms(started_at: datetime | None) -> int | None:
+    """任务耗时（毫秒，非负兜底）。
+
+    SQLite 读回的 started_at 是 naive UTC，直接与 aware 的 now(UTC) 相减会抛
+    TypeError（恢复任务收尾路径必现），因此先归一化再加非负保护。
+    """
+    if started_at is None:
+        return None
+    return max(0, int((datetime.now(UTC) - ensure_utc(started_at)).total_seconds() * 1000))
+
+
+def _pending_call_matches(log: SkillExecutionLog, call: dict) -> bool:
+    """审批恢复的幂等判定：必须是「同一次调用」才复用历史结果（P1-6）。
+
+    仅按 (task_id, tool_version_id, status=SUCCEEDED) 命中会把首次调用的成功结果
+    当成第二次（参数不同、同样需要审批）的结果，从而跳过用户已批准的执行。
+    执行日志落库时保存了脱敏后的入参，这里比对同一口径的入参摘要。
+    """
+    stored = (log.result or {}).get("input") or {}
+    return stored == redact_mapping(call.get("arguments") or {})
+
+
+def write_task_cancel_notice(db: Session, task: Task) -> None:
+    """取消以模型气泡告知（对齐失败气泡模式）：会话流出现"任务已取消"提示，
+    前端据终态事件收起执行块；消息带 task_id，保留「查看执行过程」入口。
+    取消路由（PENDING/QUEUED/WAITING_HUMAN）与 worker 收敛路径共用。
+    """
+    if task.conversation_id is None:
+        return
+    cancel_text = "好的，已按你的要求取消该任务，执行过程已终止。"
+    result_message = db.query(Message).filter(Message.task_id == task.id, Message.sender_type == "ASSISTANT").first()
+    if result_message is not None:
+        result_message.content = cancel_text
+    else:
+        db.add(Message(
+            tenant_id=task.tenant_id, conversation_id=task.conversation_id, sender_type="ASSISTANT",
+            content=cancel_text, status="COMPLETED", task_id=task.id,
+        ))
+    conversation = db.get(Conversation, task.conversation_id)
+    if conversation is not None:
+        conversation.last_message_at = datetime.now(UTC)
 
 
 class TaskRuntime:
@@ -68,7 +117,25 @@ class TaskRuntime:
         try:
             return await self._execute_inner(task_id)
         except asyncio.CancelledError:
-            raise
+            # 强制取消兜底（cancel 路由 → worker.cancel_running）：把任务收敛为 CANCELLED，
+            # 避免协程被杀后任务永久停留在 RUNNING；执行中的 DB 写由 rollback 丢弃
+            try:
+                with self.session_factory() as db:
+                    task = db.get(Task, task_id)
+                    if task is not None and task.status not in TERMINAL_STATES:
+                        db.rollback()
+                        # 强制取消也写提示气泡：与协作式取消收敛路径一致的会话反馈
+                        write_task_cancel_notice(db, task)
+                        db.execute(
+                            update(Task)
+                            .where(Task.id == task_id, Task.status.in_([TaskStatus.RUNNING, TaskStatus.CANCELING, TaskStatus.QUEUED]))
+                            .values(status=TaskStatus.CANCELLED, error_code="AI_TASK_CANCELLED", error_message="已按用户要求取消", finished_at=datetime.now(UTC), last_event_seq=Task.last_event_seq + 1)
+                        )
+                        db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq + 1, event_type="TASK_CANCELLED", to_state=TaskStatus.CANCELLED, summary=sanitize_summary("task cancelled")))
+                        db.commit()
+            except Exception:
+                logger.exception("task %s cancel-safe marking failed", task_id)
+            return {"task_id": str(task_id), "status": "CANCELLED"}
         except Exception:
             # fail-safe：执行器崩溃时尽力把任务标记为 FAILED，避免永久停留在 RUNNING
             logger.exception("task %s executor crashed", task_id)
@@ -98,7 +165,7 @@ class TaskRuntime:
             task = db.get(Task, task_id)
             if task is None:
                 return {"task_id": str(task_id), "status": "NOT_FOUND"}
-            checkpoint = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == task_id, TaskCheckpoint.status.in_(["APPROVED", "RESUMED"])))
+            checkpoint = latest_checkpoint(db, task_id, statuses=("APPROVED", "RESUMED"))
             if checkpoint is not None and self.gateway is not None:
                 # chat 型任务（绑定会话）审批恢复走"重放工具 → 续跑执行循环 → 最终回复"；
                 # skill 型任务保持原有单工具重放语义。
@@ -117,15 +184,20 @@ class TaskRuntime:
 
     def request_cancellation(self, task_id: UUID) -> None:
         self._cancellation_events.setdefault(task_id, asyncio.Event()).set()
+        # 立即取消兜底：协作式取消依赖执行体在 await 边界检查事件；执行体挂死（如模型
+        # 调用永不返回）时事件永远不被检查——直接 cancel 对应协程，_execute 的
+        # CancelledError 分支会把任务收敛为 CANCELLED
+        self.worker.cancel_running(task_id)
 
-    def _resolve_selection(self, agent_version: AgentVersion | None) -> ModelSelection:
+    def _resolve_selection(self, db: Session, tenant_id: UUID, agent_version: AgentVersion | None) -> ModelSelection:
         """model.selector 消费：AgentVersion 快照绑定优先（快照语义），无绑定/无选择器回退全局默认。
 
-        调用参数（temperature / max_tokens）随同一快照解析：快照键优先，未设置回退全局兜底。
+        调用参数（temperature / max_tokens）随同一快照解析：快照键优先，未设置回退
+        模型档案 max_output_tokens（模型页配置），再退全局兜底。
         """
         snapshot = (agent_version.config_snapshot or {}) if agent_version is not None else {}
         settings = get_settings()
-        return resolve_model_selection(
+        selection = resolve_model_selection(
             self.model_selector,
             agent_version_id=agent_version.id if agent_version is not None else None,
             snapshot_model=snapshot.get("model"),
@@ -135,6 +207,14 @@ class TaskRuntime:
             default_temperature=settings.model_temperature,
             default_max_tokens=settings.model_max_tokens,
         )
+        max_tokens = effective_max_tokens(
+            db,
+            tenant_id=tenant_id,
+            model_identifier=selection.model,
+            snapshot_max_tokens=snapshot.get("max_tokens"),
+            default_max_tokens=settings.model_max_tokens,
+        )
+        return replace(selection, max_tokens=max_tokens)
 
     async def _claim(self, db, task_id: UUID) -> bool:
         """原子认领 QUEUED→RUNNING，并补写 TASK_STARTED 事件（claim 是裸更新，事件流需要"开始执行"步骤）。"""
@@ -165,6 +245,8 @@ class TaskRuntime:
             transition_task(db, task, TaskStatus.CANCELING, "TASK_CANCEL_REQUESTED", "task cancellation requested")
         if task.status == TaskStatus.CANCELING:
             transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled")
+            # 取消以模型气泡告知：会话流出现"任务已取消"提示，前端据终态事件收起执行块
+            write_task_cancel_notice(db, task)
             record_audit(
                 db,
                 tenant_id=task.tenant_id,
@@ -181,7 +263,7 @@ class TaskRuntime:
 
     async def _execute_model_task(self, db, task_id: UUID) -> dict | None:
         task = db.get(Task, task_id)
-        if task is None or task.conversation_id is None:
+        if task is None:
             return None
         if task.status != TaskStatus.QUEUED:
             return {"task_id": str(task_id), "status": str(task.status)}
@@ -190,20 +272,23 @@ class TaskRuntime:
         db.refresh(task)
         cancel_event = self._cancellation_events.setdefault(task_id, asyncio.Event())
         try:
-            conversation = db.get(Conversation, task.conversation_id)
+            # 无会话任务（POST /tasks 未绑定会话）同样进入真实模型执行：上下文取 request_summary，
+            # 不再退化为模拟执行（此前该分支使任务接口形同虚设）
+            conversation = db.get(Conversation, task.conversation_id) if task.conversation_id is not None else None
             trigger = db.get(Message, task.trigger_message_id) if task.trigger_message_id else None
-            if conversation is None or trigger is None:
+            if task.conversation_id is not None and (conversation is None or trigger is None):
                 return self._fail_model_task(db, task, "AI_TASK_CONTEXT_INVALID", "task context is invalid")
             agent_version = db.get(AgentVersion, task.agent_version_id)
             mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id)
             # 与 chat 页面流式链路一致：系统提示 + 绑定 skill 执行指令
             system_prompt = build_agent_system_prompt(db, agent_version, [m.skill_version_id for m in mappings.values() if m.skill_version_id])
-            selection = self._resolve_selection(agent_version)
+            selection = self._resolve_selection(db, task.tenant_id, agent_version)
+            messages = build_context(db, conversation, system_prompt=system_prompt) if conversation is not None else [ModelMessage(role="user", content=task.request_summary or "")]
             request = ModelRequest(
-                trace_id=str(task.id), task_id=task.id, conversation_id=conversation.id,
+                trace_id=str(task.id), task_id=task.id, conversation_id=task.conversation_id,
                 agent_version_id=task.agent_version_id,
                 model=selection.model, temperature=selection.temperature, max_tokens=selection.max_tokens,
-                messages=build_context(db, conversation, system_prompt=system_prompt),
+                messages=messages,
                 tools=tools, timeout_seconds=get_settings().model_timeout_seconds,
             )
             if mappings and self.gateway is not None:
@@ -219,7 +304,10 @@ class TaskRuntime:
                     deadline_at=task.deadline_at,
                 )
                 if result.pending_confirmation is not None:
-                    # 写入类工具挂起等待审批：确认机制已把任务置为 WAITING_HUMAN，worker 直接让出，不判失败
+                    # 写入类工具挂起等待审批：确认机制已把任务置为 WAITING_HUMAN，worker 直接让出，不判失败。
+                    # 必须显式提交：checkpoint/confirmation/WAITING_HUMAN 状态与事件都在本事务里，
+                    # 不提交则 with 退出即回滚——任务回到 RUNNING、前端永远等不到确认信号（历史 bug 根因）
+                    db.commit()
                     return {"task_id": str(task_id), "status": "WAITING_HUMAN"}
                 response = result.response
             else:
@@ -272,7 +360,7 @@ class TaskRuntime:
             SkillExecutionLog.tool_version_id == tool_id,
             SkillExecutionLog.status == "SUCCEEDED",
         ).first()
-        if existing is not None:
+        if existing is not None and _pending_call_matches(existing, call):
             data = (existing.result or {}).get("data")
             tool_result = json.dumps(data, ensure_ascii=False, default=str) if data is not None else ""
         else:
@@ -290,10 +378,12 @@ class TaskRuntime:
             )
             if result.status != "SUCCEEDED":
                 if result.status == "WAITING_HUMAN":
+                    # 重放仍要求确认（防御分支）：持久化当前状态后让出
+                    db.commit()
                     return {"task_id": str(task_id), "status": "WAITING_HUMAN"}
                 return self._fail_model_task(db, task, result.error_code or "AI_SKILL_FAILED", result.error_message or "tool execution failed")
             tool_result = json.dumps(result.data, ensure_ascii=False, default=str)
-        selection = self._resolve_selection(agent_version)
+        selection = self._resolve_selection(db, task.tenant_id, agent_version)
         request = ModelRequest(
             trace_id=str(task.id), task_id=task.id, conversation_id=conversation.id,
             agent_version_id=task.agent_version_id,
@@ -313,6 +403,8 @@ class TaskRuntime:
                 resume={"messages": snapshot, "tool_result": tool_result, "tool_call_id": chat_context.get("tool_call_id")},
             )
             if loop_result.pending_confirmation is not None:
+                # 续跑循环命中新的待确认工具：同主执行路径，先提交挂起状态再让出
+                db.commit()
                 return {"task_id": str(task_id), "status": "WAITING_HUMAN"}
             response = loop_result.response
         except ModelGatewayError as exc:
@@ -333,8 +425,12 @@ class TaskRuntime:
         self._cancellation_events.pop(task_id, None)
         return {"task_id": str(task_id), "status": "SUCCEEDED"}
 
-    async def _finish_chat_task(self, db, task: Task, conversation: Conversation, trigger: Message | None, response) -> None:
-        """chat 任务收尾：审计 + 写回复消息 + 触发消息置完成 + 任务成功 + 会话摘要维护。"""
+    async def _finish_chat_task(self, db, task: Task, conversation: Conversation | None, trigger: Message | None, response) -> None:
+        """任务收尾：审计 + 写回复消息 + 触发消息置完成 + 任务成功 + 会话摘要维护。
+
+        conversation 为 None 表示无会话任务（POST /tasks）：结果只落 task.result，
+        不写消息、不更新会话、不触发会话摘要。
+        """
         record_audit(
             db,
             tenant_id=task.tenant_id,
@@ -343,27 +439,36 @@ class TaskRuntime:
             resource_id=task.id,
             actor_user_id=task.owner_user_id,
             summary="model call completed",
-            detail={"provider_request_id": response.provider_request_id, "usage": response.usage.__dict__ if response.usage else None},
+            detail={
+                "provider_request_id": response.provider_request_id,
+                "usage": response.usage.__dict__ if response.usage else None,
+                # 耗时 = 任务认领（started_at）→ 本次调用结束，供审计页"耗时"列展示
+                "duration_ms": _duration_ms(task.started_at),
+            },
             trace_id=str(task.id),
         )
-        result_message = db.query(Message).filter(Message.task_id == task.id, Message.sender_type == "ASSISTANT").first()
-        reasoning_parts = assistant_reasoning_parts(response.reasoning_content)
-        if result_message is not None:
-            # 幂等：recover 重跑或重复收尾时复用已有回复，避免 zr_message.task_id 唯一约束冲突
-            result_message.content = response.content
-            if reasoning_parts is not None:
-                result_message.content_parts = reasoning_parts
-        else:
-            result_message = Message(tenant_id=task.tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content=response.content, content_parts=reasoning_parts, status="COMPLETED", task_id=task.id)
-            db.add(result_message)
-        db.flush()
-        task.result_message_id = result_message.id
+        if conversation is not None:
+            result_message = db.query(Message).filter(Message.task_id == task.id, Message.sender_type == "ASSISTANT").first()
+            reasoning_parts = assistant_reasoning_parts(response.reasoning_content)
+            if result_message is not None:
+                # 幂等：recover 重跑或重复收尾时复用已有回复，避免 zr_message.task_id 唯一约束冲突
+                result_message.content = response.content
+                if reasoning_parts is not None:
+                    result_message.content_parts = reasoning_parts
+            else:
+                result_message = Message(tenant_id=task.tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content=response.content, content_parts=reasoning_parts, status="COMPLETED", task_id=task.id)
+                db.add(result_message)
+            db.flush()
+            task.result_message_id = result_message.id
         task.result = {"content": response.content, "usage": response.usage.__dict__ if response.usage else None}
         if trigger is not None and trigger.status != "COMPLETED":
             trigger.status = "COMPLETED"
-        conversation.last_message_at = datetime.now(UTC)
+        if conversation is not None:
+            conversation.last_message_at = datetime.now(UTC)
         transition_task(db, task, TaskStatus.SUCCESS, "TASK_MODEL_SUCCEEDED", "model task completed")
         db.commit()
+        if conversation is None:
+            return
         # 会话记忆维护：失败不阻断（任务已成功落库，下一条消息达到阈值时会自动重试）
         try:
             await self._maybe_summarize(db, conversation)
@@ -383,7 +488,21 @@ class TaskRuntime:
         if self._short_memory is None:
             logger.warning("memory.short provider is not injected; skip post-task summarization for conversation %s", conversation.id)
             return
-        await self._short_memory.summarize(db, conversation=conversation, user_id=conversation.owner_user_id, trace_id=str(conversation.id), model_gateway=self.model_gateway)
+        item = await self._short_memory.summarize(db, conversation=conversation, user_id=conversation.owner_user_id, trace_id=str(conversation.id), model_gateway=self.model_gateway)
+        # 长期记忆（memory.long Port）：开关打开时把摘要写入用户级长期 KV，供后续会话召回（P2-14）
+        if settings.memory_long_enabled and item is not None:
+            call_optional(
+                db,
+                audit_tenant_id=conversation.tenant_id,
+                port_name="memory.long",
+                method="remember",
+                actor_user_id=conversation.owner_user_id,
+                trace_id=str(conversation.id),
+                tenant_id=conversation.tenant_id,
+                user_id=conversation.owner_user_id,
+                key=f"conversation:{conversation.id}:summary",
+                value=item.summary,
+            )
 
     async def _resume_skill_task(self, db, task: Task, checkpoint: TaskCheckpoint, cancel_event: asyncio.Event) -> dict:
         """skill 型任务审批恢复：校验快照有效性后重放单次工具执行（原有语义）。"""
@@ -404,7 +523,7 @@ class TaskRuntime:
             SkillExecutionLog.tool_version_id == tool_id,
             SkillExecutionLog.status == "SUCCEEDED",
         ).first()
-        if existing is not None:
+        if existing is not None and _pending_call_matches(existing, call):
             task.result = existing.result or {"data": None}
             transition_task(db, task, TaskStatus.SUCCESS, "TASK_SKILL_IDEMPOTENT", "skill execution already completed")
             db.commit()
@@ -441,19 +560,21 @@ class TaskRuntime:
         # 幂等容错：重复收尾（如 recover 重放）时任务可能已是终态，跳过状态迁移只补失败气泡
         if task.status not in TERMINAL_STATES:
             transition_task(db, task, TaskStatus.FAILED, "TASK_MODEL_FAILED", "model task failed")
-        # 失败以模型气泡输出：写一条 ASSISTANT 失败消息（幂等复用，避免重复收尾时唯一约束冲突）
-        fail_text = f"抱歉，这次执行没有成功：{message or code}。您可以稍后重试。"
-        result_message = db.query(Message).filter(Message.task_id == task.id, Message.sender_type == "ASSISTANT").first()
-        if result_message is not None:
-            result_message.content = fail_text
-            result_message.status = "FAILED"
-            result_message.error_code = code
-            result_message.error_message = message
-        else:
-            db.add(Message(
-                tenant_id=task.tenant_id, conversation_id=task.conversation_id, sender_type="ASSISTANT",
-                content=fail_text, status="FAILED", task_id=task.id, error_code=code, error_message=message,
-            ))
+        # 失败以模型气泡输出：写一条 ASSISTANT 失败消息（幂等复用，避免重复收尾时唯一约束冲突）；
+        # 无会话任务没有可挂载的消息载体，失败原因只落在 task.error_code / error_message
+        if task.conversation_id is not None:
+            fail_text = f"抱歉，这次执行没有成功：{message or code}。您可以稍后重试。"
+            result_message = db.query(Message).filter(Message.task_id == task.id, Message.sender_type == "ASSISTANT").first()
+            if result_message is not None:
+                result_message.content = fail_text
+                result_message.status = "FAILED"
+                result_message.error_code = code
+                result_message.error_message = message
+            else:
+                db.add(Message(
+                    tenant_id=task.tenant_id, conversation_id=task.conversation_id, sender_type="ASSISTANT",
+                    content=fail_text, status="FAILED", task_id=task.id, error_code=code, error_message=message,
+                ))
         conversation = db.get(Conversation, task.conversation_id)
         if conversation is not None:
             conversation.last_message_at = datetime.now(UTC)
@@ -466,8 +587,29 @@ class TaskRuntime:
             resource_id=task.id,
             actor_user_id=task.owner_user_id,
             summary="model task failed",
-            detail={"status": "failed", "error_code": code, "error_message": message},
+            detail={
+                "status": "failed",
+                "error_code": code,
+                "error_message": message,
+                # 耗时 = 任务认领（started_at）→ 失败收敛，供审计页"耗时"列展示
+                "duration_ms": _duration_ms(task.started_at),
+            },
             trace_id=str(task.id),
+        )
+        # 失败通知经 notify.channel Port；能力不可用时由 call_optional 落审计并降级（P2-14）
+        call_optional(
+            db,
+            audit_tenant_id=task.tenant_id,
+            port_name="notify.channel",
+            method="send",
+            actor_user_id=task.owner_user_id,
+            trace_id=str(task.id),
+            tenant_id=task.tenant_id,
+            user_id=task.owner_user_id,
+            title="任务执行失败",
+            body=f"{code}: {message}",
+            level="error",
+            meta={"task_id": str(task.id)},
         )
         db.commit()
         return {"task_id": str(task.id), "status": "FAILED", "error_code": code}
@@ -496,10 +638,28 @@ class TaskRuntime:
                         event_type="TASK_READY",
                         payload={"task_id": str(task.id), "recovered": True},
                     ))
+                elif task.status in (TaskStatus.PENDING, TaskStatus.QUEUED):
+                    # 进程内队列随进程重启清空，已 SENT 的 Outbox 不会重投；
+                    # 必须补一条待派发记录，否则任务永久停留 PENDING/QUEUED（不变量 2）。
+                    outstanding = db.query(Outbox).filter(
+                        Outbox.aggregate_type == "TASK",
+                        Outbox.aggregate_id == task.id,
+                        Outbox.event_type == "TASK_READY",
+                        Outbox.status.in_(["PENDING", "PROCESSING"]),
+                    ).first()
+                    if outstanding is None:
+                        db.add(Outbox(
+                            id=new_uuid7(),
+                            tenant_id=task.tenant_id,
+                            aggregate_type="TASK",
+                            aggregate_id=task.id,
+                            event_type="TASK_READY",
+                            payload={"task_id": str(task.id), "recovered": True},
+                        ))
                 elif task.status == TaskStatus.CANCELING:
                     transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled during recovery")
                 elif task.status == TaskStatus.WAITING_HUMAN:
-                    checkpoint = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == task.id))
+                    checkpoint = latest_checkpoint(db, task.id)
                     confirmation = db.get(Confirmation, checkpoint.confirmation_id) if checkpoint and checkpoint.confirmation_id else None
                     if confirmation and confirmation.status == "APPROVED" and checkpoint.status == "APPROVED":
                         transition_task(db, task, TaskStatus.QUEUED, "TASK_APPROVAL_RECOVERED", "approved task resumed after restart")
@@ -531,17 +691,20 @@ class TaskRuntime:
                         Task.status.in_([TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_HUMAN, TaskStatus.CANCEL_REQUESTED]),
                     ).all()
                     for task in tasks:
-                        task.error_code = "AI_TASK_TIMEOUT"
-                        task.error_message = "task deadline exceeded"
-                        checkpoint = db.scalar(select(TaskCheckpoint).where(TaskCheckpoint.task_id == task.id))
-                        if checkpoint and checkpoint.status in {"WAITING_APPROVAL", "APPROVED"}:
-                            checkpoint.status = "EXPIRED"
                         try:
-                            transition_task(db, task, TaskStatus.TIMEOUT, "TASK_TIMEOUT", "task timed out")
+                            # 每个任务单独 SAVEPOINT：迁移失败只回滚该任务自身的
+                            # error_code / checkpoint 变更，同批其他任务与调用方已 flush
+                            # 的写入（审计/事件）不受影响（P2-16）。
+                            with db.begin_nested():
+                                task.error_code = "AI_TASK_TIMEOUT"
+                                task.error_message = "task deadline exceeded"
+                                checkpoint = latest_checkpoint(db, task.id)
+                                if checkpoint and checkpoint.status in {"WAITING_APPROVAL", "APPROVED"}:
+                                    checkpoint.status = "EXPIRED"
+                                transition_task(db, task, TaskStatus.TIMEOUT, "TASK_TIMEOUT", "task timed out")
                         except ApiError:
-                            # 单个任务迁移失败（如并发已终态）不得拖垮整批超时处理：
-                            # 回滚后跳过该任务，其余任务下个周期继续收敛
-                            db.rollback()
+                            # 单个任务迁移失败（如并发已终态）不得拖垮整批超时处理
+                            logger.warning("task %s timeout transition skipped: state changed concurrently", task.id)
                             continue
                     db.commit()
             except asyncio.CancelledError:

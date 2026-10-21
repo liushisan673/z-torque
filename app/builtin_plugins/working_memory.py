@@ -1,7 +1,7 @@
 """memory.working Port 的内置实现：进程内会话工作记忆（契约 §3.5 对照表「请求级」）。
 
-WorkingMemory 自 app/services/working_memory.py 原地迁入（原类无调用方，
-行为不变）；容量取 settings.memory_working_cache_size。企业版可经 PortRegistry
+调用方：context_builder.build_context 以会话为键缓存上下文快照（按最后一条消息 /
+摘要版本号失效）。容量取 settings.memory_working_cache_size。企业版可经 PortRegistry
 以 PLUGIN/EXPLICIT 优先级替换为 Redis 等共享后端。
 """
 

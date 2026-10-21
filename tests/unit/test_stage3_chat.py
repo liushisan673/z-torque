@@ -134,6 +134,9 @@ def test_child_agent_delegation_uses_mapping_builder(monkeypatch):
                 return child_agent
             return None
 
+        def scalar(self, *args, **kwargs):
+            return None  # 无模型档案匹配 → max_tokens 走全局默认兜底
+
     loop = execution_loop.AgentExecutionLoop(FakeGateway(), None)
     out = asyncio.run(loop._run_child_agent(
         FakeDB(), ctx=SecurityContext(tenant_id=child_version.tenant_id, user_id="u"),
@@ -174,6 +177,9 @@ def test_child_delegation_request_carries_snapshot_model_params(monkeypatch):
             if model.__name__ == "Agent":
                 return child_agent
             return None
+
+        def scalar(self, *args, **kwargs):
+            return None  # 无模型档案匹配 → max_tokens 走全局默认兜底
 
     class FakeGateway:
         async def generate(self, request):

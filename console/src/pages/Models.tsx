@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
+import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import type { ModelProvider, ModelResource, ModelEndpoint, ModelTestResult } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
@@ -9,6 +10,9 @@ import { SecretRefInput } from "../components/SecretRefInput";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { useAuth } from "../stores/auth";
+
+// 选中记忆：跳转页面后返回时恢复上次选中的模型（sessionStorage 按标签页隔离）
+const SELECTED_KEY = "zt.models.selectedId";
 
 type Tab = "overview" | "endpoints" | "secret" | "test";
 
@@ -145,10 +149,13 @@ export function ModelsPage() {
     void load();
   }, [load]);
 
-  // 默认展示列表第一项，避免主区空白（仅当前无选中时生效；删除当前选中后自动补选）
+  // 默认展示列表第一项，避免主区空白；跳转回来时优先恢复上次选中（记忆 id 已不存在则回退第一项）
   useEffect(() => {
     if (loading || selectedId) return;
-    if (models.length > 0) void openModel(models[0]);
+    if (models.length === 0) return;
+    const remembered = readSelectedId(SELECTED_KEY);
+    const target = (remembered && models.find((m) => m.id === remembered)) || models[0];
+    void openModel(target);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, models, selectedId]);
 
@@ -165,6 +172,7 @@ export function ModelsPage() {
 
   async function openModel(m: ModelResource) {
     setSelectedId(m.id);
+    writeSelectedId(SELECTED_KEY, m.id);
     setDetail(null);
     setTestResult(null);
     setTab("overview");
@@ -604,18 +612,29 @@ export function ModelsPage() {
                           <input type="text" value={detail?.status === "ENABLED" ? "启用" : "停用"} disabled />
                         </div>
                         <div className="model-field">
-                          <label>上下文窗口 / 最大输出</label>
                           <div style={{ display: "flex", gap: 8 }}>
-                            <input type="number" placeholder="context_window" value={editCtx} onChange={(e) => setEditCtx(e.target.value)} disabled={busy || !canManage} />
-                            <input type="number" placeholder="max_output_tokens" value={editMaxOut} onChange={(e) => setEditMaxOut(e.target.value)} disabled={busy || !canManage} />
+                           <label>
+                            上下文窗口
+                            <input type="number" placeholder="如 128000" value={editCtx} onChange={(e) => setEditCtx(e.target.value)} disabled={busy || !canManage} />
+                            </label>
+                            <label>
+                            最大输出
+                            <input type="number" placeholder="如 8192" value={editMaxOut} onChange={(e) => setEditMaxOut(e.target.value)} disabled={busy || !canManage} />
+                            </label>
                           </div>
                         </div>
-                        <div className="model-field">
-                          <label>
-                            <input type="checkbox" checked={editFnCall} onChange={(e) => setEditFnCall(e.target.checked)} disabled={busy || !canManage} style={{ marginRight: 6 }} />
-                            支持函数调用
-                          </label>
-                        </div>
+                          <div className="model-field">
+                            <label style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
+                              支持函数调用
+                              <input 
+                                type="checkbox" 
+                                checked={editFnCall} 
+                                onChange={(e) => setEditFnCall(e.target.checked)} 
+                                disabled={busy || !canManage}
+                                style={{ margin: '0 8px 0 0' }} 
+                              />
+                            </label>
+                          </div>
                       </div>
                       {canManage && (
                         <div className="form-actions" style={{ marginTop: 12 }}>

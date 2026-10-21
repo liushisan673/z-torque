@@ -10,6 +10,7 @@ from sqlalchemy import delete
 
 from app.db.session import SessionLocal
 from app.builtin_plugins.queue_driver import InMemoryQueueDriver
+from app.kernel.model_gateway.contracts import ModelRequest, ModelResponse
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_confirmation import pause_task_for_confirmation
 from app.kernel.task.dispatcher import OutboxDispatcher, execute_simulated
@@ -295,3 +296,49 @@ async def test_waiting_human_task_can_be_cancelled_via_api():
         assert task.status == TaskStatus.CANCELLED
         checkpoint = db.query(TaskCheckpoint).filter_by(task_id=task_id).one()
         assert checkpoint.status == "EXPIRED"
+
+
+class _RecordingModelGateway:
+    """记录请求的假模型网关：用于验证无会话任务确实发起了模型调用。"""
+
+    def __init__(self) -> None:
+        self.requests: list[ModelRequest] = []
+
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        return ModelResponse(content="executed", usage=None)
+
+
+def test_conversationless_task_executes_model_and_skips_conversation_writes():
+    """无会话任务（POST /tasks）：进入真实模型执行，结果只落 task.result，不写消息/会话。"""
+    tenant_id, user_id, agent_id, version_id = _bootstrap()
+    with SessionLocal.begin() as db:
+        task = create_task(
+            db,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
+            agent_id=agent_id,
+            agent_version_id=version_id,
+            idempotency_key=str(uuid4()),
+            request_summary="summarize this",
+        )
+        transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
+        task_id = task.id
+        assert task.conversation_id is None
+
+    gateway = _RecordingModelGateway()
+    runtime = TaskRuntime(model_gateway=gateway, queue=InMemoryQueueDriver(), session_factory=SessionLocal)
+    with SessionLocal() as db:
+        result = asyncio.run(runtime._execute_model_task(db, task_id))
+    assert result["status"] == "SUCCEEDED"
+
+    assert len(gateway.requests) == 1
+    request = gateway.requests[0]
+    assert request.conversation_id is None
+    assert [message.content for message in request.messages] == ["summarize this"]
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.SUCCESS
+        assert task.result["content"] == "executed"
+        assert db.query(Message).filter(Message.task_id == task_id).count() == 0

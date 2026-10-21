@@ -210,6 +210,7 @@ export interface SkillVersionRef {
   status: string;
   snapshot_hash: string | null;
   published_at: string | null;
+  requires_confirmation?: boolean;
 }
 
 export interface SkillDetail {
@@ -232,10 +233,12 @@ export interface SkillVersionDetail {
   version_number: number;
   status: string;
   instructions: string | null;
+  orchestration_hint: string | null;
   script_source: string | null;
   required_permissions: string[];
   requires_confirmation: boolean;
   tool_version_ids: string[];
+  tool_bindings?: { tool_version_id: string; sort_order: number; role: string | null; note: string | null }[];
   snapshot_hash: string | null;
   published_at: string | null;
   implementation: string | null;
@@ -256,6 +259,13 @@ export interface SkillToolLink {
   description: string | null;
   version_number: number;
   status: string;
+  tags?: string[];
+  is_business_tool?: boolean;
+  sort_order?: number;
+  role?: string | null;
+  note?: string | null;
+  current_published_version_id?: string | null;
+  current_version_number?: number | null;
 }
 
 export interface ToolListItem {
@@ -264,7 +274,72 @@ export interface ToolListItem {
   description: string | null;
   tool_type: string;
   official: boolean;
+  tags?: string[];
+  is_business_tool?: boolean;
   versions: SkillVersionRef[];
+}
+
+// 结构化参数定义（从 input_schema 派生，绑定选择器/封装弹窗统一渲染）
+export interface ToolParamInfo {
+  name: string;
+  type: string;
+  description: string | null;
+  required: boolean;
+}
+
+// 可选工具（Skill 绑定选择器，按连接器分组）
+export interface SelectableTool {
+  tool_id: string;
+  name: string;
+  description: string | null;
+  tool_type: string;
+  tags: string[];
+  is_business_tool: boolean;
+  requires_confirmation: boolean;
+  param_summary: string;
+  params: ToolParamInfo[];
+  default_tool_version_id: string;
+  published_versions: { tool_version_id: string; version_number: number }[];
+  bound_to_current_version: boolean;
+  connectors: { connector_id: string; connector_name: string }[];
+}
+
+export interface SelectableToolGroup {
+  connector_id: string | null;
+  connector_name: string;
+  tools: SelectableTool[];
+}
+
+export interface SelectableToolResponse {
+  groups: SelectableToolGroup[];
+  total: number;
+  limit: number;
+}
+
+// 可选技能版本（Agent 绑定选择器，按技能分组）
+export interface SelectableSkillVersion {
+  skill_version_id: string;
+  version_number: number;
+  published_at: string | null;
+  tool_count: number;
+  mode: string;
+  requires_confirmation: boolean;
+  orchestration_hint: string | null;
+}
+
+export interface SelectableSkillGroup {
+  skill_id: string;
+  skill_name: string;
+  description: string | null;
+  skill_type: string;
+  official: boolean;
+  source_type: string;
+  versions: SelectableSkillVersion[];
+}
+
+export interface SelectableSkillResponse {
+  groups: SelectableSkillGroup[];
+  total: number;
 }
 
 export interface ToolDetail {
@@ -428,7 +503,13 @@ export interface ConnectorToolLink {
   approved: boolean;
   name: string | null;
   tool_type: string | null;
+  status: string | null;
   description: string | null;
+  tags: string[];
+  is_business_tool: boolean;
+  published_version_id: string | null;
+  published_version_number: number | null;
+  required_params: { name: string; type: string; description: string | null }[];
   registered_at: string | null;
 }
 
@@ -510,6 +591,8 @@ export interface Confirmation {
   skill_version_id: string | null;
   tool_version_id: string | null;
   resolved_at: unknown | null;
+  /** 展示用：发起人用户名（后端 join 返回，管理员视角用于区分他人确认单） */
+  requested_by_username?: string | null;
 }
 
 // ---- Chat / Task SSE 事件 ----
