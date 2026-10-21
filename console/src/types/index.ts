@@ -517,6 +517,7 @@ export interface ConnectorToolLink {
 export interface AuditEvent {
   id: string;
   action: string;
+  category: string;
   resource_type: string;
   resource_id: string | null;
   actor_user_id: string | null;

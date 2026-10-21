@@ -9,16 +9,31 @@ import { useAuth } from "../stores/auth";
 const API = "/api/z-torque/audit";
 const PAGE_SIZE_OPTIONS = [20, 50, 100];
 
-// 类型筛选：映射到项目实际写入审计的 action 前缀（真实事件族）
-const TYPE_OPTIONS: { value: string; label: string }[] = [
-  { value: "", label: "全部类型" },
-  { value: "AGENT_", label: "智能体" },
-  { value: "SKILL_", label: "技能" },
-  { value: "MODEL_", label: "模型" },
-  { value: "CONNECTOR_", label: "连接器" },
-  { value: "FILE_", label: "文件" },
-  { value: "CONFIRMATION_", label: "确认" },
+// 行为类别（后端 audit_category 映射为唯一数据源）：筛选与"类型"列共用，value 需与后端一致
+const CATEGORY_OPTIONS: { value: string; label: string }[] = [
+  { value: "config", label: "配置变更" },
+  { value: "model_call", label: "模型调用" },
+  { value: "tool_call", label: "工具调用" },
+  { value: "publish", label: "版本发布" },
+  { value: "file", label: "文件操作" },
+  { value: "confirmation", label: "确认审批" },
+  { value: "task", label: "任务运行" },
+  { value: "iam", label: "账号权限" },
+  { value: "kernel", label: "系统/内核" },
 ];
+
+// 类别 → 类型列标签与配色（复用现有 audit-tag-* 色板）
+const CATEGORY_TAG: Record<string, { label: string; cls: string }> = {
+  config: { label: "配置变更", cls: "audit-tag-other" },
+  model_call: { label: "模型调用", cls: "audit-tag-model" },
+  tool_call: { label: "工具调用", cls: "audit-tag-task" },
+  publish: { label: "版本发布", cls: "audit-tag-agent" },
+  file: { label: "文件操作", cls: "audit-tag-file" },
+  confirmation: { label: "确认审批", cls: "audit-tag-confirm" },
+  task: { label: "任务运行", cls: "audit-tag-conn" },
+  iam: { label: "账号权限", cls: "audit-tag-skill" },
+  kernel: { label: "系统/内核", cls: "audit-tag-other" },
+};
 
 type RangeKey = "24h" | "7d" | "30d" | "all" | "custom";
 
@@ -255,17 +270,9 @@ function summaryLabel(summary: string | null | undefined): string {
   return summary;
 }
 
-// action → 类型标签（展示用，前缀映射）
-function tagOf(e: AuditEvent): { label: string; cls: string } {
-  const a = e.action;
-  if (a === "MODEL_CALL_COMPLETED") return { label: "模型调用", cls: "audit-tag-task" };
-  if (a.startsWith("AGENT_")) return { label: "智能体", cls: "audit-tag-agent" };
-  if (a.startsWith("SKILL_") || a.startsWith("TOOL_") || a.startsWith("MD_SKILL_")) return { label: "技能", cls: "audit-tag-skill" };
-  if (a.startsWith("MODEL_")) return { label: "模型", cls: "audit-tag-model" };
-  if (a.startsWith("CONNECTOR_")) return { label: "连接器", cls: "audit-tag-conn" };
-  if (a.startsWith("FILE_")) return { label: "文件", cls: "audit-tag-file" };
-  if (a.startsWith("CONFIRMATION_")) return { label: "确认", cls: "audit-tag-confirm" };
-  return { label: "其他", cls: "audit-tag-other" };
+// 类型列标签：直接使用后端 category 字段（行为类别，与筛选同源），未识别时兜底原样展示
+function categoryTag(e: AuditEvent): { label: string; cls: string } {
+  return CATEGORY_TAG[e.category] ?? { label: e.category, cls: "audit-tag-other" };
 }
 
 function resultOf(e: AuditEvent): { label: string; cls: string } {
@@ -386,7 +393,7 @@ export function AuditPage() {
   const [range, setRange] = useState<RangeKey>("7d");
   const [startCustom, setStartCustom] = useState("");
   const [endCustom, setEndCustom] = useState("");
-  const [typePrefix, setTypePrefix] = useState("");
+  const [category, setCategory] = useState("");
   const [username, setUsername] = useState("");
   const [agentId, setAgentId] = useState("");
   // 智能体筛选下拉数据源（替代手输 UUID）
@@ -419,7 +426,7 @@ export function AuditPage() {
     } else if (range === "30d") {
       qs.set("start_time", isoDaysAgo(30));
     }
-    if (typePrefix) qs.set("action_prefix", typePrefix);
+    if (category) qs.set("category", category);
     if (username.trim()) qs.set("actor_username", username.trim());
     if (agentId.trim()) {
       qs.set("resource_type", "AGENT");
@@ -428,7 +435,7 @@ export function AuditPage() {
     if (traceInput.trim()) qs.set("trace_id", traceInput.trim());
     if (keyword.trim()) qs.set("keyword", keyword.trim());
     return qs.toString();
-  }, [range, startCustom, endCustom, typePrefix, username, agentId, traceInput, keyword, pageSize]);
+  }, [range, startCustom, endCustom, category, username, agentId, traceInput, keyword, pageSize]);
 
   const load = useCallback(async (offset: number) => {
     setLoading(true);
@@ -478,9 +485,9 @@ export function AuditPage() {
   }, [detail]);
 
   function resetFilters() {
-    const changed = range !== "7d" || startCustom !== "" || endCustom !== "" || typePrefix !== ""
+    const changed = range !== "7d" || startCustom !== "" || endCustom !== "" || category !== ""
       || username !== "" || agentId !== "" || traceInput !== "" || keyword !== "";
-    setRange("7d"); setStartCustom(""); setEndCustom(""); setTypePrefix("");
+    setRange("7d"); setStartCustom(""); setEndCustom(""); setCategory("");
     setUsername(""); setAgentId(""); setTraceInput(""); setKeyword("");
     setPage(0); setPageJump("");
     // 有筛选变更：防抖 effect 会自动重查（固定 offset 0），无需手动请求，避免双请求；
@@ -573,8 +580,9 @@ export function AuditPage() {
           )}
           <div className="audit-field">
             <label>事件类型</label>
-            <select value={typePrefix} onChange={(e) => setTypePrefix(e.target.value)}>
-              {TYPE_OPTIONS.map((o) => (
+            <select value={category} onChange={(e) => setCategory(e.target.value)}>
+              <option value="">全部类型</option>
+              {CATEGORY_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
@@ -673,7 +681,7 @@ export function AuditPage() {
                 </thead>
                 <tbody>
                   {data.items.map((e) => {
-                    const tg = tagOf(e);
+                    const tg = categoryTag(e);
                     const rs = resultOf(e);
                     return (
                       <tr
@@ -750,7 +758,7 @@ export function AuditPage() {
                   <h3>基本信息</h3>
                   <dl className="audit-kv">
                     <dt>时间</dt><dd>{fmtTime(detail.created_at)}</dd>
-                    <dt>类型</dt><dd><span className={`audit-tag ${tagOf(detail).cls}`}>{tagOf(detail).label}</span> <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-muted)" }}>{actionLabel(detail.action)}</span></dd>
+                    <dt>类型</dt><dd><span className={`audit-tag ${categoryTag(detail).cls}`}>{categoryTag(detail).label}</span> <span style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text-muted)" }}>{actionLabel(detail.action)}</span></dd>
                     <dt>动作</dt>
                     <dd>
                       <span className="mono" style={{ fontSize: 12 }}>{detail.action}</span>
@@ -883,7 +891,7 @@ export function AuditPage() {
                           onClick={() => void openDetail(s, true)}
                         >
                           <span className="t">{fmtTime(s.created_at)}</span>
-                          <span className={`audit-tag ${tagOf(s).cls}`}>{tagOf(s).label}</span>
+                          <span className={`audit-tag ${categoryTag(s).cls}`}>{categoryTag(s).label}</span>
                           <span className="s">{summaryLabel(s.summary)}</span>
                         </div>
                       ))

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 class AuditEventResponse(BaseModel):
     id: str
     action: str
+    category: str
     resource_type: str
     resource_id: str | None = None
     actor_user_id: str | None = None
