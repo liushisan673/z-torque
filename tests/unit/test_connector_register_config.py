@@ -1,10 +1,13 @@
-"""连接器工具注册/更新配置的公共逻辑：DB_SQL 参数骨架自动补全。"""
+"""连接器工具注册/更新配置的公共逻辑：DB_SQL 参数骨架自动补全 + HTTP 方法闸门。"""
 
 from uuid import uuid4
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.api.routes.connectors import _resolve_tool_register_config
+from app.core.errors import ApiError
 
 
 def _db_connector():
@@ -50,3 +53,29 @@ def test_http_tool_schema_passthrough_untouched():
         sql_template=None, input_schema=schema_in, external_name=None, fallback_name="w",
     )
     assert schema == schema_in
+
+
+def _rest_connector():
+    return SimpleNamespace(id=uuid4(), connector_type="REST", config={"base_url": "https://x"}, target_policy={})
+
+
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE", "put", "Delete"])
+def test_http_register_rejects_unsupported_methods(method):
+    """手动注册非 GET/POST：显式 422，而不是静默生成一个必然失败的死工具。"""
+    with pytest.raises(ApiError) as excinfo:
+        _resolve_tool_register_config(
+            _rest_connector(), tool_type="HTTP", payload_config={"method": method, "url": "https://x/api"},
+            sql_template=None, input_schema={}, external_name=None, fallback_name="w",
+        )
+    assert excinfo.value.code == "AI_HTTP_METHOD_NOT_ALLOWED"
+    assert excinfo.value.status_code == 422
+
+
+def test_http_register_allows_get_and_post_case_insensitive():
+    for method in ("GET", "post"):
+        snapshot, tool_type, _is_write, _schema = _resolve_tool_register_config(
+            _rest_connector(), tool_type="HTTP", payload_config={"method": method, "url": "https://x/api"},
+            sql_template=None, input_schema={}, external_name=None, fallback_name="w",
+        )
+        assert tool_type == "HTTP"
+        assert snapshot["method"].upper() == method.upper()

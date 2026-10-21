@@ -1441,6 +1441,13 @@ export function ConnectorsPage() {
                         已注册工具
                         <span className="hint">登记后供技能绑定调用</span>
                       </h3>
+                      <div className="skill-alert skill-alert-info" style={{ marginBottom: 12 }}>
+                        <span>ℹ</span>
+                        <span>
+                          仅 <strong>GET / POST</strong> 方法的接口可注册为工具并被执行：导入时自动跳过、
+                          手动注册直接报错；存量同类工具已归档（列表中标「不支持执行」，不会被技能调用）。
+                        </span>
+                      </div>
                       {tools.length === 0 ? (
                         <div className="skill-readonly-banner">当前连接尚未注册任何工具。</div>
                       ) : (
@@ -1448,6 +1455,7 @@ export function ConnectorsPage() {
                           <thead>
                             <tr>
                               <th>工具</th>
+                              <th>方法</th>
                               <th>类型</th>
                               <th>说明</th>
                               <th>标签</th>
@@ -1462,6 +1470,18 @@ export function ConnectorsPage() {
                                   {t.name ?? t.external_name ?? t.id}
                                   {t.is_business_tool && <span className="skill-tag skill-tag-mine">业务封装</span>}
                                   {t.status === "ARCHIVED" && <span className="connector-tag connector-tag-warn">已归档</span>}
+                                </td>
+                                <td>
+                                  {/* HTTP 方法显式展示：避免把 POST 的 batchDelete/update 误认为被拦截的 DELETE 方法 */}
+                                  {t.method ? (
+                                    ["GET", "POST"].includes(t.method) ? (
+                                      <span className="connector-tag connector-tag-ok">{t.method}</span>
+                                    ) : (
+                                      <span className="connector-tag connector-tag-warn">{t.method} · 不支持执行</span>
+                                    )
+                                  ) : (
+                                    "—"
+                                  )}
                                 </td>
                                 <td>{toolTypeLabel(t.tool_type)}{t.published_version_number ? <span className="connector-tool-ver">v{t.published_version_number}</span> : null}</td>
                                 <td>{t.description ?? "—"}</td>

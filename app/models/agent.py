@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import Boolean, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import TenantModel, UUIDModel
+from app.db.base import GUID, TenantModel, UUIDModel
 
 
 class Agent(TenantModel):
@@ -28,8 +28,10 @@ class Agent(TenantModel):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_type: Mapped[str] = mapped_column(String(16), nullable=False, default="USER")
     source_agent_id: Mapped[UUID | None] = mapped_column(ForeignKey("zr_agent.id"), nullable=True)
-    source_agent_version_id: Mapped[UUID | None] = mapped_column(nullable=True)
-    current_published_version_id: Mapped[UUID | None] = mapped_column(nullable=True, index=True)
+    # UUID 列统一使用项目 GUID（36 位带连字符）：原生 Uuid 在 SQLite 存 32 位无连字符，
+    # 与主键格式不一致会导致裸 SQL 关联失配
+    source_agent_version_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True)
+    current_published_version_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
     is_default_parent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
 
@@ -53,6 +55,6 @@ class AgentVersion(TenantModel):
 class AgentVersionSkill(UUIDModel):
     __tablename__ = "zr_agent_version_skill"
     __table_args__ = (UniqueConstraint("agent_version_id", "skill_version_id"),)
-    tenant_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(GUID(), nullable=False, index=True)
     agent_version_id: Mapped[UUID] = mapped_column(ForeignKey("zr_agent_version.id", ondelete="RESTRICT"), nullable=False)
     skill_version_id: Mapped[UUID] = mapped_column(ForeignKey("zr_skill_version.id", ondelete="RESTRICT"), nullable=False)

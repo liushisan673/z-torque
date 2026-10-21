@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from pathlib import Path
+import sqlite3
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -26,10 +27,9 @@ def _ensure_sqlite_columns() -> None:
     url = _database_url()
     if not url.startswith("sqlite:///"):
         return
-    path = url.removeprefix("sqlite:///")
+    path = url.removeprefix("sqlite:///" )
     if not Path(path).exists():
         return
-    import sqlite3
 
     conn = sqlite3.connect(path)
     try:
@@ -39,9 +39,52 @@ def _ensure_sqlite_columns() -> None:
                 conn.execute("ALTER TABLE zr_user ADD COLUMN display_name VARCHAR(128) NULL")
             if "last_login_at" not in existing:
                 conn.execute("ALTER TABLE zr_user ADD COLUMN last_login_at TIMESTAMP NULL")
+            _normalize_uuid_formats(conn)
             conn.commit()
     finally:
         conn.close()
+
+
+# UUID 列格式统一（幂等数据迁移）：历史模型中未声明 GUID 类型的 UUID 列被 SQLAlchemy
+# 原生 Uuid 存成 32 位无连字符，与 GUID 主键（36 位带连字符）不一致，裸 SQL 关联会失配；
+# 模型层已统一补声明 GUID，这里把存量值重格式化为 36 位。
+_UUID_REFORMAT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("zr_agent", "source_agent_version_id"),
+    ("zr_agent", "current_published_version_id"),
+    ("zr_agent_version_skill", "tenant_id"),
+    ("zr_audit_log", "resource_id"),
+    ("zr_message", "conversation_id"),
+    ("zr_outbox", "tenant_id"),
+    ("zr_outbox", "aggregate_id"),
+    ("zr_skill", "current_published_version_id"),
+    ("zr_skill_version_tool", "tenant_id"),
+    ("zr_task", "parent_task_id"),
+    ("zr_task", "root_task_id"),
+    ("zr_task", "conversation_id"),
+    ("zr_task", "trigger_message_id"),
+    ("zr_task", "message_id"),
+    ("zr_task", "result_message_id"),
+    ("zr_task", "agent_id"),
+    ("zr_task", "agent_version_id"),
+    ("zr_task", "delegation_id"),
+    ("zr_task_event", "tenant_id"),
+    ("zr_tool", "current_published_version_id"),
+)
+
+
+def _normalize_uuid_formats(conn: sqlite3.Connection) -> None:
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table, column in _UUID_REFORMAT_COLUMNS:
+        if table not in tables:
+            continue
+        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            continue
+        conn.execute(
+            f"UPDATE {table} SET {column} = "
+            f"substr({column},1,8)||'-'||substr({column},9,4)||'-'||substr({column},13,4)||'-'||substr({column},17,4)||'-'||substr({column},21,12) "
+            f"WHERE {column} IS NOT NULL AND LENGTH({column}) = 32"
+        )
 
 
 _ensure_sqlite_columns()

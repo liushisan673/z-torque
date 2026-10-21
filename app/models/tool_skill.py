@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import Boolean, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import TenantModel, UUIDModel
+from app.db.base import GUID, TenantModel, UUIDModel
 
 
 class Tool(TenantModel):
@@ -21,7 +21,7 @@ class Tool(TenantModel):
     tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     # 业务封装 Tool 标识：选择器与模型暴露侧用于区分组合能力
     is_business_tool: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    current_published_version_id: Mapped[UUID | None] = mapped_column(nullable=True, index=True)
+    current_published_version_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True, index=True)
 
 
 class ToolVersion(TenantModel):
@@ -52,7 +52,7 @@ class Skill(TenantModel):
     source_type: Mapped[str] = mapped_column(String(16), nullable=False, default="USER")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
     official: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    current_published_version_id: Mapped[UUID | None] = mapped_column(nullable=True, index=True)
+    current_published_version_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True, index=True)
 
 
 class SkillVersion(TenantModel):
@@ -76,7 +76,7 @@ class SkillVersion(TenantModel):
 class SkillVersionTool(UUIDModel):
     __tablename__ = "zr_skill_version_tool"
     __table_args__ = (UniqueConstraint("skill_version_id", "tool_version_id"),)
-    tenant_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(GUID(), nullable=False, index=True)
     skill_version_id: Mapped[UUID] = mapped_column(ForeignKey("zr_skill_version.id", ondelete="RESTRICT"), nullable=False)
     tool_version_id: Mapped[UUID] = mapped_column(ForeignKey("zr_tool_version.id", ondelete="RESTRICT"), nullable=False)
     # 绑定顺序：同步执行与模型提示均按此排序，发布时固化进快照

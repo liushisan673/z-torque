@@ -5,7 +5,7 @@ from uuid import UUID
 from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import TenantModel, UUIDModel
+from app.db.base import GUID, TenantModel, UUIDModel
 from app.kernel.task.states import TaskStatus
 
 
@@ -18,19 +18,21 @@ class Task(TenantModel):
     )
 
     owner_user_id: Mapped[UUID] = mapped_column(ForeignKey("zr_user.id"), nullable=False, index=True)
-    parent_task_id: Mapped[UUID | None] = mapped_column(ForeignKey("zr_task.id"), nullable=True)
-    root_task_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    # 以下 UUID 列统一使用项目 GUID（36 位带连字符）：原生 Uuid 在 SQLite 存 32 位无连字符，
+    # 与主键格式不一致会导致裸 SQL 关联失配
+    parent_task_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("zr_task.id"), nullable=True)
+    root_task_id: Mapped[UUID] = mapped_column(GUID(), nullable=False, index=True)
     delegation_depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     child_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
     delegation_id: Mapped[UUID | None] = mapped_column(nullable=True)
     depends_on_task_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
-    conversation_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    conversation_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True)
     # Canonical Stage 3 field. message_id remains a legacy alias at the API boundary.
-    trigger_message_id: Mapped[UUID | None] = mapped_column(nullable=True)
-    message_id: Mapped[UUID | None] = mapped_column(nullable=True)
-    result_message_id: Mapped[UUID | None] = mapped_column(nullable=True)
-    agent_id: Mapped[UUID] = mapped_column(nullable=False)
-    agent_version_id: Mapped[UUID] = mapped_column(nullable=False)
+    trigger_message_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True)
+    message_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True)
+    result_message_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True)
+    agent_id: Mapped[UUID] = mapped_column(GUID(), nullable=False)
+    agent_version_id: Mapped[UUID] = mapped_column(GUID(), nullable=False)
     status: Mapped[TaskStatus] = mapped_column(String(32), default=TaskStatus.PENDING, nullable=False, index=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     request_summary: Mapped[str] = mapped_column(Text, nullable=False)
@@ -49,7 +51,7 @@ class TaskEvent(UUIDModel):
     __tablename__ = "zr_task_event"
     __table_args__ = (UniqueConstraint("task_id", "seq"),)
 
-    tenant_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(GUID(), nullable=False, index=True)
     task_id: Mapped[UUID] = mapped_column(ForeignKey("zr_task.id", ondelete="CASCADE"), nullable=False, index=True)
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -76,9 +78,9 @@ class TaskCheckpoint(TenantModel):
 class Outbox(UUIDModel):
     __tablename__ = "zr_outbox"
 
-    tenant_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(GUID(), nullable=False, index=True)
     aggregate_type: Mapped[str] = mapped_column(String(64), nullable=False)
-    aggregate_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    aggregate_id: Mapped[UUID] = mapped_column(GUID(), nullable=False, index=True)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False, index=True)

@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.builtin_plugins.executors import SUPPORTED_HTTP_METHODS
 from app.core.errors import ApiError
 from app.core.responses import success_response, trace_id_from
 from app.core.servertime import iso_utc
@@ -597,6 +598,16 @@ def _resolve_tool_register_config(connector: Connector, *, tool_type: str, paylo
     # MCP 工具执行期按 config.tool_name 发起 tools/call；缺省取外部名，再退回注册名
     if tool_type == "MCP":
         config["tool_name"] = external_name or fallback_name
+    # 注册入口闸门（与 HttpExecutor 执行白名单同源）：非 GET/POST 的 HTTP 工具不可注册，
+    # 避免产生"可绑定但必然执行失败"的死工具；用户主动注册故显式报错而非静默跳过
+    if tool_type == "HTTP":
+        method = str(config.get("method", "GET")).upper()
+        if method not in SUPPORTED_HTTP_METHODS:
+            raise ApiError(
+                "AI_HTTP_METHOD_NOT_ALLOWED",
+                f"HTTP 工具仅支持 {'/'.join(SUPPORTED_HTTP_METHODS)} 方法，当前为 {method}",
+                422,
+            )
     return config, tool_type, False, dict(input_schema or {})
 
 
@@ -685,6 +696,7 @@ async def connector_tools(connector_id: UUID, request: Request, user: ReadUser, 
     published_version: dict[UUID, UUID] = {}
     published_number: dict[UUID, int] = {}
     published_schema: dict[UUID, dict] = {}
+    published_config: dict[UUID, dict] = {}
     if tool_ids:
         for version in db.scalars(
             select(ToolVersion)
@@ -694,9 +706,23 @@ async def connector_tools(connector_id: UUID, request: Request, user: ReadUser, 
             published_version[version.tool_id] = version.id
             published_number[version.id] = version.version_number
             published_schema[version.id] = version.input_schema if isinstance(version.input_schema, dict) else {}
+            published_config[version.id] = version.config_snapshot if isinstance(version.config_snapshot, dict) else {}
         for tool in tool_map.values():
             if tool.current_published_version_id and tool.current_published_version_id in published_version.values():
                 published_version[tool.id] = tool.current_published_version_id
+
+    def _http_method(tool_id: UUID) -> str | None:
+        """HTTP 工具的实际请求方法；非 HTTP（MCP/DB/组合）无方法概念，返回 None。
+
+        前端据此区分「方法不合法」与「方法合法但 operationId 叫 batchDelete」，
+        避免把 POST 的删除类接口误判为被拦截的 DELETE 方法。
+        """
+        tool = tool_map.get(tool_id)
+        if tool is None or tool.tool_type != "HTTP":
+            return None
+        version_id = published_version.get(tool_id)
+        snapshot = published_config.get(version_id) if version_id else {}
+        return str(snapshot.get("method") or "GET").upper()
 
     def _required_params(tool_id: UUID) -> list[dict]:
         version_id = published_version.get(tool_id)
@@ -717,6 +743,7 @@ async def connector_tools(connector_id: UUID, request: Request, user: ReadUser, 
             "approved": x.approved,
             "name": tool_map[x.tool_id].name if x.tool_id in tool_map else None,
             "tool_type": tool_map[x.tool_id].tool_type if x.tool_id in tool_map else None,
+            "method": _http_method(x.tool_id),
             "status": tool_map[x.tool_id].status if x.tool_id in tool_map else None,
             "description": tool_map[x.tool_id].description if x.tool_id in tool_map else None,
             "tags": list(tool_map[x.tool_id].tags or []) if x.tool_id in tool_map else [],
@@ -1024,6 +1051,14 @@ async def import_openapi_tools(connector_id: UUID, payload: ConnectorOpenapiImpo
             if method_upper not in allowed_methods:
                 continue
             if not isinstance(op, dict):
+                continue
+            if method_upper not in SUPPORTED_HTTP_METHODS:
+                # 注册入口闸门（与执行器白名单同源）：非 GET/POST 方法登记后也必然执行失败，
+                # 直接跳过并在 skipped 中说明，避免产生死工具
+                skipped.append({
+                    "name": str(op.get("operationId") or f"{method_upper}_{path}"),
+                    "reason": f"方法 {method_upper} 不支持注册（当前仅支持 {'/'.join(SUPPORTED_HTTP_METHODS)}）",
+                })
                 continue
             tags = op.get("tags") or []
             if only_tags and not (set(map(str, tags)) & only_tags):

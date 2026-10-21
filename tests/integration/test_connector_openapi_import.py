@@ -153,18 +153,23 @@ async def test_import_openapi_from_json_registers_all_operations():
         )
         assert resp.status_code == 200, resp.text
         data = resp.json()["data"]
-        # 2 paths × (GET/POST + GET/DELETE) = 4
-        assert len(data["registered"]) == 4, data
+        # 2 paths 共 4 个操作，但 DELETE 方法不可执行 → 入口闸门跳过，只注册 GET/POST
+        assert data["total"] == 4, data
+        assert len(data["registered"]) == 3, data
         methods = sorted(r["method"] for r in data["registered"])
-        assert methods == ["DELETE", "GET", "GET", "POST"]
+        assert methods == ["GET", "GET", "POST"]
+        skipped = {item["name"]: item["reason"] for item in data["skipped"]}
+        assert "deleteUser" in skipped, data
+        assert "GET/POST" in skipped["deleteUser"], data
         # 每条工具都应带上完整 URL（servers[0].url + path）
         urls = {r["path"] for r in data["registered"]}
         assert urls == {"/users", "/users/{user_id}"}
 
-        # 注册后 GET /tools 应能看到这 4 个工具
+        # 注册后 GET /tools 只能看到 3 个可执行工具（DELETE 不产生死工具）
         listed = await client.get(f"{CONNECTORS}/{cid}/tools", headers={"Authorization": f"Bearer {token}"})
         assert listed.status_code == 200
-        assert len(listed.json()["data"]) == 4
+        assert len(listed.json()["data"]) == 3
+        assert "DELETE" not in {t.get("method") for t in listed.json()["data"]}
 
         # 工具名称应被清洗为合法标识符
         names = [t["name"] for t in listed.json()["data"]]

@@ -503,6 +503,9 @@ export interface ConnectorToolLink {
   approved: boolean;
   name: string | null;
   tool_type: string | null;
+  /** HTTP 工具的实际方法（后端从发布版本 config 提取）；MCP/DB/组合为 null。
+   *  用于区分「方法不合法」与「方法合法但 operationId 叫 batchDelete」。 */
+  method: string | null;
   status: string | null;
   description: string | null;
   tags: string[];

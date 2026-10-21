@@ -21,6 +21,10 @@ from sqlglot import exp, parse
 from app.kernel.ports.skill_executor import ExecutionResult
 from app.kernel.md_skill_runtime import MdSkillRuntime
 
+# HTTP 工具方法白名单：注册入口（OpenAPI 导入 / 手动注册）与执行器引用同一来源，
+# 将来放开新方法时改这里即可，两个闸门不会漂移
+SUPPORTED_HTTP_METHODS = ("GET", "POST")
+
 _TEMPLATE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
 
 
@@ -63,7 +67,7 @@ class HttpExecutor:
     def execute(self, config: dict, arguments: dict, timeout_seconds: float) -> ExecutionResult:
         method = str(config.get("method", "GET")).upper()
         url = str(config.get("url", ""))
-        if method not in ("GET", "POST"):
+        if method not in SUPPORTED_HTTP_METHODS:
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_METHOD_NOT_ALLOWED", error_message="only GET and POST are enabled")
         secret = config.get("secret_value")
         try:
