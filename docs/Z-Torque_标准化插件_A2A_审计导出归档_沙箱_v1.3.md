@@ -25,6 +25,7 @@
 > - **v1.3（2026-10-23）——定稿**：补齐 v1.2 阻塞开发的 3 处硬缺口（插件 DB 会话、插件自有表迁移归属与路由注册、错误码/类别/能力的实际落点）；修正审计插件 `permissions` 自相矛盾；避开 `/audit/exports` 与 `/audit/{event_id}` 路由冲突；`422` 语义冲突；进程组 kill 与现状描述；workdir 根过窄。新增 §1.6 数据访问三类模型、§3.7 红线机器化校验、§12 交付验证命令。
 > - v1.3.3（2026-10-26）——标准插件可移植性落地：`app/plugin_sdk/` 公开契约包、沙箱实现下沉、方案 b 表归属、entry_points 发现、结构化 `config_schema`、`api_version` 校验，见 §12.7。
 > - **v1.3.4（2026-10-26）——登记能力语义变更**：未注入 `sandbox.driver` 时 `MdSkillRuntime` 由「内核默认实现」改为拒绝执行 `AI_CAPABILITY_UNAVAILABLE`(503)，在 §十 变更与兼容表中注明属**升级收紧**（对齐《内核契约 v1》§3 optional 缺失语义），非能力回退。
+> - **v1.3.8（2026-10-26）——Port 协议与 ORM 解耦（标准插件遗留一期）**：`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py` 的模型 import 移入 `TYPE_CHECKING`，import Port 协议不再连带拉起 `app.models`，单插件「零内核依赖」收口；新增子进程探针机器断言，见 §12.7。
 
 ---
 
@@ -1130,7 +1131,7 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 | 版本契约 | `api_version` 必须在 `SUPPORTED_API_VERSIONS` 内；`extra_plugins` 与 Profile 重名/自身重名一律拒绝 | `test_plugin_manifest_contract.py`（4 条） |
 | 导入隔离 | `app/builtin_plugins/__init__.py` 改 PEP 562 惰性导出；单插件 import 不得拉起兄弟插件 / `app.services` / `app.api` / `app.ws` / 内核实现模块 | `tests/integration/test_plugin_minimal_assembly.py`（subprocess 探针 + 双 profile 装配） |
 
-**已知遗留**：内核 Port 协议模块（`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py`）直接 `from app.models import ...`，因此 import 任何 Port 协议仍会连带拉起 `app.models`。协议层与 ORM 解耦需独立一期。
+**已知遗留（2026-10-26 已收口）**：~~内核 Port 协议模块（`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py`）直接 `from app.models import ...`，import 任何 Port 协议都会连带拉起 `app.models`~~ → 三个协议模块的模型类型改入 `TYPE_CHECKING` 守卫（`from __future__ import annotations`，运行时 duck typing），import Port 协议不再拉起 `app.models`；由子进程探针 `tests/integration/test_plugin_minimal_assembly.py::test_port_protocols_do_not_pull_app_models` 机器断言。冻结契约文件（`ports/{__init__,model_selector,specs}.py`）未改动。
 
 ### 12.8 归档对象对账（2026-10-26 追加，脚本已落地）
 
@@ -1203,7 +1204,8 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 
 ---
 
-**版本**：v1.3.7（2026-10-26，A2A 远端真联调收口（§13.5）：统一封装解包 + 出站载荷语义修正（`skill_version_id` → `route=local`），8 条真链路用例）
+**版本**：v1.3.8（2026-10-26，Port 协议与 ORM 解耦：`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py` 模型 import 移入 `TYPE_CHECKING`，import Port 协议不再拉起 `app.models`，单插件「零内核依赖」收口，见 §12.7）
+**上一版**：v1.3.7（2026-10-26，A2A 远端真联调收口（§13.5）：统一封装解包 + 出站载荷语义修正（`skill_version_id` → `route=local`），8 条真链路用例）
 **上一版**：v1.3.6（2026-10-26，多副本租约（§5.9 + 迁移 `c7a1e4b90d23`）与 ruff 门禁登记）
 **上一版**：v1.3.5（2026-10-26，D 组：`observability.sink` 接线登记 `audit_export.job` / `a2a.outbound` 两个事件及 payload 白名单；`process.spawn` 明确「仅登记、无运行时强制点」）
 **上一版**：v1.3.4（2026-10-26，标准插件可移植性 + 沙箱能力语义变更登记：公开契约包 `app/plugin_sdk/`、沙箱实现下沉、方案 b 表归属、entry_points 发现、结构化配置契约；未注入 `sandbox.driver` → 503 属升级收紧）

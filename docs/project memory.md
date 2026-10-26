@@ -1,7 +1,7 @@
 # Z-Torque Community M1 — 项目记忆（会话交接）
 
-**更新**：2026-10-24　**状态**：本地开发中，**工作区未提交**（用户本人提交，禁止代提交/重置）
-**最新文档**：`docs/Z-Torque_标准化插件_A2A_审计导出归档_沙箱_v1.3.md`（v1.3.2，§12 验证 / §13 缺陷修订）
+**更新**：2026-10-26　**状态**：本地开发中，**工作区未提交**（用户本人提交，禁止代提交/重置）
+**最新文档**：`docs/Z-Torque_标准化插件_A2A_审计导出归档_沙箱_v1.3.md`（v1.3.8，§12 验证 / §13 缺陷修订）
 
 ---
 
@@ -41,7 +41,7 @@ AI Runtime 内核（M0–M3 阶段成果）+ 轻量控制台。核心架构是�
 | M3 `a2a_gateway` | ✅ 完成 | 协议/深度扇出/熔断/白名单/发现投影齐备；**远端已真联调**（`tests/integration/test_a2a_live_peers.py`，uvicorn 子进程 + 真 TCP/TLS，`ZTORQUE_A2A_LIVE=1` 打开），真联调修掉「统一封装不解包」「出站载荷把路由信息当执行指令」两个缺陷 |
 | M4 | ❌ 未启动 | sidecar 隔离、联邦身份(mTLS)（归档密钥轮换已单独完成，见 §8 P2） |
 
-**测试**：全集 **491** 项（阶段 2/3 新增 36 项：发现 11、配置契约 15、manifest 契约 4、单插件隔离 6；D 组新增 12 项观测接线用例；E 组新增 5 项租约用例；F 组新增 2 项出站语义单测；归档对象对账新增 14 项；归档密钥轮换新增 7 项）。**另有 8 项 A2A 真联调用例**（`tests/integration/test_a2a_live_peers.py`）默认 skip，`ZTORQUE_A2A_LIVE=1` 才跑（约 12~20s，起 uvicorn 子进程 + 真 TCP/TLS 对端）。**2026-10-26 三平台实测（F 组后）**：Windows+SQLite `470 passed / 11 skipped`（含 8 项 live skip）；Linux+SQLite（`zt-test` 容器）`471 passed / 10 skipped`；Linux+PostgreSQL 16（`zt_suite` 临时库）`471 passed / 10 skipped`；live 8 项在 Windows 与 Linux 容器内均 `8 passed`。**2026-10-26 对账脚本落地后三平台复跑**：Windows+SQLite `484 passed / 11 skipped`；Linux+SQLite `485 passed / 10 skipped`；Linux+PG16 `485 passed / 10 skipped`（Linux 多出 1 项为仅 POSIX 的沙箱用例）。**2026-10-26 密钥轮换落地后三平台复跑**：Windows+SQLite `491 passed / 11 skipped`；Linux+SQLite `492 passed / 10 skipped`；Linux+PG16 `492 passed / 10 skipped`；`ruff check app scripts tests` 全绿。skip 恒为「未设 `ZTORQUE_MIGRATION_CHECK_URL`」+「Windows-only 沙箱用例」+ 「未开 `ZTORQUE_A2A_LIVE`」三类，不是失败。
+**测试**：全集 **491** 项（阶段 2/3 新增 36 项：发现 11、配置契约 15、manifest 契约 4、单插件隔离 6；D 组新增 12 项观测接线用例；E 组新增 5 项租约用例；F 组新增 2 项出站语义单测；归档对象对账新增 14 项；归档密钥轮换新增 7 项）。**另有 8 项 A2A 真联调用例**（`tests/integration/test_a2a_live_peers.py`）默认 skip，`ZTORQUE_A2A_LIVE=1` 才跑（约 12~20s，起 uvicorn 子进程 + 真 TCP/TLS 对端）。**2026-10-26 三平台实测（F 组后）**：Windows+SQLite `470 passed / 11 skipped`（含 8 项 live skip）；Linux+SQLite（`zt-test` 容器）`471 passed / 10 skipped`；Linux+PostgreSQL 16（`zt_suite` 临时库）`471 passed / 10 skipped`；live 8 项在 Windows 与 Linux 容器内均 `8 passed`。**2026-10-26 对账脚本落地后三平台复跑**：Windows+SQLite `484 passed / 11 skipped`；Linux+SQLite `485 passed / 10 skipped`；Linux+PG16 `485 passed / 10 skipped`（Linux 多出 1 项为仅 POSIX 的沙箱用例）。**2026-10-26 密钥轮换落地后三平台复跑**：Windows+SQLite `491 passed / 11 skipped`；Linux+SQLite `492 passed / 10 skipped`；Linux+PG16 `492 passed / 10 skipped`；`ruff check app scripts tests` 全绿。**2026-10-26 Port 协议解耦后三平台复跑（新增 1 项子进程探针）**：Windows+SQLite `492 passed / 11 skipped`；Linux+SQLite `493 passed / 10 skipped`；Linux+PG16 `493 passed / 10 skipped`。skip 恒为「未设 `ZTORQUE_MIGRATION_CHECK_URL`」+「Windows-only 沙箱用例」+ 「未开 `ZTORQUE_A2A_LIVE`」三类，不是失败。
 **迁移**（A 组 2026-10-26 实测）：`zt_clean` 上 `alembic upgrade head` → `alembic check` 输出 `No new upgrade operations detected`、`scripts/check_migration_drift.py` `total=0`；`upgrade head --sql` 生成的 1018 行离线脚本在空库 `zt_ddl` 执行后同样 `total=0`；`zt_mig` 先 `upgrade head` 再跑 `tests/integration/test_alembic_migrations.py` → `3 passed`。存量 PG / 干净 SQLite 两处此前已零漂移。
 **CI**：`.github/workflows/ci.yml` 已建（见 §6.1），各 job 命令在本地容器/干净副本里逐条跑通；**尚未在真实 GitHub runner 上触发过**。
 **标准插件**（2026-10-26）：三插件（`sandbox_driver` / `audit_export_archive` / `a2a_gateway`）已按「可整目录搬到企业版」解耦 —— 越界 `app.kernel.*`/`app.models.*` import 从 **20 处降到 0**，由红线测试机器校验；沙箱执行实现已从内核下沉到插件，内核不再保留任何可执行实现。
@@ -212,7 +212,7 @@ tests/integration/test_a2a_live_peers.py          （F 组：A2A 真联调，默
   - `a2a_gateway` → `a2a.outbound`，唯一收口点 `PeerRegistry.invoke`（`_send` 只管 HTTP，`invoke` 管权限→熔断→观测），payload 白名单 = `{peer, direction, result, duration_ms, response_bytes, depth}`，result ∈ ok/error/timeout/circuit_open；`depth` 由网关 `_invoke_remote` 传入（出站深度，非入站值）；常量在 `peers.py`（`A2A_OUTBOUND_EVENT*`）。禁止放 token / header 原文 / body，失败路径 `response_bytes=0`（不做响应体推断）。
   - 验收护栏：`tests/unit/test_audit_export_archive.py`、`tests/unit/test_a2a_gateway.py` 各断言「键集合精确等于白名单 + 无敏感键 + sink 抛错不影响主流程」（共 12 条）。
 - ~~**标准插件阶段 2**~~ ✅ 2026-10-26：①`builtin_plugins/discovery.py`：元组兜底在前、entry_points 追加在后，重名内置优先、坏包默认跳过（`assemble(plugin_discovery_strict=True)` 改为拒绝启动）；②`config_schema` 落地为 JSON Schema（三插件已升级，其余 21 个保持历史描述形态不校验），装配期按 Settings **白名单投影**后校验类型/枚举/必填，边界语义仍归插件 `config.validate()`；③`api_version` 兼容性校验 + `extra_plugins` 重名拒绝；④`app/builtin_plugins/__init__.py` 改 PEP 562 惰性导出（否则 `import 单插件` 会拉起全部 19 个插件 + `app.models` + `app.services`）。
-- **标准插件遗留（阶段 2 之后，独立一期）**：内核 Port 协议模块（`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py`）直接 `from app.models import ...`，导致 import 任何 Port 协议都连带拉起 `app.models`。这是单插件"零内核依赖"的最后一块，需协议签名改 `TYPE_CHECKING` + 运行时 duck typing。`tests/integration/test_plugin_minimal_assembly.py` 已把可守卫的三条（不拉兄弟插件 / 不拉 services·api·ws / 不拉内核实现模块）固化为机器红线。
+- ~~**标准插件遗留（阶段 2 之后，独立一期）**~~ ✅ 2026-10-26：三个 Port 协议模块（`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py`）的模型 import 移入 `TYPE_CHECKING`（`from __future__ import annotations`，运行时 duck typing），import Port 协议不再连带拉起 `app.models`，单插件「零内核依赖」收口。机器探针 `tests/integration/test_plugin_minimal_assembly.py::test_port_protocols_do_not_pull_app_models`（子进程断言 `app.models` 不在 `sys.modules`）；冻结契约文件（`ports/{__init__,model_selector,specs}.py`）未动。v1.3 §12.7 已销项（v1.3.8）。
 
 **P2**
 - M4：sidecar 隔离、联邦身份（mTLS）。

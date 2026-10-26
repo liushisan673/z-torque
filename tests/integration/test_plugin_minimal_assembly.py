@@ -6,9 +6,11 @@
 3. 不得拉起内核里的**实现模块**（`md_skill_runtime` / `audit.service` / `plugin_guard`）
    —— 这三者本该在插件侧（沙箱实现已下沉、审计写入经 sdk、guard 经 sdk 注入）。
 
-**已知未解的内核债**（不在本测试断言内，见 memory §8）：内核 Port 协议模块
-（`app.kernel.ports.*`）直接 `from app.models import ...`，因此 import 任何协议都会连带
-拉起 `app.models`。这需要协议层与 ORM 解耦，属独立一期，不用"隐藏 import"的方式糊过去。
+**Port 协议与 ORM 解耦**（独立一期已收口）：`app.kernel.ports.*` 引用的模型类型
+（`User` / `Conversation` / `ShortTermMemory` / `Confirmation`）只出现在 `TYPE_CHECKING`
+守卫的类型注解里（`from __future__ import annotations`，运行时 duck typing），import
+任何 Port 协议都不再拉起 `app.models`，由 `test_port_protocols_do_not_pull_app_models`
+以子进程探针机器断言。
 """
 
 from __future__ import annotations
@@ -72,6 +74,29 @@ def test_plugin_import_is_isolated(plugin_name: str) -> None:
     siblings = next(line for line in completed.stdout.splitlines() if line.startswith("SIBLINGS="))[len("SIBLINGS=") :]
     assert leaked == "", f"{plugin_name} 反向依赖了内核实现 / 服务层 / HTTP 层：{leaked}"
     assert siblings == "", f"{plugin_name} import 时连带拉起了其他插件：{siblings}"
+
+
+_PORT_PROTOCOL_PROBE = """
+import importlib, sys
+
+for name in ("identity_provider", "memory_short", "approval_provider"):
+    importlib.import_module("app.kernel.ports." + name)
+
+print("MODELS=" + ("loaded" if "app.models" in sys.modules else "clean"))
+"""
+
+
+def test_port_protocols_do_not_pull_app_models() -> None:
+    # Port 协议是插件可依赖的契约面：import 它不得连带拉起 ORM 层（app.models）
+    completed = subprocess.run(
+        [sys.executable, "-c", _PORT_PROTOCOL_PROBE],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, f"probe failed: {completed.stderr}"
+    assert "MODELS=clean" in completed.stdout, completed.stdout
 
 
 @pytest.mark.parametrize("profile_name", ("community", "enterprise"))

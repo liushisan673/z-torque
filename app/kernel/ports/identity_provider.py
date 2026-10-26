@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.kernel.security_context import SecurityContext
-from app.models import User
+
+if TYPE_CHECKING:
+    from app.models import User
 
 
 class IdentityProvider(ABC):

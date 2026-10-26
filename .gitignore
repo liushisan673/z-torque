@@ -5,6 +5,8 @@
 *.db.bak*
 data/secrets/*
 data/files/*
+data/logs/*
+data/audit-archive/*
 !data/secrets/.gitkeep
 !data/files/.gitkeep
 .venv

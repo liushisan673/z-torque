@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from app.kernel.model_gateway import ModelGateway
-from app.models import Conversation, ShortTermMemory
+
+if TYPE_CHECKING:
+    from app.models import Conversation, ShortTermMemory
 
 
 class ShortTermMemoryProvider(ABC):
