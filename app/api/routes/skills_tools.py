@@ -5,14 +5,54 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.security.permissions import admin_owned_clause
 from app.core.limits import MAX_SKILL_BOUND_TOOLS
 from app.core.responses import success_response
 from app.core.servertime import iso_utc
 from app.db.session import get_db
-from app.kernel.skill_service import archive_resource, attach_tool, copy_skill, copy_tool, create_skill, create_skill_version, create_tool, create_tool_version, delete_resource, detach_tool, publish_skill_version, publish_tool_version, reorder_tool_bindings, update_skill, update_skill_version, update_tool_binding, update_tool_metadata, upgrade_tool_binding
-from app.models import Connector, ConnectorTool, Skill, SkillVersion, SkillVersionTool, Tool, ToolVersion, User
-from app.schemas.skill import AttachToolRequest, SkillCreateRequest, SkillUpdateRequest, SkillVersionCreateRequest, SkillVersionUpdateRequest, ToolBindingOrderRequest, ToolBindingUpdateRequest, ToolBindingUpgradeRequest, ToolCreateRequest, ToolPatchRequest, ToolVersionCreateRequest
+from app.kernel.skill_service import (
+    archive_resource,
+    attach_tool,
+    copy_skill,
+    copy_tool,
+    create_skill,
+    create_skill_version,
+    create_tool,
+    create_tool_version,
+    delete_resource,
+    detach_tool,
+    publish_skill_version,
+    publish_tool_version,
+    reorder_tool_bindings,
+    update_skill,
+    update_skill_version,
+    update_tool_binding,
+    update_tool_metadata,
+    upgrade_tool_binding,
+)
+from app.models import (
+    Connector,
+    ConnectorTool,
+    Skill,
+    SkillVersion,
+    SkillVersionTool,
+    Tool,
+    ToolVersion,
+    User,
+)
+from app.schemas.skill import (
+    AttachToolRequest,
+    SkillCreateRequest,
+    SkillUpdateRequest,
+    SkillVersionCreateRequest,
+    SkillVersionUpdateRequest,
+    ToolBindingOrderRequest,
+    ToolBindingUpdateRequest,
+    ToolBindingUpgradeRequest,
+    ToolCreateRequest,
+    ToolPatchRequest,
+    ToolVersionCreateRequest,
+)
+from app.security.permissions import admin_owned_clause
 
 router = APIRouter(prefix="/skills-tools", tags=["skills-tools"])
 

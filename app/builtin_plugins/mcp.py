@@ -187,7 +187,8 @@ class StdioMcpConnector:
         self._request_id = 0
 
     async def negotiate(self) -> None:
-        if not os.path.isabs(self.executable) or not os.path.isfile(self.executable):
+        # 两次 stat 属启动期一次性校验（微秒级）；改 to_thread 只是把同步调用搬到线程池，收益为零
+        if not os.path.isabs(self.executable) or not os.path.isfile(self.executable):  # noqa: ASYNC240
             raise McpTransportError("MCP stdio executable is not registered")
         self.process = await asyncio.create_subprocess_exec(self.executable, *self.arguments, cwd=self.cwd, env=self.allowed_environment, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stderr_task = asyncio.create_task(self._drain_stderr())

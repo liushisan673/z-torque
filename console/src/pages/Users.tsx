@@ -5,6 +5,7 @@ import { useToast } from "../components/Toast";
 import type { IamRole, IamUser } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
+import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 
 const API = "/api/z-torque/admin/iam";
 
@@ -56,6 +57,8 @@ type DialogKind = "create" | "edit" | "reset" | "delete" | null;
 
 export function UsersPage() {
   const { push: toast } = useToast();
+  // 左右分栏宽度：拖拽把手调整右侧详情宽度，会话内保持，退出登录恢复默认
+  const listPane = usePaneWidth("users", "--users-side-w");
   const [users, setUsers] = useState<IamUser[]>([]);
   const [roles, setRoles] = useState<IamRole[]>([]);
   const [loading, setLoading] = useState(true);
@@ -241,7 +244,7 @@ export function UsersPage() {
   }
 
   return (
-    <div className="users-page">
+    <div className="users-page" style={listPane.style}>
       {/* 工具栏 */}
       <div className="users-toolbar">
         <div className="users-field">
@@ -342,6 +345,9 @@ export function UsersPage() {
             )}
           </div>
         </div>
+
+        {/* 左右分栏拖拽把手（反向：调整右侧详情宽度） */}
+        <PaneResizer invert onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
 
         {/* 侧栏详情 */}
         {selected && (

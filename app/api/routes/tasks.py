@@ -10,13 +10,13 @@ from app.api.deps import get_current_user, get_security_context
 from app.core.errors import ApiError
 from app.core.responses import success_response
 from app.db.session import get_db
+from app.kernel.audit.service import record_audit
 from app.kernel.security_context import SecurityContext
 from app.kernel.task.checkpoints import latest_checkpoint
-from app.kernel.audit.service import record_audit
-from app.kernel.task.service import assert_agent_version_visible, create_task, transition_task
 from app.kernel.task.runtime import write_task_cancel_notice
+from app.kernel.task.service import assert_agent_version_visible, create_task, transition_task
 from app.kernel.task.states import TaskStatus
-from app.models import Task, TaskCheckpoint, TaskEvent, User
+from app.models import Task, TaskEvent, User
 from app.schemas.task import TaskCreateRequest, TaskEventResponse, TaskResponse
 from app.services.task_stream import task_event_stream
 

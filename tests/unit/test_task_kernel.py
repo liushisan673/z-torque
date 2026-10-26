@@ -4,15 +4,27 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import delete, select
 
+from app.core.errors import ApiError
 from app.db.session import SessionLocal
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_confirmation import pause_task_for_confirmation, resolve_confirmation
 from app.kernel.task.dispatcher import execute_simulated
 from app.kernel.task.service import create_task, transition_task
 from app.kernel.task.states import TaskStatus
-from app.models import Agent, AgentVersion, AuthSession, Conversation, Message, Outbox, Task, TaskCheckpoint, TaskEvent, Tenant, User
+from app.models import (
+    Agent,
+    AgentVersion,
+    AuthSession,
+    Conversation,
+    Message,
+    Outbox,
+    Task,
+    TaskCheckpoint,
+    TaskEvent,
+    Tenant,
+    User,
+)
 from app.security.passwords import hash_password
-from app.core.errors import ApiError
 
 
 def _ctx(tenant_id, user_id):
@@ -115,7 +127,6 @@ def test_expired_deadline_is_timeout():
         task = create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="expired", request_summary="run", deadline_at=datetime.now(timezone.utc) - timedelta(seconds=1))
         transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
         task_id = task.id
-    import asyncio
     with SessionLocal() as db:
         execute_simulated(db, task_id)
     with SessionLocal() as db:

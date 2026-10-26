@@ -2,13 +2,14 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
 from app.config import get_settings
 from app.db.session import SessionLocal
 from app.main import app
 from app.models import AuthSession, Role, Tenant, User
 from app.security.passwords import hash_password
+from tests.support.ddl import fk_off, fk_on
 
 
 @pytest.fixture(autouse=True)
@@ -16,12 +17,12 @@ def admin_user():
     with SessionLocal.begin() as db:
         # This fixture owns the isolated SQLite test database; clear all rows
         # before recreating the authentication baseline.
-        db.execute(text("PRAGMA foreign_keys=OFF"))
+        fk_off(db)
         db.execute(delete(AuthSession))
         db.execute(delete(User))
         db.execute(delete(Role))
         db.execute(delete(Tenant))
-        db.execute(text("PRAGMA foreign_keys=ON"))
+        fk_on(db)
         tenant = Tenant(name="test-tenant")
         db.add(tenant)
         db.flush()

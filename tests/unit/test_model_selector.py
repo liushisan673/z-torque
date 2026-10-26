@@ -150,7 +150,15 @@ def test_plugin_registers_and_resolves():
 
 def test_community_assembly_resolves_model_selector(tmp_path):
     # 装配冒烟：community Profile 下 model.selector 经 requires 链校验并解析成功
-    settings = SimpleNamespace(model_base_url=None, model_api_key=None, model_name="mock", model_allowed_names=[], file_storage_dir=tmp_path / "files")
+    settings = SimpleNamespace(
+        model_base_url=None,
+        model_api_key=None,
+        model_name="mock",
+        model_allowed_names=[],
+        file_storage_dir=tmp_path / "files",
+        # v1.3：沙箱 cwd 白名单在装配期强制校验，轻量 settings 必须显式给出
+        sandbox_allowed_roots=[str(tmp_path / "skills")],
+    )
     result = assemble(settings, create_engine("sqlite://"))
     assert result.registry.resolution("model.selector").state == PortState.RESOLVED
 

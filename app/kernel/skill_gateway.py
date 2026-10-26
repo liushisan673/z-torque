@@ -12,18 +12,17 @@ from app.kernel.audit.service import AuditExecutionInterceptor, record_audit_det
 from app.kernel.authz import PermissionChecker
 from app.kernel.md_skill import MdSkillManifest
 from app.kernel.md_skill_runtime import MdSkillRuntime
+from app.kernel.plugin_guard import CIRCUIT_OPEN_CODE, QUOTA_EXCEEDED_CODE, PluginGuardRegistry
+from app.kernel.ports.approval_provider import ApprovalProvider
 from app.kernel.ports.authz_provider import AuthzProvider
 from app.kernel.ports.connector import McpConnector, McpProtocolError, McpTransportError
-from app.kernel.ports.secret_provider import SecretProvider
 from app.kernel.ports.interceptor import ExecutionInterceptor
 from app.kernel.ports.sandbox_driver import SandboxDriver
+from app.kernel.ports.secret_provider import SecretProvider
 from app.kernel.ports.skill_executor import ExecutionResult, ToolExecutor
-from app.kernel.plugin_guard import CIRCUIT_OPEN_CODE, QUOTA_EXCEEDED_CODE, PluginGuardRegistry
 from app.kernel.registry.active import try_port
 from app.kernel.security_context import SecurityContext
-from app.services.tool_mapping_builder import _sanitize_schema
 from app.kernel.skill_confirmation import BuiltinApprovalProvider, pause_task_for_confirmation
-from app.kernel.ports.approval_provider import ApprovalProvider
 from app.models import (
     Connector,
     Skill,
@@ -34,10 +33,18 @@ from app.models import (
     Tool,
     ToolVersion,
 )
+from app.services.tool_mapping_builder import _sanitize_schema
 
 _TOOL_TIMEOUT_MESSAGE = "tool execution timed out"
 _TOOL_FAILURE_MESSAGE = "tool execution failed"
 _PERMISSION_MESSAGE = "required permissions are missing"
+
+# 沙箱相关错误码 → 审计 action（v1.3 §4.6）：只有沙箱语义的失败才计入"沙箱"类别
+_SANDBOX_ACTION_BY_CODE = {
+    "AI_SANDBOX_DENIED": "SANDBOX_DENIED",
+    "AI_SANDBOX_RESOURCE_EXCEEDED": "SANDBOX_RESOURCE_EXCEEDED",
+    "AI_SKILL_TIMEOUT": "SANDBOX_TIMEOUT",
+}
 
 # 执行器/连接器可能抛出的运行期异常：统一映射为失败结果而非穿透为 500，
 # 否则该次调用不会写入 SkillExecutionLog（契约红线1：每次执行必须记账）。
@@ -178,6 +185,27 @@ class SkillGateway:
             resource_id=resource_id,
             summary=_PERMISSION_MESSAGE,
             detail={"error_code": "AI_PERMISSION_DENIED"},
+            trace_id=ctx.trace_id,
+        )
+
+    @staticmethod
+    def _audit_sandbox_event(*, ctx: SecurityContext, skill_version_id: UUID | None, code: str, message: str) -> None:
+        """沙箱拒绝/超限留痕（v1.3 §4.2 / 决策 C：审计由网关写，插件零审计）。
+
+        沙箱驱动本身无 SecurityContext（run 签名锁定），拒绝事件由网关按
+        error_code 判定后以独立事务落库，随业务回滚也不会丢失。
+        """
+        action = _SANDBOX_ACTION_BY_CODE.get(code)
+        if action is None:
+            return
+        record_audit_detached(
+            tenant_id=ctx.tenant_id,
+            actor_user_id=ctx.user_id,
+            action=action,
+            resource_type="MD_SKILL_SCRIPT",
+            resource_id=skill_version_id,
+            summary=message or code,
+            detail={"error_code": code},
             trace_id=ctx.trace_id,
         )
 
@@ -487,6 +515,8 @@ class SkillGateway:
                 result = ExecutionResult(status="SUCCEEDED", data=data)
             except ApiError as exc:
                 result = ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)
+                # 沙箱策略拒绝/资源超限/超时：网关侧独立事务留痕（v1.3 §4.2 决策 C）
+                self._audit_sandbox_event(ctx=ctx, skill_version_id=skill.id, code=exc.code, message=exc.message)
             self._guard_record("MD_SCRIPT", result)
             self._log(db, tenant_id, user_id, skill, None, task_id, result, trace_id=ctx.trace_id)
             return result

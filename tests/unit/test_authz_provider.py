@@ -3,17 +3,17 @@
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
 from app.builtin_plugins.authz_provider import AuthzProviderPlugin, BuiltinAuthzProvider
 from app.builtin_plugins.manifest import PluginSdk
 from app.builtin_plugins.plugins import SkillExecutorPlugin
-from app.core.errors import ApiError
 from app.db.session import SessionLocal
-from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.kernel.ports.specs import PORT_SPECS
+from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.models import Permission, Role, Tenant, User, role_permission, user_role
 from app.security.passwords import hash_password
+from tests.support.ddl import fk_off, fk_on
 
 
 @pytest.fixture(autouse=True)
@@ -21,14 +21,14 @@ def cleanup():
     yield
     with SessionLocal.begin() as db:
         # 全局清理会触碰其他用例残留的外键引用行，沿用 test_auth_flow 的 FK-OFF 模式
-        db.execute(text("PRAGMA foreign_keys=OFF"))
+        fk_off(db)
         db.execute(delete(role_permission))
         db.execute(delete(user_role))
         db.execute(delete(Permission))
         db.execute(delete(Role))
         db.execute(delete(User))
         db.execute(delete(Tenant))
-        db.execute(text("PRAGMA foreign_keys=ON"))
+        fk_on(db)
 
 
 def _setup_user(db, *, grant: tuple[str, ...] = ()):

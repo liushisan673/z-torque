@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.builtin_plugins.manifest import PluginManifest
 from app.core.errors import ApiError
 from app.kernel.ports.identity_provider import IdentityProvider
-from app.kernel.registry.port_registry import PortPriority
 from app.kernel.security_context import SecurityContext
 from app.models import AuthSession, User
 from app.security.tokens import decode_access_token

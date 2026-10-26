@@ -2,6 +2,7 @@
 from typing import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "7b1e4d9c2a10"

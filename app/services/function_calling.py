@@ -1,9 +1,8 @@
+import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
-
-import hashlib
-import re
 
 from jsonschema import ValidationError, validate
 

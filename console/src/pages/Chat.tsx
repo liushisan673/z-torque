@@ -11,6 +11,7 @@ import { StatusTag, EmptyState, Alert } from "../components/ui";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { AppTopbar, APP_NAV } from "../components/AppTopbar";
@@ -45,6 +46,8 @@ const CONV_KEY = "zt.chat.conversationId";
 const AGENT_KEY = "zt.chat.agentId";
 
 export function ChatPage() {
+  // 左右分栏宽度：拖拽把手调整左侧会话列表宽度，会话内保持，退出登录恢复默认
+  const listPane = usePaneWidth("chat", "--chat-sidebar-w");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   // 会话标题客户端过滤（服务端分页/摘要能力待后端支持后再升级）
@@ -1120,7 +1123,7 @@ export function ChatPage() {
   return (
     <div className="chat-page">
       <AppTopbar nav={APP_NAV} />
-      <div className="chat-shell">
+      <div className="chat-shell" style={listPane.style}>
         {/* 窄屏遮罩：侧栏以抽屉形式覆盖（原实现直接隐藏，手机上无法切换会话/智能体） */}
         {sidebarOpen && <div className="chat-sidebar-mask" onClick={() => setSidebarOpen(false)} />}
 
@@ -1311,6 +1314,9 @@ export function ChatPage() {
             )}
           </div>
         </aside>
+
+        {/* 左右分栏拖拽把手 */}
+        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
 
         {/* 中间对话区 */}
         <section className="chat-main">

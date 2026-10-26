@@ -9,7 +9,6 @@ from uuid import UUID
 
 from app.builtin_plugins.manifest import PluginManifest
 from app.kernel.ports.notify_channel import NotifyChannel
-from app.kernel.registry.port_registry import PortPriority
 
 logger = logging.getLogger("z_torque.notify")
 

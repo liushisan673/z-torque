@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { request } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
@@ -11,6 +11,7 @@ import { Modal } from "../components/Modal";
 import { useToast } from "../components/Toast";
 import { GuideCallout } from "../components/GuideCallout";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { useAuth } from "../stores/auth";
 
 // Agent 绑定技能：单个 Agent 版本最多引用的去重工具数（与后端发布闸门一致）
@@ -19,8 +20,15 @@ const MAX_AGENT_TOOLS = 30;
 // 选中记忆：跳转页面后返回时恢复上次选中的智能体（sessionStorage 按标签页隔离）
 const SELECTED_KEY = "zt.agents.selectedId";
 
-type Tab = "overview" | "config" | "skills" | "versions";
 type Filter = "all" | "mine" | "official" | "draft";
+
+// 详情区锚点配置：无页签，详情一次纵向展示全部，顶部锚点仅做快捷跳转
+const DETAIL_ANCHORS = [
+  { id: "overview", label: "概览" },
+  { id: "config", label: "配置" },
+  { id: "skills", label: "技能绑定" },
+  { id: "versions", label: "版本" },
+];
 
 // Agent 在 UI 中的来源标签：本人资源为「我的」；官方与管理员创建的平台资源为「平台」（只读，可复制）
 function sourceOf(a: Agent, meId?: string): "official" | "mine" {
@@ -84,7 +92,11 @@ export function AgentsPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [keyword, setKeyword] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const [tab, setTab] = useState<Tab>("overview");
+  // 左右分栏宽度：拖拽把手调整，会话内保持，退出登录恢复默认
+  const listPane = usePaneWidth("agent", "--agent-list-w");
+  // 顶部锚点导航：当前高亮区块；详情内容纵向滚动一次展示全部（无页签）
+  const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
+  const detailBodyRef = useRef<HTMLDivElement | null>(null);
 
   // 创建 / 编辑
   const [createOpen, setCreateOpen] = useState(false);
@@ -217,13 +229,38 @@ export function AgentsPage() {
   );
   const projectedToolTotal = boundToolTotal + pickedToolTotal;
 
+  // 锚点跳转：平滑滚动到对应区块（CSS scroll-margin-top 预留吸顶导航高度）
+  function scrollToSection(id: string) {
+    setActiveAnchor(id);
+    document.getElementById(`agent-sec-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // 滚动跟随：按区块相对滚动容器顶部的位置高亮当前锚点，触底时强制高亮最后一项
+  function handleDetailScroll() {
+    const container = detailBodyRef.current;
+    if (!container) return;
+    const ids = DETAIL_ANCHORS.map((a) => a.id);
+    const containerTop = container.getBoundingClientRect().top;
+    let current = ids[0] ?? null;
+    for (const id of ids) {
+      const el = document.getElementById(`agent-sec-${id}`);
+      if (!el) continue;
+      if (el.getBoundingClientRect().top - containerTop <= 96) current = id;
+    }
+    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 4) {
+      current = ids[ids.length - 1] ?? current;
+    }
+    setActiveAnchor(current);
+  }
+
   async function openDetail(a: Agent) {
     setSelectedId(a.id);
     writeSelectedId(SELECTED_KEY, a.id);
     setVersions([]);
     setBoundSkills([]);
     setLatestTask(null);
-    setTab("overview");
+    setActiveAnchor("overview");
+    if (detailBodyRef.current) detailBodyRef.current.scrollTop = 0;
     setLoadingVersions(true);
     setError(null);
     try {
@@ -464,7 +501,7 @@ export function AgentsPage() {
   async function openEditor(agentId: string, version: AgentVersion) {
     setError(null);
     setEditing({ agentId, version });
-    setTab("config");
+    scrollToSection("config");
     const cfg = version.config_snapshot ?? {};
     setSystemPrompt(typeof cfg.system_prompt === "string" ? cfg.system_prompt : "");
     setModelId(typeof cfg.model === "string" ? cfg.model : "");
@@ -681,7 +718,7 @@ export function AgentsPage() {
         </div>
       )}
 
-      <div className="agent-shell">
+      <div className="agent-shell" style={listPane.style}>
         {/* 左侧列表 */}
         <aside className="agent-list-pane">
           <div className="agent-list-header">
@@ -767,6 +804,9 @@ export function AgentsPage() {
           </div>
         </aside>
 
+        {/* 左右分栏拖拽把手 */}
+        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+
         {/* 右侧详情 */}
         <section className="agent-detail-pane">
           {!selected ? (
@@ -796,23 +836,27 @@ export function AgentsPage() {
                 </div>
               </div>
 
-              <div className="agent-tabs">
-                {(["overview", "config", "skills", "versions"] as Tab[]).map((t) => (
-                  <button
-                    key={t}
-                    className={`agent-tab${tab === t ? " active" : ""}`}
-                    type="button"
-                    onClick={() => setTab(t)}
-                  >
-                    {t === "overview" ? "概览" : t === "config" ? "配置" : t === "skills" ? "技能绑定" : "版本"}
-                  </button>
-                ))}
-              </div>
-
-              <div className="agent-detail-body">
+              <div className="agent-detail-body" ref={detailBodyRef} onScroll={handleDetailScroll}>
                 {loadingVersions ? (
                   <Loading />
-                ) : tab === "overview" ? (
+                ) : (
+                  <>
+                    {/* 顶部锚点导航：快捷跳转，非页签；详情内容纵向一次展示全部 */}
+                    <nav className="skill-anchor-nav" aria-label="详情锚点导航">
+                      {DETAIL_ANCHORS.map((a) => (
+                        <button
+                          key={a.id}
+                          type="button"
+                          className={`skill-anchor-link${activeAnchor === a.id ? " active" : ""}`}
+                          onClick={() => scrollToSection(a.id)}
+                        >
+                          {a.label}
+                        </button>
+                      ))}
+                    </nav>
+
+                    {/* 概览 */}
+                    <section id="agent-sec-overview" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="agent-section">
                       <h3>基本信息</h3>
@@ -821,26 +865,16 @@ export function AgentsPage() {
                           <label>名称</label>
                           <input type="text" value={selected.name} disabled />
                         </div>
-                        <div className="agent-field">
-                          <label>标识</label>
-                          <input type="text" value={selected.id} disabled />
+                      <div className="agent-field">
+                          <label>创建时间</label>
+                          <input type="text" value={fmtTime(selected.created_at)} disabled />
                         </div>
                         <div className="agent-field full">
                           <label>描述</label>
                           <textarea value={selected.description ?? ""} disabled />
                         </div>
-                        <div className="agent-field">
-                          <label>所有者</label>
-                          <input
-                            type="text"
-                            value={sourceOf(selected, meId) === "official" ? "平台" : (selected.owner_user_id ?? "—")}
-                            disabled
-                          />
-                        </div>
-                        <div className="agent-field">
-                          <label>创建时间</label>
-                          <input type="text" value={fmtTime(selected.created_at)} disabled />
-                        </div>
+                        
+
                       </div>
                     </div>
 
@@ -891,27 +925,22 @@ export function AgentsPage() {
                       </div>
                     </div>
 
-                    <div className="agent-alert agent-alert-info">
-                      <span>ℹ</span>
-                      <span>发布后生成不可变的智能体版本快照。已创建的任务固定使用创建时选定的版本，不会随后续发布自动升级。</span>
-                    </div>
                   </div>
-                ) : tab === "config" ? (
+                    </section>
+
+                    {/* 配置 */}
+                    <section id="agent-sec-config" className="skill-anchor-section">
                   <div className="tab-panel">
                     {editing ? (
                       <div className="agent-alert agent-alert-info">
-                        <span>ℹ</span>
                         <span>正在编辑草稿版本 v{editing.version.version_number}，保存后可发布为新版本。</span>
                       </div>
                     ) : sourceOf(selected, meId) === "official" ? (
                       <div className="agent-alert agent-alert-warn">
-                        <span>⚠</span>
                         <span>当前查看的是平台智能体的只读快照。修改前须先「复制到我的」生成个人副本。</span>
                       </div>
                     ) : (
-                      <div className="agent-alert agent-alert-warn">
-                        <span>⚠</span>
-                        <span>当前查看的是已发布版本的只读快照。请先「新建草稿版本」创建草稿后再修改配置。</span>
+                      <div>
                       </div>
                     )}
 
@@ -936,7 +965,6 @@ export function AgentsPage() {
                               );
                             })}
                           </select>
-                          <div className="field-help">带「密钥未配置」标记的模型暂不可用，请先到「模型管理」完成密钥配置。</div>
                         </div>
                         <div className="agent-field">
                           <label>接入点</label>
@@ -1002,7 +1030,7 @@ export function AgentsPage() {
                           />
                         </div>
                         <div className="agent-field full">
-                          <label>允许的子智能体（已发布版本，可多选）</label>
+                          <label>允许的子智能体</label>
                           {editing ? (
                             <>
                               <div className="agent-skill-actions" style={{ marginBottom: 8 }}>
@@ -1028,7 +1056,6 @@ export function AgentsPage() {
                               disabled
                             />
                           )}
-                          <div className="help">仅可选择已发布的子智能体；子任务继承用户 SecurityContext，不得提权。发布时后端会校验引用有效。</div>
                         </div>
                       </div>
                     </div>
@@ -1041,7 +1068,10 @@ export function AgentsPage() {
                       </div>
                     )}
                   </div>
-                ) : tab === "skills" ? (
+                    </section>
+
+                    {/* 技能绑定 */}
+                    <section id="agent-sec-skills" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="agent-section">
                       <h3>
@@ -1105,13 +1135,13 @@ export function AgentsPage() {
                         </div>
                       )}
 
-                      <p className="agent-skill-foot">
-                        智能体只能绑定技能版本，不直接绑定工具。工具由技能版本声明并经 SkillGateway 执行。
-                      </p>
+                     
                     </div>
                   </div>
-                ) : (
-                  /* versions */
+                    </section>
+
+                    {/* 版本 */}
+                    <section id="agent-sec-versions" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="agent-section">
                       <h3
@@ -1182,6 +1212,8 @@ export function AgentsPage() {
                       <span>已发布版本不可原地修改。变更请基于最新版本创建草稿并重新发布。</span>
                     </div>
                   </div>
+                    </section>
+                  </>
                 )}
               </div>
             </>

@@ -30,7 +30,7 @@
   --chat-sidebar-w: 280px;
   --chat-panel-w: 320px;
   --chat-panel-collapsed-w: 0px;
-  --chat-max-w: 820px;
+  --chat-max-w: 1000px;
   --chat-header-h: 48px;
   --chat-composer-radius: 14px;
   --chat-bubble-radius: 12px;
@@ -95,7 +95,7 @@
 
   /* ---- Skill 页布局变量（参考 docs/frontend/skill.html） ---- */
   --skill-list-w: 380px;
-  --skill-detail-pad-x: 28px;
+  --skill-detail-pad-x: 24px;
   --skill-detail-pad-y: 20px;
   --skill-section-radius: 12px;
   --skill-section-pad: 20px;
@@ -118,8 +118,8 @@
   --skill-mode-script-fg: var(--warning);
   --skill-file-icon-bg: var(--warning-soft);
   --skill-file-icon-fg: var(--warning);
-  --skill-code-bg: #0f172a;
-  --skill-code-fg: #e2e8f0;
+  --skill-code-bg: #1d1d1f;
+  --skill-code-fg: #e8e8ed;
   --skill-tool-op-col-w: 156px;
   --skill-picker-gap: 8px;
   --skill-picker-max-h: 320px;
@@ -133,7 +133,7 @@
   --skill-bind-limit-fg: var(--success);
   --skill-md-preview-bg: color-mix(in srgb, var(--bg-elevated) 60%, var(--bg));
   --skill-search-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236b7484' stroke-width='2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='M21 21l-4.35-4.35'/%3E%3C/svg%3E");
-  --skill-focus-ring: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+  --skill-focus-ring: 0 0 0 3px color-mix(in srgb, var(--skill-accent) 18%, transparent);
   --skill-tag-md-bg: var(--violet-soft);
   --skill-tag-md-fg: var(--violet);
   --skill-tag-pending-bg: var(--warning-soft);
@@ -144,6 +144,44 @@
   --skill-alert-violet-bg: var(--violet-soft);
   --skill-alert-violet-fg: var(--violet);
   --skill-load-steps-border: var(--border-strong);
+
+  /* 左右分栏拖拽把手（技能/智能体/模型/连接器四页共用） */
+  --pane-resizer-w: 6px;
+  --pane-resizer-line-w: 2px;
+
+  /* ---- Skill 页 macOS 风格增强（参考 docs/frontend/skill-mac.html）----
+     特征：灰侧栏 + 白卡片选中态 + 实心胶囊筛选 + 紧凑按钮 + 石墨 Schema 框 + 细滚动条 */
+  --skill-sidebar-bg: color-mix(in srgb, var(--text) 7%, var(--bg-elevated));
+  --skill-card-hover-bg: color-mix(in srgb, var(--bg-elevated) 62%, transparent);
+  --skill-card-active-bg: var(--bg-elevated);
+  --skill-card-active-border: var(--border);
+  --skill-card-active-shadow: var(--shadow-sm);
+  --skill-filter-active-bg: var(--skill-accent);
+  --skill-filter-active-fg: var(--on-primary);
+  --skill-filter-active-shadow: 0 1px 2px color-mix(in srgb, var(--skill-accent) 28%, transparent);
+  --skill-filter-hover-bg: color-mix(in srgb, var(--text) 5%, transparent);
+  --skill-pill-radius: 999px;
+  --skill-btn-h: 28px;
+  --skill-primary-btn-shadow: 0 1px 2px color-mix(in srgb, var(--skill-accent) 25%, transparent);
+  --skill-scrollbar-thumb: color-mix(in srgb, var(--text) 14%, transparent);
+  --skill-v-badge-bg: color-mix(in srgb, var(--text) 5%, var(--bg-elevated));
+  --skill-detail-bg: var(--bg);
+  --skill-radius-lg: 14px;
+
+  /* ---- Skill 页 macOS 视觉规范第二轮：字体 / 系统蓝强调色 / 窗口投影 / 分隔线 ---- */
+  --skill-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --skill-accent: #007aff;
+  --skill-accent-hover: #0066d6;
+  --skill-accent-active: #005bbf;
+  --skill-accent-soft: color-mix(in srgb, var(--skill-accent) 10%, transparent);
+  --skill-window-shadow: 0 2px 8px color-mix(in srgb, var(--text) 6%, transparent),
+    0 0 1px color-mix(in srgb, var(--text) 4%, transparent);
+  --skill-separator: color-mix(in srgb, var(--text) 6%, transparent);
+  --skill-list-card-pad: 10px 12px;
+  /* 字体样式统一：Skill 页仅两档字号 —— 正文/控件/标签统一 14px，主标题 18px，层级由字重与颜色区分 */
+  --skill-font-size: 14px;
+  --skill-font-size-title: 18px;
 
   /* ---- Model 页布局变量（参考 docs/frontend/model.html） ---- */
   --model-list-w: 300px;
@@ -346,9 +384,18 @@ body {
 }
 
 .btn-secondary {
-  background: var(--bg-elevated);
-  border-color: var(--border-strong);
-  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 15px;
+  border: none;
+  border-radius: 6px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
 }
 .btn-secondary:hover:not(:disabled) {
   border-color: var(--border-strong);
@@ -373,7 +420,31 @@ body {
 }
 
 .btn-sm {
-  padding: 5px 10px;
+  padding: 10px 15px;
+  font-size: 12.5px;
+}
+
+/* 各页右侧详情区按钮统一尺寸：padding 10px 15px、字号与 btn-sm 基准一致 */
+.skill-detail-pane .btn,
+.agent-detail-pane .btn,
+.model-detail-pane .btn,
+.connector-detail-pane .btn,
+.audit-detail-pane .btn,
+.users-side .btn {
+  padding: 10px 15px;
+  font-size: 12.5px;
+}
+
+/* 右侧详情区内非 .btn 体系的自定义按钮（归档/删除描边钮、确认启用钮）一并统一 */
+.agent-detail-pane .agent-btn-danger-outline,
+.skill-detail-pane .skill-btn-danger-outline,
+.connector-detail-pane .skill-btn-danger-outline,
+.model-detail-pane .skill-btn-danger-outline,
+.audit-detail-pane .skill-btn-danger-outline,
+.users-side .skill-btn-danger-outline,
+.skill-detail-pane .skill-btn-success {
+  height: auto;
+  padding: 10px 15px;
   font-size: 12.5px;
 }
 
@@ -911,6 +982,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  font-size: var(--skill-font-size);
   overflow: hidden;
   background: var(--bg);
 }
@@ -1066,7 +1138,7 @@ body {
 /* ---- 左侧栏 ---- */
 .chat-sidebar {
   width: var(--chat-sidebar-w);
-  background: var(--bg-elevated);
+  background: var(--skill-sidebar-bg);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -1097,7 +1169,7 @@ body {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 0 30px 0 12px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   background: var(--bg);
   cursor: pointer;
@@ -1164,7 +1236,7 @@ body {
 .chat-agent-option.active { background: var(--primary-soft); }
 .chat-agent-option:disabled { cursor: not-allowed; opacity: 0.55; }
 .chat-agent-option-name {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   font-weight: 500;
   display: flex;
@@ -1234,13 +1306,12 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: 28px;
-  padding: 0 10px;
+  padding: 10px 15px;
   border: none;
   border-radius: 6px;
   background: var(--primary);
   color: #fff;
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
   transition: background 0.15s;
@@ -1266,8 +1337,11 @@ body {
   margin-bottom: 2px;
   position: relative;
 }
-.chat-session-item:hover { background: var(--bg); }
-.chat-session-item.active { background: var(--primary-soft); }
+.chat-session-item:hover { background: var(--skill-card-hover-bg); }
+.chat-session-item.active {
+  background: var(--skill-card-active-bg);
+  box-shadow: var(--skill-card-active-shadow);
+}
 
 .chat-status-dot {
   width: 8px;
@@ -1288,7 +1362,7 @@ body {
 
 .chat-session-body { flex: 1; min-width: 0; }
 .chat-session-name {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text);
   white-space: nowrap;
@@ -1360,13 +1434,13 @@ body {
   display: flex;
   gap: 6px;
 }
-.chat-session-rename-row .input { padding: 4px 8px; font-size: 13px; }
+.chat-session-rename-row .input { padding: 4px 8px; font-size: var(--skill-font-size); }
 
 .chat-session-empty {
   padding: 32px 16px;
   text-align: center;
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--skill-font-size);
 }
 
 /* ---- 中间主区 ---- */
@@ -1474,7 +1548,7 @@ body {
   padding: 24px 24px 12px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 24px;
   min-height: 0;
 }
 
@@ -1518,6 +1592,14 @@ body {
   border: 1px solid var(--border);
   max-width: 100%;
 }
+/* AI 回复：灰色气泡（仿主流 LLM 版式），无边框无阴影 */
+.chat-msg.assistant .chat-msg-bubble {
+  background: color-mix(in srgb, var(--text) 6%, var(--bg-elevated));
+  border: none;
+  box-shadow: none;
+}
+/* 用户消息气泡限宽，避免长文本撑满整行（主流比例约 3/4） */
+.chat-msg.user .chat-msg-bubble { max-width: 78%; }
 .chat-msg.user .chat-msg-bubble {
   background: var(--primary);
   color: #fff;
@@ -1549,8 +1631,8 @@ body {
 }
 
 .chat-msg-content {
-  font-size: 14px;
-  line-height: 1.65;
+  font-size: 15px;
+  line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1850,7 +1932,7 @@ body {
   flex-shrink: 0;
 }
 .chat-panel-header h3 {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--text);
   margin: 0;
@@ -1969,7 +2051,7 @@ body {
 .chat-timeline-item.waiting .chat-timeline-dot { background: var(--warning); }
 
 .chat-timeline-title {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text);
 }
@@ -2042,7 +2124,7 @@ body {
   border-radius: var(--radius);
 }
 .chat-confirm-box p {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--warning);
   margin-bottom: 10px;
   line-height: 1.5;
@@ -2070,11 +2152,11 @@ body {
   border-radius: 6px;
   background: var(--primary);
   color: #fff;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   cursor: pointer;
 }
-.chat-btn-confirm:hover { background: var(--primary-hover); }
+.chat-btn-confirm:hover:not(:disabled) { background: var(--skill-accent); }
 .chat-btn-reject {
   flex: 1;
   height: 32px;
@@ -2082,7 +2164,7 @@ body {
   border-radius: 6px;
   background: var(--bg-elevated);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   cursor: pointer;
 }
@@ -2343,6 +2425,7 @@ body {
   }
 }
 @media (max-width: 768px) {
+  .pane-resizer { display: none; }
   .chat-sidebar { display: none; }
 }
 
@@ -2355,6 +2438,13 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+
+  /* macOS 视觉规范：SF Pro 字体栈 + 平滑渲染 + 全页单一字号（正文统一 14px，层级由字重与颜色区分） */
+  font-family: var(--skill-font);
+  font-size: var(--skill-font-size);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .agent-shell {
@@ -2365,12 +2455,13 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
+  box-shadow: var(--skill-window-shadow);
 }
 
 /* ---- 左侧列表 ---- */
 .agent-list-pane {
   width: var(--agent-list-w);
-  background: var(--bg-elevated);
+  background: var(--skill-sidebar-bg);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -2380,13 +2471,14 @@ body {
 
 .agent-list-header {
   padding: 16px 16px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--skill-separator);
   flex-shrink: 0;
 }
 
 .agent-list-header h1 {
-  font-size: 16px;
+  font-size: var(--skill-font-size-title);
   font-weight: 700;
+  letter-spacing: -0.02em;
   color: var(--text);
   margin: 0 0 12px;
 }
@@ -2405,14 +2497,14 @@ body {
 
 .agent-search-box {
   flex: 1;
-  height: 34px;
+  height: 30px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 0 12px 0 34px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   outline: none;
-  background-color: var(--bg);
+  background-color: var(--bg-elevated);
   background-image: var(--agent-search-icon);
   background-repeat: no-repeat;
   background-position: 10px center;
@@ -2420,9 +2512,9 @@ body {
   transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
 }
 .agent-search-box:focus {
-  border-color: var(--primary);
+  border-color: var(--skill-accent);
   background-color: var(--bg-elevated);
-  box-shadow: var(--agent-focus-ring);
+  box-shadow: var(--skill-focus-ring);
 }
 
 .agent-filter-tabs {
@@ -2437,8 +2529,8 @@ body {
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: var(--skill-pill-radius);
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
   cursor: pointer;
@@ -2446,14 +2538,14 @@ body {
 }
 
 .agent-archived-toggle input {
-  accent-color: var(--primary);
+  accent-color: var(--skill-accent);
   margin: 0;
 }
 
 .agent-filter-tab {
   padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: var(--skill-pill-radius);
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
   background: transparent;
@@ -2462,8 +2554,12 @@ body {
   font-family: inherit;
   transition: background 0.12s, color 0.12s;
 }
-.agent-filter-tab:hover { background: var(--bg); color: var(--text); }
-.agent-filter-tab.active { background: var(--primary-soft); color: var(--primary); }
+.agent-filter-tab:hover { background: var(--skill-filter-hover-bg); color: var(--text); }
+.agent-filter-tab.active {
+  background: var(--skill-filter-active-bg);
+  color: var(--skill-filter-active-fg);
+  box-shadow: var(--skill-filter-active-shadow);
+}
 
 .agent-list {
   flex: 1;
@@ -2480,11 +2576,13 @@ body {
   margin-bottom: 4px;
   transition: background 0.12s, border-color 0.12s;
 }
-.agent-card:hover { background: var(--bg); }
+.agent-card:hover { background: var(--skill-card-hover-bg); }
 .agent-card.active {
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+  background: var(--skill-card-active-bg);
+  border-color: var(--skill-card-active-border);
+  box-shadow: var(--skill-card-active-shadow);
 }
+.agent-card.active .name { color: var(--skill-accent); }
 
 .agent-card .row1 {
   display: flex;
@@ -2494,16 +2592,15 @@ body {
   margin-bottom: 4px;
 }
 .agent-card .name {
-  font-size: 14px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.agent-card.active .name { color: var(--primary); }
 .agent-card .desc {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   display: -webkit-box;
    line-clamp: 2;
@@ -2520,7 +2617,7 @@ body {
   flex-wrap: wrap;
 }
 .agent-card .ver {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
 }
 
@@ -2540,11 +2637,11 @@ body {
 .agent-tag-draft { background: var(--agent-tag-draft-bg); color: var(--agent-tag-draft-fg); }
 .agent-tag-archived { background: var(--agent-tag-archived-bg); color: var(--agent-tag-archived-fg); }
 .agent-tag-neutral { background: var(--agent-tag-neutral-bg); color: var(--agent-tag-neutral-fg); }
-.agent-tag-lg { font-size: 12px; padding: 3px 10px; }
+.agent-tag-lg { font-size: var(--skill-font-size); padding: 3px 10px; }
 
 /* 模式胶囊（纯指令 / 脚本） */
 .agent-mode-tag {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   padding: 1px 6px;
   border-radius: 4px;
   font-weight: 500;
@@ -2561,6 +2658,7 @@ body {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  background: var(--skill-detail-bg);
 }
 
 .agent-detail-empty {
@@ -2575,7 +2673,7 @@ body {
   text-align: center;
 }
 .agent-detail-empty h2 {
-  font-size: 16px;
+  font-size: var(--skill-font-size-title);
   color: var(--text-muted);
   font-weight: 500;
   margin: 0;
@@ -2584,11 +2682,10 @@ body {
 .agent-detail-header {
   padding: var(--agent-detail-pad-y) var(--agent-detail-pad-x);
   background: var(--bg-elevated);
-  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .agent-detail-header .breadcrumb {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   margin-bottom: 8px;
 }
@@ -2599,13 +2696,13 @@ body {
   gap: 16px;
 }
 .agent-detail-header h2 {
-  font-size: 20px;
+  font-size: var(--skill-font-size-title);
   font-weight: 700;
   color: var(--text);
   margin: 0 0 6px;
 }
 .agent-detail-header .subtitle {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   max-width: 560px;
   margin: 0;
@@ -2624,18 +2721,28 @@ body {
   flex-wrap: wrap;
 }
 
+/* Agent 页内主按钮/幽灵按钮使用系统蓝强调色 */
+.agent-page .btn-primary {
+  background: var(--skill-accent);
+  box-shadow: var(--skill-primary-btn-shadow);
+}
+.agent-page .btn-primary:hover:not(:disabled) { background: var(--skill-accent-hover); }
+.agent-page .btn-primary:active { background: var(--skill-accent-active); }
+.agent-page .btn-ghost { color: var(--skill-accent); }
+.agent-page .btn-ghost:hover:not(:disabled) { background: var(--skill-accent-soft); }
+
 .agent-btn-danger-outline {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 34px;
-  padding: 0 12px;
+  height: var(--skill-btn-h);
+  padding: 0 11px;
   border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
   border-radius: var(--radius);
   background: var(--bg-elevated);
   color: var(--danger);
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
@@ -2644,40 +2751,10 @@ body {
 .agent-btn-danger-outline:hover:not(:disabled) { background: var(--danger-soft); }
 .agent-btn-danger-outline:disabled { opacity: 0.55; cursor: not-allowed; }
 
-/* ---- Tab 切换 ---- */
-.agent-tabs {
-  display: flex;
-  gap: 0;
-  padding: 0 var(--agent-detail-pad-x);
-  background: var(--bg-elevated);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  overflow-x: auto;
-}
-.agent-tab {
-  padding: 12px 16px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-muted);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  margin-bottom: -1px;
-  font-family: inherit;
-  white-space: nowrap;
-  transition: color 0.12s, border-color 0.12s;
-}
-.agent-tab:hover { color: var(--text); }
-.agent-tab.active {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
-}
-
 .agent-detail-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px var(--agent-detail-pad-x) 32px;
+  padding: 0 var(--agent-detail-pad-x) 32px;
   min-height: 0;
 }
 
@@ -2691,7 +2768,7 @@ body {
   box-shadow: var(--shadow-sm);
 }
 .agent-section h3 {
-  font-size: 14px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--text);
   margin: 0 0 16px;
@@ -2701,7 +2778,7 @@ body {
   gap: 8px;
 }
 .agent-section h3 .hint {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   font-weight: 400;
   color: var(--text-muted);
 }
@@ -2715,7 +2792,7 @@ body {
 
 .agent-field label {
   display: block;
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
   margin-bottom: 6px;
@@ -2737,8 +2814,8 @@ body {
 .agent-field input:focus,
 .agent-field select:focus,
 .agent-field textarea:focus {
-  border-color: var(--primary);
-  box-shadow: var(--agent-focus-ring);
+  border-color: var(--skill-accent);
+  box-shadow: var(--skill-focus-ring);
 }
 .agent-field input:disabled,
 .agent-field select:disabled,
@@ -2752,7 +2829,7 @@ body {
   resize: vertical;
 }
 .agent-field .help {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   margin-top: 4px;
 }
@@ -2937,6 +3014,13 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+
+  /* macOS 视觉规范：SF Pro 字体栈 + 平滑渲染 + 全页单一字号（正文统一 14px，层级由字重与颜色区分） */
+  font-family: var(--skill-font);
+  font-size: var(--skill-font-size);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .skill-shell {
@@ -2947,12 +3031,13 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
+  box-shadow: var(--skill-window-shadow);
 }
 
 /* ---- 左侧列表 ---- */
 .skill-list-pane {
   width: var(--skill-list-w);
-  background: var(--bg-elevated);
+  background: var(--skill-sidebar-bg);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -2962,15 +3047,16 @@ body {
 
 .skill-list-header {
   padding: 16px 16px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--skill-separator);
   flex-shrink: 0;
 }
 
 .skill-list-header h1 {
-  font-size: 16px;
+  font-size: var(--skill-font-size-title);
   font-weight: 700;
+  letter-spacing: -0.02em;
   color: var(--text);
-  margin: 0 0 12px;
+  margin: 0 0 8px;
 }
 
 .skill-list-actions {
@@ -2987,22 +3073,23 @@ body {
 
 .skill-search-box {
   flex: 1;
-  height: 34px;
+  height: 30px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 0 12px 0 34px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   outline: none;
-  background-color: var(--bg);
+  background-color: var(--bg-elevated);
   background-image: var(--skill-search-icon);
   background-repeat: no-repeat;
   background-position: 10px center;
   font-family: inherit;
+  box-shadow: inset 0 1px 2px color-mix(in srgb, var(--text) 3%, transparent);
   transition: border-color 0.15s, box-shadow 0.15s, background-color 0.15s;
 }
 .skill-search-box:focus {
-  border-color: var(--primary);
+  border-color: var(--skill-accent);
   background-color: var(--bg-elevated);
   box-shadow: var(--skill-focus-ring);
 }
@@ -3019,8 +3106,8 @@ body {
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: var(--skill-pill-radius);
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
   cursor: pointer;
@@ -3028,14 +3115,14 @@ body {
 }
 
 .skill-archived-toggle input {
-  accent-color: var(--primary);
+  accent-color: var(--skill-accent);
   margin: 0;
 }
 
 .skill-filter-tab {
-  padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 12px;
+  padding: 4px 11px;
+  border-radius: var(--skill-pill-radius);
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
   background: transparent;
@@ -3044,28 +3131,33 @@ body {
   font-family: inherit;
   transition: background 0.12s, color 0.12s;
 }
-.skill-filter-tab:hover { background: var(--bg); color: var(--text); }
-.skill-filter-tab.active { background: var(--primary-soft); color: var(--primary); }
+.skill-filter-tab:hover { background: var(--skill-filter-hover-bg); color: var(--text); }
+.skill-filter-tab.active {
+  background: var(--skill-filter-active-bg);
+  color: var(--skill-filter-active-fg);
+  box-shadow: var(--skill-filter-active-shadow);
+}
 
 .skill-list {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 6px 8px 16px;
   min-height: 0;
 }
 
 .skill-card {
-  padding: var(--skill-card-pad);
+  padding: var(--skill-list-card-pad);
   border-radius: var(--skill-card-radius);
   cursor: pointer;
   border: 1px solid transparent;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
   transition: background 0.12s, border-color 0.12s;
 }
-.skill-card:hover { background: var(--bg); }
+.skill-card:hover { background: var(--skill-card-hover-bg); }
 .skill-card.active {
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+  background: var(--skill-card-active-bg);
+  border-color: var(--skill-card-active-border);
+  box-shadow: var(--skill-card-active-shadow);
 }
 
 .skill-card .row1 {
@@ -3076,16 +3168,17 @@ body {
   margin-bottom: 4px;
 }
 .skill-card .name {
-  font-size: 14px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.skill-card.active .name { color: var(--primary); }
+.skill-card.active .name { color: var(--skill-accent); }
 .skill-card .desc {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   display: -webkit-box;
   line-clamp: 2;
@@ -3102,7 +3195,7 @@ body {
   flex-wrap: wrap;
 }
 .skill-card .ver {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
 }
 
@@ -3112,8 +3205,9 @@ body {
   align-items: center;
   padding: 1px 7px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
+  letter-spacing: 0.01em;
   white-space: nowrap;
 }
 .skill-tag-official { background: var(--skill-tag-official-bg); color: var(--skill-tag-official-fg); }
@@ -3121,11 +3215,11 @@ body {
 .skill-tag-published { background: var(--skill-tag-published-bg); color: var(--skill-tag-published-fg); }
 .skill-tag-draft { background: var(--skill-tag-draft-bg); color: var(--skill-tag-draft-fg); }
 .skill-tag-disabled { background: var(--skill-tag-disabled-bg); color: var(--skill-tag-disabled-fg); }
-.skill-tag-lg { font-size: 12px; padding: 3px 10px; }
+.skill-tag-lg { font-size: var(--skill-font-size); padding: 3px 10px; }
 
 /* 模式胶囊 */
 .skill-mode-tag {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   padding: 1px 6px;
   border-radius: 4px;
   font-weight: 500;
@@ -3142,6 +3236,7 @@ body {
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
+  background: var(--skill-detail-bg);
 }
 
 .skill-detail-empty {
@@ -3156,7 +3251,7 @@ body {
   text-align: center;
 }
 .skill-detail-empty h2 {
-  font-size: 16px;
+  font-size: var(--skill-font-size-title);
   color: var(--text-muted);
   font-weight: 500;
   margin: 0;
@@ -3165,13 +3260,12 @@ body {
 .skill-detail-header {
   padding: var(--skill-detail-pad-y) var(--skill-detail-pad-x);
   background: var(--bg-elevated);
-  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .skill-detail-header .breadcrumb {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 .skill-detail-header .title-row {
   display: flex;
@@ -3180,13 +3274,14 @@ body {
   gap: 16px;
 }
 .skill-detail-header h2 {
-  font-size: 20px;
+  font-size: var(--skill-font-size-title);
   font-weight: 700;
+  letter-spacing: -0.02em;
   color: var(--text);
   margin: 0 0 6px;
 }
 .skill-detail-header .subtitle {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   max-width: 560px;
   margin: 0;
@@ -3205,18 +3300,28 @@ body {
   flex-wrap: wrap;
 }
 
+/* macOS 视觉规范：Skill 页内主按钮/幽灵按钮使用系统蓝强调色（同页弹窗随行，离开页面恢复全局主题色） */
+.skill-page .btn-primary {
+  background: var(--skill-accent);
+  box-shadow: var(--skill-primary-btn-shadow);
+}
+.skill-page .btn-primary:hover:not(:disabled) { background: var(--skill-accent-hover); }
+.skill-page .btn-primary:active { background: var(--skill-accent-active); }
+.skill-page .btn-ghost { color: var(--skill-accent); }
+.skill-page .btn-ghost:hover:not(:disabled) { background: var(--skill-accent-soft); }
+
 .skill-btn-danger-outline {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 34px;
-  padding: 0 12px;
+  height: var(--skill-btn-h);
+  padding: 0 11px;
   border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
   border-radius: var(--radius);
   background: var(--bg-elevated);
   color: var(--danger);
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
@@ -3225,40 +3330,46 @@ body {
 .skill-btn-danger-outline:hover:not(:disabled) { background: var(--danger-soft); }
 .skill-btn-danger-outline:disabled { opacity: 0.55; cursor: not-allowed; }
 
-/* ---- Tab 切换 ---- */
-.skill-tabs {
+/* ---- 顶部锚点导航（快捷跳转，非页签；吸顶跟随滚动） ---- */
+.skill-anchor-nav {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: flex;
-  gap: 0;
-  padding: 0 var(--skill-detail-pad-x);
-  background: var(--bg-elevated);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  overflow-x: auto;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px var(--skill-detail-pad-x);
+  margin: 0 calc(var(--skill-detail-pad-x) * -1) 16px;
+  background: color-mix(in srgb, var(--bg-elevated) 95%, transparent);
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--skill-separator);
 }
-.skill-tab {
-  padding: 12px 16px;
-  font-size: 13px;
+.skill-anchor-link {
+  padding: 4px 12px;
+  border-radius: var(--skill-pill-radius);
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
-  background: none;
+  background: transparent;
   border: none;
-  border-bottom: 2px solid transparent;
   cursor: pointer;
-  margin-bottom: -1px;
   font-family: inherit;
   white-space: nowrap;
-  transition: color 0.12s, border-color 0.12s;
+  transition: background 0.12s, color 0.12s;
 }
-.skill-tab:hover { color: var(--text); }
-.skill-tab.active {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
+.skill-anchor-link:hover { background: var(--skill-filter-hover-bg); color: var(--text); }
+.skill-anchor-link.active {
+  background: var(--skill-accent-soft);
+  color: var(--skill-accent);
+  font-weight: 600;
 }
+.skill-anchor-section { scroll-margin-top: 52px; }
 
 .skill-detail-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px var(--skill-detail-pad-x) 32px;
+  padding: 0 var(--skill-detail-pad-x) 40px;
   min-height: 0;
 }
 
@@ -3266,23 +3377,24 @@ body {
 .skill-section {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
-  border-radius: var(--skill-section-radius);
+  border-radius: var(--skill-radius-lg);
   padding: var(--skill-section-pad);
-  margin-bottom: 16px;
+  margin-bottom: 14px;
   box-shadow: var(--shadow-sm);
 }
 .skill-section h3 {
-  font-size: 14px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text);
-  margin: 0 0 16px;
+  margin: 0 0 14px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 .skill-section h3 .hint {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   font-weight: 400;
   color: var(--text-muted);
 }
@@ -3296,7 +3408,7 @@ body {
 
 .skill-field label {
   display: block;
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
   margin-bottom: 6px;
@@ -3308,7 +3420,7 @@ body {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   outline: none;
   background: var(--bg-elevated);
@@ -3318,7 +3430,7 @@ body {
 .skill-field input:focus,
 .skill-field select:focus,
 .skill-field textarea:focus {
-  border-color: var(--primary);
+  border-color: var(--skill-accent);
   box-shadow: var(--skill-focus-ring);
 }
 .skill-field input:disabled,
@@ -3328,12 +3440,17 @@ body {
   color: var(--text-muted);
   cursor: not-allowed;
 }
+/* 复选框：macOS 系统蓝勾选色，并避免被通用 input 宽度规则拉伸 */
+.skill-field input[type="checkbox"] {
+  width: auto;
+  accent-color: var(--skill-accent);
+}
 .skill-field textarea {
   min-height: 88px;
   resize: vertical;
 }
 .skill-field .help {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   margin-top: 4px;
 }
@@ -3341,7 +3458,7 @@ body {
 /* ---- Schema 代码框 ---- */
 .skill-schema-box {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   background: var(--skill-code-bg);
   color: var(--skill-code-fg);
   border-radius: var(--radius);
@@ -3357,13 +3474,13 @@ body {
   border-radius: var(--radius);
   padding: 16px 18px;
   background: var(--skill-md-preview-bg);
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   line-height: 1.65;
   max-height: 280px;
   overflow-y: auto;
 }
 .skill-md-preview h4 {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   margin: 12px 0 6px;
   color: var(--text);
@@ -3384,7 +3501,7 @@ body {
   min-height: 160px;
   border: none;
   padding: 14px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-family: var(--mono);
   line-height: 1.55;
   resize: vertical;
@@ -3412,7 +3529,7 @@ body {
   background: var(--bg);
   border-radius: var(--radius);
   border: 1px solid var(--border);
-  font-size: 13px;
+  font-size: var(--skill-font-size);
 }
 .skill-file-item .icon {
   width: 32px;
@@ -3428,7 +3545,7 @@ body {
   flex-shrink: 0;
 }
 .skill-file-item .name { font-weight: 500; color: var(--text); }
-.skill-file-item .path { font-size: 11px; color: var(--text-muted); }
+.skill-file-item .path { font-size: var(--skill-font-size); color: var(--text-muted); }
 
 /* ---- 权限芯片 ---- */
 .skill-perm-list {
@@ -3437,7 +3554,7 @@ body {
   gap: 6px;
 }
 .skill-perm-chip {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   padding: 3px 10px;
   border-radius: 6px;
   background: var(--bg);
@@ -3456,29 +3573,29 @@ body {
   display: flex;
   gap: 14px;
   padding: 12px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--skill-separator);
 }
 .skill-version-item:last-child { border-bottom: none; }
 .skill-version-item .v-badge {
   width: var(--skill-v-badge-size);
   height: var(--skill-v-badge-size);
   border-radius: var(--skill-card-radius);
-  background: var(--bg);
+  background: var(--skill-v-badge-bg);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 700;
   color: var(--text-muted);
   flex-shrink: 0;
 }
 .skill-version-item.current .v-badge {
-  background: var(--primary-soft);
-  color: var(--primary);
+  background: var(--skill-accent-soft);
+  color: var(--skill-accent);
 }
 .skill-version-item .v-body { flex: 1; min-width: 0; }
 .skill-version-item .v-title {
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--text);
   display: flex;
@@ -3487,7 +3604,7 @@ body {
   flex-wrap: wrap;
 }
 .skill-version-item .v-meta {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   margin-top: 2px;
   line-height: 1.55;
@@ -3503,11 +3620,11 @@ body {
 .skill-tool-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
 }
 .skill-tool-table th {
   text-align: left;
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -3526,7 +3643,7 @@ body {
 
 .skill-tool-foot {
   margin-top: 12px;
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   line-height: 1.6;
 }
@@ -3562,22 +3679,22 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--skill-card-radius);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 .skill-tool-picker-item:hover {
-  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+  border-color: color-mix(in srgb, var(--skill-accent) 40%, var(--border));
 }
 .skill-tool-picker-item.selected {
-  border-color: var(--primary);
-  background: var(--primary-soft);
+  border-color: var(--skill-accent);
+  background: var(--skill-accent-soft);
 }
 .skill-tool-picker-item.disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 .skill-tool-picker-item input[type="radio"] {
-  accent-color: var(--primary);
+  accent-color: var(--skill-accent);
 }
 .skill-tool-picker-item .t-name {
   font-weight: 600;
@@ -3585,14 +3702,14 @@ body {
   white-space: nowrap;
 }
 .skill-tool-picker-item .t-ver {
-  color: var(--primary);
+  color: var(--skill-accent);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   white-space: nowrap;
 }
 .skill-tool-picker-item .t-desc {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3600,7 +3717,7 @@ body {
   min-width: 0;
 }
 .skill-tool-picker-item .t-bound {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   white-space: nowrap;
 }
@@ -3643,7 +3760,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--text-muted);
   padding-bottom: 2px;
@@ -3680,9 +3797,9 @@ body {
   width: 20px;
   height: 20px;
   border-radius: 50%;
-  background: var(--primary-soft);
-  color: var(--primary);
-  font-size: 11px;
+  background: var(--skill-accent-soft);
+  color: var(--skill-accent);
+  font-size: var(--skill-font-size);
   font-weight: 600;
   flex-shrink: 0;
 }
@@ -3690,7 +3807,7 @@ body {
   flex: 1;
   min-width: 0;
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3705,17 +3822,17 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
 }
 .skill-bind-count {
   margin-right: auto;
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   align-self: center;
 }
 .skill-bind-limit {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--skill-bind-limit-fg);
 }
@@ -3736,7 +3853,7 @@ body {
   gap: 6px;
 }
 .skill-tool-picker-item .t-params {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   font-family: var(--mono);
   overflow: hidden;
@@ -3750,11 +3867,11 @@ body {
   gap: 4px;
 }
 .skill-tool-picker-item .t-params-list .skill-tag {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   padding: 1px 6px;
 }
 .skill-tool-picker-item .t-more {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
 }
 
@@ -3764,7 +3881,7 @@ body {
   text-align: center;
   color: var(--text-muted);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--skill-font-size);
 }
 .skill-tool-table .tool-name .skill-tag {
   margin-left: 6px;
@@ -3793,10 +3910,10 @@ body {
 
 /* ---- 告警条 ---- */
 .skill-alert {
-  padding: 12px 14px;
+  padding: 11px 13px;
   border-radius: var(--radius);
-  font-size: 13px;
-  margin-bottom: 16px;
+  font-size: var(--skill-font-size);
+  margin-bottom: 14px;
   display: flex;
   gap: 10px;
   align-items: flex-start;
@@ -3823,7 +3940,7 @@ body {
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
   padding: 10px 14px;
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   margin-bottom: 16px;
   line-height: 1.55;
@@ -3831,7 +3948,7 @@ body {
 
 /* ---- 对齐 skill.html 规范新增：列表副标题 / 路径行 / 扩展标签 ---- */
 .skill-sub {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   margin: 4px 0 12px;
   line-height: 1.45;
@@ -3840,13 +3957,13 @@ body {
 .skill-alert code,
 .skill-field code,
 .skill-load-steps code {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   background: color-mix(in srgb, var(--text) 6%, transparent);
   padding: 1px 5px;
   border-radius: 4px;
 }
 .skill-card .path {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   margin-top: 6px;
   font-family: var(--mono);
@@ -3858,7 +3975,7 @@ body {
   border: 1px solid var(--skill-tag-pending-border);
 }
 .skill-tag-confirm { background: var(--skill-tag-confirm-bg); color: var(--skill-tag-confirm-fg); }
-.skill-mode-tag-lg { font-size: 12px; padding: 3px 10px; }
+.skill-mode-tag-lg { font-size: var(--skill-font-size); padding: 3px 10px; }
 
 /* ---- 同步结果提示 ---- */
 .skill-scan-result { position: relative; padding-right: 28px; }
@@ -3878,7 +3995,7 @@ body {
 .skill-scan-close:hover { background: color-mix(in srgb, var(--text) 10%, transparent); }
 .skill-issues {
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -3896,7 +4013,7 @@ body {
   border-radius: var(--radius);
   background: var(--bg);
   color: var(--text-muted);
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   text-align: center;
   line-height: 1.5;
   cursor: pointer;
@@ -3904,39 +4021,40 @@ body {
 }
 .skill-upload-zone:hover,
 .skill-upload-zone:focus-visible {
-  border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 8%, transparent);
+  border-color: var(--skill-accent);
+  background: color-mix(in srgb, var(--skill-accent) 8%, transparent);
   outline: none;
 }
 .skill-upload-input { display: none; }
-.skill-upload-icon { font-size: 20px; color: var(--primary); line-height: 1; }
+.skill-upload-icon { font-size: 20px; color: var(--skill-accent); line-height: 1; }
 .skill-upload-file {
   margin-top: 10px;
   padding: 6px 10px;
   border-radius: var(--radius);
-  background: var(--primary-soft);
-  color: var(--primary);
-  font-size: 12px;
+  background: var(--skill-accent-soft);
+  color: var(--skill-accent-hover);
+  font-size: var(--skill-font-size);
   word-break: break-all;
 }
 .skill-upload-hint {
   margin-top: 10px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   line-height: 1.55;
 }
 
 /* ---- 绿色确认启用按钮（管理员首次确认） ---- */
 .skill-btn-success {
-  height: 34px;
-  padding: 0 12px;
+  height: var(--skill-btn-h);
+  padding: 0 11px;
   border: none;
   border-radius: var(--radius);
   background: var(--success);
   color: var(--bg-elevated);
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   cursor: pointer;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--success) 30%, transparent);
 }
 .skill-btn-success:hover:not(:disabled) { background: color-mix(in srgb, var(--success) 85%, var(--text)); }
 .skill-btn-success:disabled { opacity: 0.55; cursor: not-allowed; }
@@ -3960,14 +4078,14 @@ body {
   border-radius: var(--radius);
   border: 1px solid var(--border);
 }
-.skill-flag-card .label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
-.skill-flag-card .value { font-size: 14px; font-weight: 600; color: var(--text); }
+.skill-flag-card .label { font-size: var(--skill-font-size); color: var(--text-muted); margin-bottom: 4px; }
+.skill-flag-card .value { font-size: var(--skill-font-size); font-weight: 600; color: var(--text); }
 .skill-flag-card .value.text-success { color: var(--success); }
 .skill-flag-card .value.text-warning { color: var(--warning); }
 
 /* ---- 加载与生效步骤说明 ---- */
 .skill-load-steps {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   line-height: 1.6;
   padding: 12px;
@@ -3979,7 +4097,121 @@ body {
 .skill-load-steps li { margin-bottom: 4px; }
 .skill-load-steps strong { color: var(--text); }
 
+/* ---- macOS 细滚动条（列表 / 详情 / 绑定选择器滚动区） ---- */
+.model-provider-tree,
+.connector-list,
+.model-detail-body,
+.connector-detail-body,
+.audit-table-wrap,
+.audit-detail-pane,
+.users-table-wrap,
+.users-side,
+.chat-session-list,
+.chat-messages,
+.skill-list,
+.agent-list,
+.skill-detail-body,
+.agent-detail-body,
+.skill-bind-list,
+.skill-bind-picked,
+.skill-tool-picker {
+  scrollbar-width: thin;
+  scrollbar-color: var(--skill-scrollbar-thumb) transparent;
+}
+.model-provider-tree::-webkit-scrollbar,
+.connector-list::-webkit-scrollbar,
+.model-detail-body::-webkit-scrollbar,
+.connector-detail-body::-webkit-scrollbar,
+.audit-table-wrap::-webkit-scrollbar,
+.audit-detail-pane::-webkit-scrollbar,
+.users-table-wrap::-webkit-scrollbar,
+.users-side::-webkit-scrollbar,
+.chat-session-list::-webkit-scrollbar,
+.chat-messages::-webkit-scrollbar,
+.skill-list::-webkit-scrollbar,
+.agent-list::-webkit-scrollbar,
+.skill-detail-body::-webkit-scrollbar,
+.agent-detail-body::-webkit-scrollbar,
+.skill-bind-list::-webkit-scrollbar,
+.skill-bind-picked::-webkit-scrollbar,
+.skill-tool-picker::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.model-provider-tree::-webkit-scrollbar-thumb,
+.connector-list::-webkit-scrollbar-thumb,
+.model-detail-body::-webkit-scrollbar-thumb,
+.connector-detail-body::-webkit-scrollbar-thumb,
+.audit-table-wrap::-webkit-scrollbar-thumb,
+.audit-detail-pane::-webkit-scrollbar-thumb,
+.users-table-wrap::-webkit-scrollbar-thumb,
+.users-side::-webkit-scrollbar-thumb,
+.chat-session-list::-webkit-scrollbar-thumb,
+.chat-messages::-webkit-scrollbar-thumb,
+.skill-list::-webkit-scrollbar-thumb,
+.agent-list::-webkit-scrollbar-thumb,
+.skill-detail-body::-webkit-scrollbar-thumb,
+.agent-detail-body::-webkit-scrollbar-thumb,
+.skill-bind-list::-webkit-scrollbar-thumb,
+.skill-bind-picked::-webkit-scrollbar-thumb,
+.skill-tool-picker::-webkit-scrollbar-thumb {
+  background: var(--skill-scrollbar-thumb);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.model-provider-tree::-webkit-scrollbar-track,
+.connector-list::-webkit-scrollbar-track,
+.model-detail-body::-webkit-scrollbar-track,
+.connector-detail-body::-webkit-scrollbar-track,
+.audit-table-wrap::-webkit-scrollbar-track,
+.audit-detail-pane::-webkit-scrollbar-track,
+.users-table-wrap::-webkit-scrollbar-track,
+.users-side::-webkit-scrollbar-track,
+.chat-session-list::-webkit-scrollbar-track,
+.chat-messages::-webkit-scrollbar-track,
+.skill-list::-webkit-scrollbar-track,
+.agent-list::-webkit-scrollbar-track,
+.skill-detail-body::-webkit-scrollbar-track,
+.agent-detail-body::-webkit-scrollbar-track,
+.skill-bind-list::-webkit-scrollbar-track,
+.skill-bind-picked::-webkit-scrollbar-track,
+.skill-tool-picker::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---- 左右分栏拖拽把手（技能/智能体/模型/连接器四页共用）---- */
+.pane-resizer {
+  width: var(--pane-resizer-w);
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+  z-index: 2;
+  touch-action: none;
+}
+.pane-resizer::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: var(--pane-resizer-line-w);
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background 0.15s;
+}
+.pane-resizer:hover::after,
+body.pane-resizing .pane-resizer::after {
+  background: var(--skill-accent);
+}
+body.pane-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 @media (max-width: 900px) {
+  .pane-resizer { display: none; }
   .skill-shell { flex-direction: column; }
   .skill-list-pane { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
   .skill-detail-pane { flex: 1; min-height: 0; }
@@ -4009,8 +4241,9 @@ body {
 /* ---- 左侧 Provider 树 ---- */
 .model-list-pane {
   width: var(--model-list-w);
-  background: var(--bg-elevated);
+  background: var(--skill-sidebar-bg);
   border-right: 1px solid var(--border);
+  box-shadow: var(--skill-window-shadow);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -4064,8 +4297,23 @@ body {
 .model-provider-head .dot.ok { background: var(--success); }
 .model-provider-head .dot.warn { background: var(--warning); }
 .model-provider-head .dot.off { background: var(--text-muted); }
-.model-provider-head .add-model-btn {
+.model-provider-head .provider-toggle-btn {
   margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.model-provider-head:hover .provider-toggle-btn { opacity: 1; }
+.model-provider-head .provider-toggle-btn:hover { background: var(--danger-soft); color: var(--danger); }
+.model-provider-head .provider-toggle-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.model-provider-head .add-model-btn {
   border: none;
   background: transparent;
   color: var(--text-muted);
@@ -4093,8 +4341,8 @@ body {
   gap: 8px;
   transition: background 0.12s, color 0.12s;
 }
-.model-item:hover { background: var(--bg); color: var(--text); }
-.model-item.active { background: var(--primary-soft); color: var(--primary); font-weight: 500; }
+.model-item:hover { background: var(--skill-card-hover-bg); color: var(--text); }
+.model-item.active { background: var(--skill-card-active-bg); color: var(--primary); font-weight: 500; box-shadow: var(--skill-card-active-shadow); }
 .model-item .mini-tag {
   font-size: 10px;
   padding: 1px 5px;
@@ -4190,38 +4438,10 @@ body {
 .model-tag-secret { background: var(--model-tag-secret-bg); color: var(--model-tag-secret-fg); }
 .model-tag-lg { font-size: 12px; padding: 3px 10px; }
 
-/* ---- Tab ---- */
-.model-tabs {
-  display: flex;
-  padding: 0 var(--model-detail-pad-x);
-  background: var(--bg-elevated);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.model-tabs::-webkit-scrollbar { display: none; }
-.model-tab {
-  padding: 12px 16px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-muted);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  margin-bottom: -1px;
-  white-space: nowrap;
-  font-family: inherit;
-  transition: color 0.12s, border-color 0.12s;
-}
-.model-tab:hover { color: var(--text); }
-.model-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
-
 .model-detail-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px var(--model-detail-pad-x) 32px;
+  padding: 0 var(--model-detail-pad-x) 32px;
   min-height: 0;
 }
 
@@ -4460,8 +4680,9 @@ body {
 /* ---- 左侧列表 ---- */
 .connector-list-pane {
   width: var(--connector-list-w);
-  background: var(--bg-elevated);
+  background: var(--skill-sidebar-bg);
   border-right: 1px solid var(--border);
+  box-shadow: var(--skill-window-shadow);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -4546,10 +4767,11 @@ body {
   margin-bottom: 4px;
   transition: background 0.12s, border-color 0.12s;
 }
-.connector-card:hover { background: var(--bg); }
+.connector-card:hover { background: var(--skill-card-hover-bg); }
 .connector-card.active {
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+  background: var(--skill-card-active-bg);
+  border-color: var(--skill-card-active-border);
+  box-shadow: var(--skill-card-active-shadow);
 }
 
 .connector-card .row1 {
@@ -4676,40 +4898,10 @@ body {
   flex-wrap: wrap;
 }
 
-/* ---- Tab 切换 ---- */
-.connector-tabs {
-  display: flex;
-  gap: 0;
-  padding: 0 var(--connector-detail-pad-x);
-  background: var(--bg-elevated);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  overflow-x: auto;
-}
-.connector-tab {
-  padding: 12px 16px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-muted);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  cursor: pointer;
-  margin-bottom: -1px;
-  font-family: inherit;
-  white-space: nowrap;
-  transition: color 0.12s, border-color 0.12s;
-}
-.connector-tab:hover { color: var(--text); }
-.connector-tab.active {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
-}
-
 .connector-detail-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px var(--connector-detail-pad-x) 32px;
+  padding: 0 var(--connector-detail-pad-x) 32px;
   min-height: 0;
 }
 
@@ -4829,9 +5021,9 @@ body {
 }
 .connector-op-table th {
   text-align: left;
-  font-size: 11px;
+  font-size: 15px;
   font-weight: 600;
-  color: var(--text-muted);
+  color: #000;
   text-transform: uppercase;
   letter-spacing: 0.03em;
   padding: 8px 12px;
@@ -4864,16 +5056,131 @@ body {
   font-size: 11px;
   color: var(--text-muted);
 }
-.connector-check {
+
+/* ---- 已注册工具筛选栏 / 分页 ---- */
+.connector-tool-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.connector-tool-search {
+  flex: 1;
+  min-width: 200px;
+}
+.connector-tool-search input {
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0 10px;
+  font-size: var(--skill-font-size);
+  color: var(--text);
+  background: var(--bg-elevated);
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.connector-tool-search input:focus {
+  border-color: var(--skill-accent);
+  box-shadow: var(--skill-focus-ring);
+}
+.connector-tool-toolbar select {
+  height: 32px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0 8px;
+  font-size: var(--skill-font-size);
+  color: var(--text);
+  background: var(--bg-elevated);
+  outline: none;
+  font-family: inherit;
+}
+.connector-tool-count {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.connector-tool-pager {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  margin-top: 10px;
+  font-size: var(--skill-font-size);
+  color: var(--text-muted);
+}
+.connector-tool-pager .spacer { flex: 1; }
+/* ---- 复选框选择器：勾选框与文字横向紧贴、放大可见 ---- */
+.connector-check {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: fit-content;
+  font-size: var(--skill-font-size);
   color: var(--text);
   cursor: pointer;
 }
+/* 表单列布局的 label 规则（display:block + 12px）特异度更高，会压掉上面的 flex，这里显式压回 */
+.connector-field label.connector-check,
+.form-field label.connector-check {
+  display: inline-flex;
+  font-size: var(--skill-font-size);
+}
 .connector-check input[type="checkbox"] {
-  accent-color: var(--primary);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--skill-accent);
+}
+
+/* ---- 凭据头编辑器（REST 认证头行：头名 / 加密值 / 删除） ---- */
+.connector-headers-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* 详情区认证字段内的入口：按钮随右侧区统一尺寸规则 */
+.connector-headers-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.connector-header-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.connector-header-row input {
+  height: 32px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 0 10px;
+  font-size: var(--skill-font-size);
+  color: var(--text);
+  background: var(--bg-elevated);
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.connector-header-row input:focus {
+  border-color: var(--skill-accent);
+  box-shadow: var(--skill-focus-ring);
+}
+/* 密文值列用等宽字体，视觉上与头名列区分（secret:// 引用） */
+.connector-header-value {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.connector-headers-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
 }
 .connector-composite-step {
   display: flex;
@@ -5079,6 +5386,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  font-size: var(--skill-font-size);
 }
 
 /* ---- 筛选栏 ---- */
@@ -5092,7 +5400,7 @@ body {
 }
 .audit-filter-row {
   display: flex;
-  gap: 10px;
+  gap: 30px;
   flex-wrap: wrap;
   align-items: flex-end;
 }
@@ -5104,7 +5412,7 @@ body {
   min-width: 0;
 }
 .audit-field label {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
   white-space: nowrap;
@@ -5115,7 +5423,7 @@ body {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 0 10px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   background: var(--bg-elevated);
   outline: none;
@@ -5124,8 +5432,8 @@ body {
 }
 .audit-field select:focus,
 .audit-field input:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+  border-color: var(--skill-accent);
+  box-shadow: var(--skill-focus-ring);
 }
 .audit-field input:disabled {
   background: var(--bg);
@@ -5176,6 +5484,7 @@ body {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+  box-shadow: var(--skill-window-shadow);
   overflow: hidden;
 }
 
@@ -5183,12 +5492,13 @@ body {
   flex: 1;
   overflow: auto;
   min-height: 0;
+  padding: 0 20px 12px 50px;
 }
 
 .audit-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
 }
 .audit-table th {
   text-align: left;
@@ -5214,7 +5524,7 @@ body {
 .audit-table tbody tr:hover { background: var(--bg); }
 .audit-table tbody tr.active { background: var(--primary-soft); }
 .audit-table .time { white-space: nowrap; color: var(--text-muted); font-size: 12px; }
-.audit-table .summary-cell { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audit-table .summary-cell { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .audit-table .trace-cell {
   font-family: var(--mono);
   font-size: 11px;
@@ -5230,7 +5540,7 @@ body {
   align-items: center;
   padding: 1px 7px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   white-space: nowrap;
 }
@@ -5243,7 +5553,7 @@ body {
 .audit-tag-confirm { background: var(--audit-tag-confirm-bg); color: var(--audit-tag-confirm-fg); }
 .audit-tag-other { background: var(--audit-tag-other-bg); color: var(--audit-tag-other-fg); }
 
-.audit-result { font-size: 12px; font-weight: 500; white-space: nowrap; }
+.audit-result { font-size: var(--skill-font-size); font-weight: 500; white-space: nowrap; }
 .audit-result-ok { color: var(--success); }
 .audit-result-err { color: var(--danger); }
 .audit-result-warn { color: var(--warning); }
@@ -5253,12 +5563,22 @@ body {
 .audit-pager {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   padding: 10px 14px;
   border-top: 1px solid var(--border);
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   color: var(--text-muted);
   flex-shrink: 0;
+}
+/* 分页条控件统一高度与字号，避免原生 select/输入框参差 */
+.audit-pager select,
+.audit-pager .input {
+  height: 30px;
+  font-size: var(--skill-font-size);
+}
+.audit-pager .btn-sm {
+  height: 30px;
+  padding: 0 12px;
 }
 .audit-pager .spacer { flex: 1; }
 
@@ -5266,9 +5586,10 @@ body {
 .audit-detail-pane {
   width: var(--audit-detail-w);
   flex-shrink: 0;
-  background: var(--bg-elevated);
+  background: var(--skill-detail-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+  box-shadow: var(--skill-window-shadow);
   overflow-y: auto;
   padding: 16px;
   display: flex;
@@ -5282,7 +5603,7 @@ body {
   gap: 8px;
 }
 .audit-detail-header h2 {
-  font-size: 15px;
+  font-size: var(--skill-font-size-title);
   font-weight: 700;
   color: var(--text);
   margin: 0;
@@ -5296,7 +5617,7 @@ body {
   line-height: 1.6;
 }
 .audit-detail-section h3 {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -5307,7 +5628,7 @@ body {
   display: grid;
   grid-template-columns: 76px 1fr;
   gap: 6px 10px;
-  font-size: 12px;
+  font-size: var(--skill-font-size);
 }
 .audit-kv dt { color: var(--text-muted); }
 .audit-kv dd { margin: 0; color: var(--text); word-break: break-all; }
@@ -5332,7 +5653,7 @@ body {
   align-items: baseline;
   padding: 6px 0;
   border-bottom: 1px dashed var(--border);
-  font-size: 12px;
+  font-size: var(--skill-font-size);
 }
 .audit-trace-step:last-child { border-bottom: none; }
 /* 链路步骤可点击：悬停反馈 + 当前查看项高亮 */
@@ -5359,10 +5680,101 @@ body {
   color: var(--text-muted);
   padding: 40px;
   text-align: center;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
+}
+
+/* accent 按钮覆盖（与技能页同源 token） */
+.audit-page .btn-primary {
+  background: var(--skill-accent);
+  box-shadow: var(--skill-primary-btn-shadow);
+}
+.audit-page .btn-primary:hover:not(:disabled) { background: var(--skill-accent-hover); }
+.audit-page .btn-primary:active { background: var(--skill-accent-active); }
+.audit-page .btn-ghost { color: var(--skill-accent); }
+.audit-page .btn-ghost:hover:not(:disabled) { background: var(--skill-accent-soft); }
+
+/* ---- 导出 / 归档（v1.3 M2）---- */
+.audit-export-bar {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  margin-bottom: 12px;
+  padding: 10px 12px;
+}
+.audit-export-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.audit-export-hint {
+  margin-left: 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.audit-export-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.audit-export-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.audit-export-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.audit-export-job {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.audit-export-meta {
+  margin-left: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.audit-export-shards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.audit-export-list-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.audit-export-list-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+}
+.audit-export-time { color: var(--text-muted); white-space: nowrap; }
+.audit-export-note {
+  color: var(--skill-accent);
+  font-size: 12px;
+}
+.audit-export-error {
+  color: var(--danger, #d33);
+  font-size: 12px;
 }
 
 @media (max-width: 1000px) {
+  .pane-resizer { display: none; }
   .audit-shell { flex-direction: column; }
   .audit-detail-pane { width: 100%; }
 }
@@ -5375,6 +5787,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  font-size: var(--skill-font-size);
 }
 
 .users-toolbar {
@@ -5395,7 +5808,7 @@ body {
   gap: 4px;
 }
 .users-toolbar .users-field label {
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text-muted);
   white-space: nowrap;
@@ -5406,7 +5819,7 @@ body {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 0 10px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   background: var(--bg-elevated);
   outline: none;
@@ -5414,8 +5827,8 @@ body {
 }
 .users-toolbar select:focus,
 .users-toolbar input:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+  border-color: var(--skill-accent);
+  box-shadow: var(--skill-focus-ring);
 }
 .users-toolbar .spacer { flex: 1; }
 
@@ -5434,19 +5847,26 @@ body {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+  box-shadow: var(--skill-window-shadow);
   overflow: hidden;
 }
-.users-table-wrap { flex: 1; overflow: auto; min-height: 0; }
+.users-table-wrap {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  padding: 0 20px 12px 50px;          /* 改为 flex 容器 */
+  justify-content: center; /* 子元素水平居中 */
+}
 .users-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
 }
 .users-table th {
   text-align: left;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
-  color: var(--text-muted);
+  color: #000;
   text-transform: uppercase;
   letter-spacing: 0.03em;
   padding: 10px 12px;
@@ -5489,14 +5909,14 @@ body {
   display: inline-flex;
   padding: 1px 7px;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: var(--skill-font-size);
   font-weight: 500;
   white-space: nowrap;
 }
 .users-role-tag-admin { background: var(--users-role-admin-bg); color: var(--users-role-admin-fg); }
 .users-role-tag-user { background: var(--users-role-user-bg); color: var(--users-role-user-fg); }
 
-.users-state { font-size: 12px; font-weight: 500; white-space: nowrap; }
+.users-state { font-size: var(--skill-font-size); font-weight: 500; white-space: nowrap; }
 .users-state-ok { background: var(--users-state-ok-bg); color: var(--users-state-ok-fg); padding: 1px 8px; border-radius: 4px; }
 .users-state-locked { background: var(--users-state-locked-bg); color: var(--users-state-locked-fg); padding: 1px 8px; border-radius: 4px; }
 .users-state-off { background: var(--users-state-off-bg); color: var(--users-state-off-fg); padding: 1px 8px; border-radius: 4px; }
@@ -5507,9 +5927,10 @@ body {
 .users-side {
   width: var(--users-side-w);
   flex-shrink: 0;
-  background: var(--bg-elevated);
+  background: var(--skill-detail-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+  box-shadow: var(--skill-window-shadow);
   overflow-y: auto;
   padding: 16px;
   display: flex;
@@ -5517,7 +5938,7 @@ body {
   gap: 12px;
 }
 .users-side-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.users-side-header h2 { font-size: 15px; font-weight: 700; color: var(--text); margin: 0; }
+.users-side-header h2 { font-size: var(--skill-font-size-title); font-weight: 700; color: var(--text); margin: 0; }
 .users-protect-note {
   font-size: 11px;
   color: var(--users-protect-fg);
@@ -5527,14 +5948,14 @@ body {
   line-height: 1.6;
 }
 .users-side-section h3 {
-  font-size: 12px;
+  font-size: var(--skill-font-size);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.03em;
   margin: 0 0 8px;
 }
-.users-kv { display: grid; grid-template-columns: 84px 1fr; gap: 6px 10px; font-size: 12px; margin: 0; }
+.users-kv { display: grid; grid-template-columns: 84px 1fr; gap: 6px 10px; font-size: var(--skill-font-size); margin: 0; }
 .users-kv dt { color: var(--text-muted); }
 .users-kv dd { margin: 0; color: var(--text); word-break: break-all; }
 .users-perm-list { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -5551,22 +5972,22 @@ body {
 /* ---- 弹窗表单 ---- */
 .users-form-grid { display: flex; flex-direction: column; gap: 12px; }
 .users-form-item { display: flex; flex-direction: column; gap: 5px; }
-.users-form-item label { font-size: 12px; font-weight: 500; color: var(--text); }
+.users-form-item label { font-size: var(--skill-font-size); font-weight: 500; color: var(--text); }
 .users-form-item label .req { color: var(--danger); }
 .users-form-item input {
   height: 34px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
   padding: 0 10px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
   color: var(--text);
   background: var(--bg-elevated);
   outline: none;
   font-family: inherit;
 }
 .users-form-item input:focus {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
+  border-color: var(--skill-accent);
+  box-shadow: var(--skill-focus-ring);
 }
 .users-form-item .help { font-size: 11px; color: var(--text-muted); }
 .users-role-choice { display: flex; gap: 10px; }
@@ -5579,7 +6000,7 @@ body {
   transition: border-color 0.15s, background 0.15s;
 }
 .users-role-option.selected { border-color: var(--primary); background: var(--primary-soft); }
-.users-role-option .t { font-size: 13px; font-weight: 600; color: var(--text); }
+.users-role-option .t { font-size: var(--skill-font-size); font-weight: 600; color: var(--text); }
 .users-role-option .d { font-size: 11px; color: var(--text-muted); margin-top: 3px; line-height: 1.5; }
 
 .users-empty {
@@ -5589,10 +6010,21 @@ body {
   justify-content: center;
   color: var(--text-muted);
   padding: 40px;
-  font-size: 13px;
+  font-size: var(--skill-font-size);
 }
 
+/* accent 按钮覆盖（与技能页同源 token） */
+.users-page .btn-primary {
+  background: var(--skill-accent);
+  box-shadow: var(--skill-primary-btn-shadow);
+}
+.users-page .btn-primary:hover:not(:disabled) { background: var(--skill-accent-hover); }
+.users-page .btn-primary:active { background: var(--skill-accent-active); }
+.users-page .btn-ghost { color: var(--skill-accent); }
+.users-page .btn-ghost:hover:not(:disabled) { background: var(--skill-accent-soft); }
+
 @media (max-width: 1000px) {
+  .pane-resizer { display: none; }
   .users-shell { flex-direction: column; }
   .users-side { width: 100%; }
 }
@@ -5758,7 +6190,7 @@ body {
   color: var(--text-muted);
   user-select: none;
 }
-.skill-doc-details summary:hover { color: var(--primary); }
+.skill-doc-details summary:hover { color: var(--skill-accent); }
 .skill-doc-details[open] summary { margin-bottom: 8px; }
 
 /* ==================== 全局 Toast 轻提示 ==================== */

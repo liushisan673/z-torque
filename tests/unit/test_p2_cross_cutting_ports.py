@@ -4,7 +4,7 @@ import logging
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
 from app.assembly import assemble
 from app.builtin_plugins.interceptor import InterceptorPlugin
@@ -14,11 +14,11 @@ from app.builtin_plugins.policy_source import ConfigPolicySource, PolicySourcePl
 from app.config import get_settings
 from app.db.session import SessionLocal, engine
 from app.kernel.audit.service import AuditExecutionInterceptor
-from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.kernel.ports.specs import PORT_SPECS
+from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.models import AuditLog, Permission, Role, Tenant, User, role_permission, user_role
 from app.security.passwords import hash_password
-
+from tests.support.ddl import fk_off, fk_on
 
 # ---- interceptor ----
 
@@ -70,13 +70,13 @@ def test_observability_plugin_registers_port():
 def cleanup_policy():
     yield
     with SessionLocal.begin() as db:
-        db.execute(text("PRAGMA foreign_keys=OFF"))
+        fk_off(db)
         db.execute(delete(Permission))
         db.execute(delete(user_role))
         db.execute(delete(Role))
         db.execute(delete(User))
         db.execute(delete(Tenant))
-        db.execute(text("PRAGMA foreign_keys=ON"))
+        fk_on(db)
 
 
 def test_policy_source_user_permissions_and_config_lists():

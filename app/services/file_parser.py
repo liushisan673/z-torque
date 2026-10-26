@@ -1,7 +1,6 @@
 import csv
 from pathlib import Path
 
-
 SUPPORTED = {".txt", ".md", ".csv", ".pdf", ".xlsx"}
 
 

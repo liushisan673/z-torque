@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -11,7 +10,6 @@ from sqlalchemy.orm import Session
 from app.core.errors import ApiError
 from app.kernel.audit.service import record_audit
 from app.kernel.md_skill import MdSkillManifest, parse_skill, snapshot
-from app.kernel.skill_service import _snapshot_hash
 from app.models import Skill, SkillVersion
 
 

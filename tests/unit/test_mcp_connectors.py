@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from app.builtin_plugins.mcp import StdioMcpConnector, StdioServerRegistry, StdioServerRegistration
+from app.builtin_plugins.mcp import StdioMcpConnector, StdioServerRegistration, StdioServerRegistry
 from app.kernel.ports.connector import McpProtocolError, McpTransportError
 
 

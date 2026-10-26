@@ -1,5 +1,5 @@
-import pytest
 from sqlalchemy import create_engine
+
 from app.builtin_plugins.executors import DbQueryExecutor
 from app.kernel.skill_gateway import SkillGateway
 

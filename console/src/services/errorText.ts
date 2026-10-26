@@ -63,6 +63,25 @@ const CODE_TEXT: Record<string, string> = {
   AI_CONVERSATION_NOT_FOUND: "会话不存在或已被删除",
   AI_MESSAGE_NOT_FOUND: "消息不存在或已被删除",
   AI_CHAT_FINALIZE_FAILED: "会话内容写入失败，请重试",
+  // ---- 沙箱（v1.3 M1：拒绝与资源超限分开，避免把配额问题误读成权限问题）----
+  AI_SANDBOX_DENIED: "沙箱拒绝执行：脚本目录或行为超出允许范围",
+  AI_SANDBOX_RESOURCE_EXCEEDED: "沙箱资源超限（CPU/文件/进程），请精简脚本或联系管理员调整配额",
+  // ---- 技能执行（沙箱超时复用技能码）----
+  AI_SKILL_TIMEOUT: "技能执行超时，请缩小任务范围后重试",
+  AI_SKILL_FAILED: "技能执行失败，请检查脚本输入与依赖",
+  // ---- 审计导出 / 归档（v1.3 M2）----
+  AI_AUDIT_EXPORT_DENIED: "没有导出该范围审计的权限，或导出任务不存在/已过期",
+  AI_AUDIT_EXPORT_TOO_LARGE: "导出范围超过单任务行数上限，请缩小时间范围后重试",
+  AI_AUDIT_EXPORT_FAILED: "审计导出失败，请稍后重试",
+  AI_AUDIT_ARCHIVE_FAILED: "审计归档失败，请检查对象存储与密钥配置",
+  AI_AUDIT_ARCHIVE_KEY_MISSING: "归档对象需要已下线的密钥才能解开，请恢复上一把密钥或先完成密钥轮换",
+  // ---- A2A（v1.3 M3）----
+  AI_A2A_DISABLED: "A2A 能力未启用（A2A_ENABLED=false）",
+  AI_A2A_DENIED: "A2A 调用被拒绝：身份或 a2a.invoke 权限不满足",
+  AI_A2A_TIMEOUT: "A2A 对端响应超时，请稍后重试",
+  AI_A2A_PEER_UNAVAILABLE: "A2A 对端不可用（不在白名单、连接失败或响应超限）",
+  AI_A2A_DEPTH_EXCEEDED: "A2A 调用层级超过上限，已阻断（防止环状放大）",
+  AI_A2A_ROUTE_FAILED: "A2A 路由失败：目标技能或对端不存在",
 };
 
 // 判定后端 message 是否已是可读中文（少量接口会直接返回中文说明）

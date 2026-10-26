@@ -3,29 +3,30 @@
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
 from app.builtin_plugins.approval_provider import ApprovalProviderPlugin
 from app.builtin_plugins.manifest import PluginSdk
 from app.builtin_plugins.notify_channel import LoggingNotifyChannel, NotifyChannelPlugin
 from app.core.errors import ApiError
 from app.db.session import SessionLocal
-from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.kernel.ports.specs import PORT_SPECS
+from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.kernel.skill_confirmation import BuiltinApprovalProvider
 from app.models import Confirmation, Tenant, User
 from app.security.passwords import hash_password
+from tests.support.ddl import fk_off, fk_on
 
 
 @pytest.fixture(autouse=True)
 def cleanup():
     yield
     with SessionLocal.begin() as db:
-        db.execute(text("PRAGMA foreign_keys=OFF"))
+        fk_off(db)
         db.execute(delete(Confirmation))
         db.execute(delete(User))
         db.execute(delete(Tenant))
-        db.execute(text("PRAGMA foreign_keys=ON"))
+        fk_on(db)
 
 
 def _setup_user(db):

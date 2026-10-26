@@ -1,6 +1,6 @@
 from dataclasses import asdict
-from uuid import UUID
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session

@@ -13,12 +13,12 @@ from app.assembly import _apply_port_overrides
 from app.builtin_plugins.authz_provider import BuiltinAuthzProvider
 from app.builtin_plugins.manifest import PluginManifest, PluginSdk
 from app.builtin_plugins.notify_channel import LoggingNotifyChannel
+from app.builtin_plugins.sandbox_driver import run_isolated_process
 from app.config import get_settings
 from app.core.errors import ApiError
 from app.db.session import SessionLocal
 from app.kernel.audit.service import record_audit
 from app.kernel.md_skill import parse_skill
-from app.kernel.md_skill_runtime import run_isolated_process
 from app.kernel.registry.active import active_registry, bind_registry, unbind_registry
 from app.kernel.registry.port_registry import PORT_SPEC_BY_NAME, PortPriority, PortRegistry
 from app.kernel.security_context import SecurityContext
@@ -30,7 +30,6 @@ from app.models.audit import AuditLog
 from app.models.task import Task, TaskEvent
 from app.services.context_builder import build_context
 from app.services.md_skill_upload import peek_skill_name
-
 
 _CREATED_TENANTS: list = []
 

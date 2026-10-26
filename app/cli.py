@@ -8,7 +8,6 @@ from app.db.session import SessionLocal
 from app.models import Permission, Role, Tenant, User, role_permission, user_role
 from app.security.passwords import hash_password
 
-
 ALL_PERMISSIONS: list[str] = [
     # Platform & user
     "user.read",
@@ -49,6 +48,11 @@ ALL_PERMISSIONS: list[str] = [
     # Audit
     "audit.read",
     "audit.read_all",
+    # Audit export / archive（v1.3 §5.3：导出与归档是显式授权的高危动作）
+    "audit.export",
+    "audit.archive",
+    # A2A（v1.3 §6.5：入站调用必须显式授权，普通成员默认不授予）
+    "a2a.invoke",
 ]
 
 

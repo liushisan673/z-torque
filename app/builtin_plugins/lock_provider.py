@@ -6,12 +6,10 @@
 
 import asyncio
 import threading
-
 from contextlib import AbstractAsyncContextManager
 
 from app.builtin_plugins.manifest import PluginManifest
 from app.kernel.ports.lock_provider import LockProvider
-from app.kernel.registry.port_registry import PortPriority
 
 
 class InProcessLockProvider(LockProvider):

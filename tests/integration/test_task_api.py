@@ -6,7 +6,20 @@ from sqlalchemy import delete
 
 from app.db.session import SessionLocal
 from app.main import app
-from app.models import Agent, AgentVersion, AuditLog, AuthSession, Conversation, Message, Outbox, Role, Task, TaskEvent, Tenant, User
+from app.models import (
+    Agent,
+    AgentVersion,
+    AuditLog,
+    AuthSession,
+    Conversation,
+    Message,
+    Outbox,
+    Role,
+    Task,
+    TaskEvent,
+    Tenant,
+    User,
+)
 from app.security.passwords import hash_password
 
 

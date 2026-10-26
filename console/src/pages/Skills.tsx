@@ -10,11 +10,10 @@ import { useToast } from "../components/Toast";
 import { GuideCallout } from "../components/GuideCallout";
 import { isAdminUser } from "../components/AppTopbar";
 import { useAuth } from "../stores/auth";
+import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 
 // 选中记忆：跳转页面后返回时恢复上次选中的技能（sessionStorage 按标签页隔离）
 const SELECTED_KEY = "zt.skills.selectedId";
-
-type Tab = "overview" | "content" | "scripts" | "load" | "tools" | "versions";
 
 type BindPick = {
   tool: SelectableTool;
@@ -98,8 +97,8 @@ function modeOf(s: SkillListItem): "script" | "instruction" {
 }
 
 function implementationLabel(impl: string | null | undefined): string {
-  if (impl === "md_script") return "md_script（脚本）";
-  if (impl === "md_instruction") return "md_instruction（纯指令）";
+  if (impl === "md_script") return "脚本";
+  if (impl === "md_instruction") return "纯指令";
   return impl || "—";
 }
 
@@ -109,15 +108,6 @@ function fmtTime(iso: string | null | undefined): string {
     return new Date(iso).toLocaleString();
   } catch {
     return "—";
-  }
-}
-
-// JSON 美化（schema 展示用）
-function prettyJson(obj: unknown): string {
-  try {
-    return JSON.stringify(obj, null, 2);
-  } catch {
-    return String(obj ?? "");
   }
 }
 
@@ -156,7 +146,11 @@ export function SkillsPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [keyword, setKeyword] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const [tab, setTab] = useState<Tab>("overview");
+  // 左右分栏宽度：拖拽把手调整，会话内保持，退出登录恢复默认
+  const listPane = usePaneWidth("skill", "--skill-list-w");
+  // 顶部锚点导航：当前高亮区块；详情内容纵向滚动一次展示全部（无页签）
+  const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
+  const detailBodyRef = useRef<HTMLDivElement | null>(null);
 
   // 创建 Skill
   const [createOpen, setCreateOpen] = useState(false);
@@ -216,12 +210,6 @@ export function SkillsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, skills, selectedId]);
 
-  // 进入「加载与生效」tab 时拉取 watchdog 实时扫描状态
-  useEffect(() => {
-    if (tab === "load" && selectedId) void loadScanStatus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, selectedId]);
-
   const selected = useMemo(
     () => skills.find((s) => s.id === selectedId) ?? null,
     [skills, selectedId],
@@ -248,7 +236,8 @@ export function SkillsPage() {
     setVersionDetail(null);
     setTools([]);
     setEditing(null);
-    setTab("overview");
+    setActiveAnchor("overview");
+    if (detailBodyRef.current) detailBodyRef.current.scrollTop = 0;
     setLoadingDetail(true);
     setError(null);
     try {
@@ -480,7 +469,7 @@ export function SkillsPage() {
     setEditScript(v.script_source ?? "");
     setEditPerms(v.required_permissions.join("\n"));
     setEditConfirm(v.requires_confirmation);
-    setTab("content");
+    scrollToSection("content");
   }
 
   // 持久化草稿表单（不含 busy 管理，供"保存草稿"与"发布"共用）
@@ -795,7 +784,7 @@ export function SkillsPage() {
               确认启用（管理员）
             </button>
           )}
-          <button className="btn btn-secondary btn-sm" onClick={() => setTab("load")}>查看扫描状态</button>
+          <button className="btn btn-secondary btn-sm" onClick={() => scrollToSection("load")}>查看扫描状态</button>
           <button className="skill-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>忽略（停用）</button>
         </>
       );
@@ -823,7 +812,7 @@ export function SkillsPage() {
     if (verStatus === "DRAFT") {
       return (
         <>
-          {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>编辑信息</button>}
+          {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>基础信息</button>}
           {!isMd && versionDetail && (
             <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEditor(versionDetail)}>继续编辑</button>
           )}
@@ -835,7 +824,7 @@ export function SkillsPage() {
     // 已发布
     return (
       <>
-        {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>编辑信息</button>}
+        {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>基础信息</button>}
         {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>}
         <button className="skill-btn-danger-outline" disabled={busy} onClick={() => void archiveSkill(selected.id)}>停用</button>
       </>
@@ -846,6 +835,57 @@ export function SkillsPage() {
   const detailRelativePath = viewVersion?.relative_path ?? selected?.relative_path ?? null;
   const detailIsMd = selected?.skill_type === "MD_SKILL";
   const detailPending = selected ? isPendingEnable(selected) : false;
+
+  // 详情为 MD-Skill 时拉取 watchdog 实时扫描状态（「加载状态」区块固定展示在页面内）
+  useEffect(() => {
+    if (detailIsMd) void loadScanStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailIsMd, selectedId]);
+
+  // 锚点导航配置：顺序即详情区纵向展示顺序；scripts/load 为 MD-Skill 目录机制专属
+  const detailAnchors = useMemo(
+    () =>
+      detailIsMd
+        ? [
+            { id: "overview", label: "基本信息" },
+            { id: "content", label: "操作手册" },
+            { id: "scripts", label: "脚本" },
+            { id: "tools", label: "关联工具" },
+            { id: "versions", label: "版本" },
+            { id: "load", label: "加载状态" },
+          ]
+        : [
+            { id: "overview", label: "基本信息" },
+            { id: "content", label: "操作手册" },
+            { id: "tools", label: "关联工具" },
+            { id: "versions", label: "版本" },
+          ],
+    [detailIsMd],
+  );
+
+  // 锚点跳转：平滑滚动到对应区块（区块上以 scroll-margin 预留吸顶导航高度）
+  function scrollToSection(id: string) {
+    setActiveAnchor(id);
+    document.getElementById(`skill-sec-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // 滚动跟随高亮：取距容器顶部最近的区块为当前项；触底时高亮最后一项
+  function handleDetailScroll() {
+    const container = detailBodyRef.current;
+    if (!container) return;
+    const ids = detailAnchors.map((a) => a.id);
+    const containerTop = container.getBoundingClientRect().top;
+    let current = ids[0] ?? null;
+    for (const id of ids) {
+      const el = document.getElementById(`skill-sec-${id}`);
+      if (!el) continue;
+      if (el.getBoundingClientRect().top - containerTop <= 96) current = id;
+    }
+    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 4) {
+      current = ids[ids.length - 1] ?? current;
+    }
+    setActiveAnchor(current);
+  }
   const breadcrumb = selected
     ? detailIsMd && detailRelativePath
       ? `技能 / MD-Skill / md-skills/${detailRelativePath}/`
@@ -861,23 +901,20 @@ export function SkillsPage() {
         </div>
       )}
 
-      <div className="skill-shell">
+      <div className="skill-shell" style={listPane.style}>
         {/* 左侧列表 */}
         <aside className="skill-list-pane">
           <div className="skill-list-header">
             <h1>技能</h1>
-            <p className="skill-sub">
-              MD-Skill 扫描入库后在此展示
-            </p>
             <div className="skill-list-actions">
               <button
                 className="btn btn-secondary btn-sm"
                 type="button"
                 disabled={scanning}
                 onClick={() => void syncMdSkills()}
-                title="触发后端重新扫描 md-skills/ 目录"
+                title="触发后端重新扫描 MD-skill/ 目录"
               >
-                {scanning ? <span className="spinner" style={{ width: 14, height: 14 }} /> : "⟳"} 同步 md-skills
+                {scanning ? <span className="spinner" style={{ width: 14, height: 14 }} /> : "⟳"} 同步 MD-Skill
               </button>
               <button className="btn btn-primary btn-sm" type="button" onClick={() => setCreateOpen(true)}>+ 新建技能</button>
             </div>
@@ -992,6 +1029,9 @@ export function SkillsPage() {
           </div>
         </aside>
 
+        {/* 左右分栏拖拽把手 */}
+        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+
         {/* 右侧详情 */}
         <section className="skill-detail-pane">
           {!selected ? (
@@ -1031,48 +1071,28 @@ export function SkillsPage() {
                 </div>
               </div>
 
-              <div className="skill-tabs">
-                {/* 页签按技能类型裁剪：scripts/load 为 MD-Skill 目录机制专属，标准技能不展示 */}
-                {(detailIsMd
-                  ? (["overview", "content", "scripts", "load", "tools", "versions"] as Tab[])
-                  : (["overview", "content", "tools", "versions"] as Tab[])
-                ).map((t) => (
-                  <button
-                    key={t}
-                    className={`skill-tab${tab === t ? " active" : ""}`}
-                    type="button"
-                    onClick={() => setTab(t)}
-                  >
-                    {t === "overview"
-                      ? "概览 · 元数据"
-                      : t === "content"
-                        ? "正文（操作手册）"
-                        : t === "scripts"
-                          ? "脚本 / 示例"
-                          : t === "load"
-                            ? "加载与生效"
-                            : t === "tools"
-                              ? "关联工具"
-                              : "版本"}
-                  </button>
-                ))}
-              </div>
-
-              <div className="skill-detail-body">
+              <div className="skill-detail-body" ref={detailBodyRef} onScroll={handleDetailScroll}>
                 {loadingDetail || loadingVersion ? (
                   <Loading />
-                ) : tab === "overview" ? (
+                ) : (
+                  <>
+                    {/* 顶部锚点导航：快捷跳转，非页签；内容区纵向一次展示全部 */}
+                    <nav className="skill-anchor-nav" aria-label="详情锚点导航">
+                      {detailAnchors.map((a) => (
+                        <button
+                          key={a.id}
+                          type="button"
+                          className={`skill-anchor-link${activeAnchor === a.id ? " active" : ""}`}
+                          onClick={() => scrollToSection(a.id)}
+                        >
+                          {a.label}
+                        </button>
+                      ))}
+                    </nav>
+
+                    {/* 基本信息 */}
+                    <section id="skill-sec-overview" className="skill-anchor-section">
                   <div className="tab-panel">
-                    {detailIsMd && (
-                      <div className="skill-alert skill-alert-violet">
-                        <span>◈</span>
-                        <span>
-                          <strong>MD-Skill 规范（社区版）</strong>：目录 <code>md-skills/&lt;name&gt;/SKILL.md</code> → 解析 YAML front-matter + 正文 →
-                          写入 <code>zr_skill(skill_type=MD_SKILL)</code> + <code>zr_skill_version</code>。
-                          前端不读磁盘，只展示已入库记录。执行走 SkillGateway，无浏览器跑脚本。
-                        </span>
-                      </div>
-                    )}
                     {!detailIsMd && sourceOf(selected, meId) === "official" && (
                       <div className="skill-alert skill-alert-info">
                         <span>ℹ</span>
@@ -1081,75 +1101,70 @@ export function SkillsPage() {
                     )}
 
                     <div className="skill-section">
-                      <h3>{detailIsMd ? "SKILL.md 元数据字段（front-matter）" : "技能配置"}</h3>
+                      <h3>{detailIsMd ? "详情" : "技能配置"}</h3>
                       <div className="skill-form-grid">
                         <div className="skill-field">
-                          <label>唯一标识（name）</label>
+                          <label>名称</label>
                           <input type="text" value={detail?.name ?? selected.name} disabled />
                         </div>
                         {detailIsMd && (
                           <div className="skill-field">
-                            <label>实现方式（implementation）</label>
+                            <label>实现方式</label>
                             <input type="text" value={implementationLabel(viewVersion?.implementation)} disabled />
                           </div>
                         )}
                         <div className="skill-field full">
-                          <label>描述（description）</label>
+                          <label>描述</label>
                           <textarea value={detail?.description ?? selected.description ?? ""} disabled rows={2} />
                         </div>
                         {detailIsMd ? (
                           <>
                             <div className="skill-field">
-                              <label>允许脚本（allow_scripts）</label>
+                              <label>允许脚本</label>
                               <input type="text" value={viewVersion?.allow_scripts != null ? (viewVersion.allow_scripts ? "是" : "否") : "—"} disabled />
-                              <div className="help">md_script 技能发布与执行的前置闸门</div>
                             </div>
                             <div className="skill-field">
-                              <label>文件内版本（declared_version）</label>
+                              <label>文件内版本</label>
                               <input type="text" value={viewVersion?.declared_version ?? "—"} disabled />
                             </div>
                           </>
                         ) : (
                           <div className="skill-field">
-                            <label>需要确认（requires_confirmation）</label>
+                            <label>是否开启审批</label>
                             <input type="text" value={viewVersion ? (viewVersion.requires_confirmation ? "是" : "否") : "—"} disabled />
-                            <div className="help">开启后任务执行到该技能会挂起，等待人工审批后继续</div>
                           </div>
                         )}
                         <div className="skill-field">
                           <label>来源目录</label>
                           <input
                             type="text"
-                            value={detailRelativePath ? `md-skills/${detailRelativePath}/` : "—（控制台创建，非目录来源）"}
+                            value={detailRelativePath ? `md-skills/${detailRelativePath}/` : "—（控制台创建）"}
                             disabled
                           />
                         </div>
                       </div>
                     </div>
-
+{ /*
                     {detailIsMd && (
                       <>
                         <div className="skill-section">
-                          <h3>params（JSON Schema · 工具入参）<span className="hint">input_schema</span></h3>
+                          <h3>输入参数<span className="hint"></span></h3>
                           <div className="skill-schema-box">{prettyJson(viewVersion?.input_schema ?? { type: "object", properties: {} })}</div>
-                          <p className="skill-field help" style={{ marginTop: "10px" }}>
-                            执行前按 schema 校验入参；注册制路径下作为工具入参描述。
-                          </p>
                         </div>
 
                         <div className="skill-section">
-                          <h3>output_schema（输出约束）</h3>
+                          <h3>输出参数</h3>
                           <div className="skill-schema-box">{prettyJson(viewVersion?.output_schema ?? { type: "object", properties: {} })}</div>
                         </div>
                       </>
                     )}
-
+                 
                     <div className="skill-section">
                       <h3>运行标志</h3>
                       <div className="skill-flag-grid">
                         <div className="skill-flag-card">
                           <div className="label">技能类型</div>
-                          <div className="value">{selected.skill_type === "MD_SKILL" ? "MD-Skill（目录导入）" : "标准技能"}</div>
+                          <div className="value">{selected.skill_type === "MD_SKILL" ? "MD-Skill" : "标准技能"}</div>
                         </div>
                         <div className="skill-flag-card">
                           <div className="label">当前版本状态</div>
@@ -1171,9 +1186,9 @@ export function SkillsPage() {
                         </div>
                       </div>
                     </div>
-
+                    
                     <div className="skill-section">
-                      <h3>权限要求 <span className="hint">required_permissions</span></h3>
+                      <h3>权限要求 <span className="hint"></span></h3>
                       {viewVersion && viewVersion.required_permissions.length > 0 ? (
                         <div className="skill-perm-list">
                           {viewVersion.required_permissions.map((p) => (
@@ -1183,15 +1198,17 @@ export function SkillsPage() {
                       ) : (
                         <div className="skill-readonly-banner">无额外权限要求。</div>
                       )}
-                      <p className="skill-field help" style={{ marginTop: "10px" }}>执行时由后端 PEP 与 SkillGateway 校验，前端不绕过。</p>
                     </div>
+                     */}
                   </div>
-                ) : tab === "content" ? (
+                    </section>
+
+                    {/* 操作手册 */}
+                    <section id="skill-sec-content" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="skill-section">
                       <h3 style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        正文 · 给模型看的操作手册
-                        <span className="hint">不可信输入，不能覆盖系统策略 / PEP</span>
+                        正文 · 操作手册
                         {!detailIsMd && !editing && viewVersion?.status === "DRAFT" && (
                           <button className="btn btn-secondary btn-sm" style={{ marginLeft: "auto" }} disabled={busy} onClick={() => openEditor(viewVersion)}>编辑</button>
                         )}
@@ -1213,10 +1230,9 @@ export function SkillsPage() {
                         <div className="skill-readonly-banner">暂无指令内容。</div>
                       )}
                     </div>
-                    <div className="skill-section">
+                    { /* <div className="skill-section">
                       <h3>
                         调用提示
-                        <span className="hint">orchestration_hint · 工具顺序与协作提示，发布时固化</span>
                       </h3>
                       {editing ? (
                         <textarea
@@ -1232,27 +1248,26 @@ export function SkillsPage() {
                           <pre style={{ margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{viewVersion.orchestration_hint}</pre>
                         </div>
                       ) : (
-                        <div className="skill-readonly-banner">暂无调用提示；绑定的工具顺序与角色会自动注入模型提示。</div>
+                        <div className="skill-readonly-banner">例如：先调用「查询账户」确认身份，再按需调用「创建工单」；不要重复查询。</div>
                       )}
                     </div>
+                    */}
                     {editing && (
                       <div className="skill-section">
                         <h3>版本参数</h3>
                         <div className="skill-form-grid">
                           <div className="skill-field full">
-                            <label>脚本源（script_source）</label>
                             <textarea
                               className="textarea"
                               style={{ fontFamily: "var(--mono)" }}
                               value={editScript}
                               onChange={(e) => setEditScript(e.target.value)}
                               disabled={busy}
-                              placeholder="scripts/summarize.py（留空则为纯指令模式）"
+                              placeholder="填入脚本路径则为脚本模式，留空为纯指令模式"
                             />
-                            <div className="help">填入脚本路径则为脚本模式，留空为纯指令模式</div>
                           </div>
                           <div className="skill-field full">
-                            <label>权限要求（每行一个）</label>
+                            <h3>权限要求</h3>
                             <textarea
                               className="textarea"
                               style={{ fontFamily: "var(--mono)", minHeight: 80 }}
@@ -1263,10 +1278,10 @@ export function SkillsPage() {
                             />
                           </div>
                           <div className="skill-field full">
-                            <label style={{ cursor: "pointer", display: "inline-flex", alignItems: "center" }}>
-                              <input type="checkbox" checked={editConfirm} onChange={(e) => setEditConfirm(e.target.checked)} disabled={busy} style={{ marginRight: 6 }} />
-                              需要用户确认（requires_confirmation）：执行到该技能时挂起，等待人工审批
-                            </label>
+                            <h3 style={{ cursor: "pointer", display: "inline-flex", alignItems: "center" }}>
+                              <input type="checkbox" checked={editConfirm} onChange={(e) => setEditConfirm(e.target.checked)} disabled={busy} style={{ marginRight: 6, minWidth: 24 ,minHeight: 24 }} />
+                              开启人工审批
+                            </h3>
                           </div>
                         </div>
                       </div>
@@ -1278,21 +1293,19 @@ export function SkillsPage() {
                         <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
                       </div>
                     ) : (
-                      <div className="skill-alert skill-alert-info">
-                        <span>ℹ</span>
-                        <span>
-                          <strong>注册制路径</strong>：正文作为该工具的「操作说明」注入工具描述（或按需一次性上下文）；模型据此调用；<code>params</code> 作入参 schema。
-                          <strong>脚本路径</strong>（allow_scripts: true）：受控子进程执行，stdout/stderr 回传并截断。
-                        </span>
+                      <div className="skill-alert skill-alert-warning">
                       </div>
                     )}
                   </div>
-                ) : tab === "scripts" ? (
+                    </section>
+
+                    {/* 脚本 / 示例（MD-Skill 目录机制专属） */}
+                    {detailIsMd && (
+                    <section id="skill-sec-scripts" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="skill-section">
                       <h3>
-                        scripts/
-                        <span className="hint">仅 allow_scripts: true · 扩展名白名单 .py</span>
+                        脚本文件
                       </h3>
                       {viewVersion?.script_files && viewVersion.script_files.length > 0 ? (
                         <div className="skill-file-list">
@@ -1311,112 +1324,17 @@ export function SkillsPage() {
                           当前技能 allow_scripts 为 false，或无 scripts/。示例与脚本不会自动执行。
                         </div>
                       )}
-                      <p className="skill-field help" style={{ marginTop: "12px" }}>
-                        资源限制 CPU/内存；工作目录锁定在 skill 目录；默认无网络；超时强杀；拒绝 <code>..</code> 与目录外读写。
-                        <strong>前端无「运行脚本」按钮。</strong>示例文件（examples/）不自动获得执行权限。
-                      </p>
-                    </div>
-                    <div className="skill-section">
-                      <h3>运行约束（展示用）</h3>
-                      <div className="skill-form-grid">
-                        <div className="skill-field">
-                          <label>网络</label>
-                          <input type="text" value="默认禁止" disabled />
-                        </div>
-                        <div className="skill-field">
-                          <label>工作目录</label>
-                          <input type="text" value="锁定在 skill 目录" disabled />
-                        </div>
-                        <div className="skill-field">
-                          <label>超时</label>
-                          <input type="text" value="超时强杀（后端 Runtime 限制）" disabled />
-                        </div>
-                        <div className="skill-field">
-                          <label>密钥</label>
-                          <input type="text" value="不向脚本暴露 Secret 明文" disabled />
-                        </div>
-                      </div>
                     </div>
                   </div>
-                ) : tab === "load" ? (
-                  <div className="tab-panel">
-                    <div className="skill-section">
-                      <h3>加载与生效</h3>
-                      {/* 机制说明默认折叠：使用方只需要关心状态与入口，规范细节留给需要的人展开 */}
-                      <details className="skill-doc-details">
-                        <summary>展开查看加载机制说明（面向管理员 / 开发者）</summary>
-                        <div className="skill-load-steps">
-                          <strong>后端</strong>
-                          <ol>
-                            <li>启动时扫描 <code>md-skills/</code>；watchdog 监听变更（新增/修改 ≤ 30 秒生效，不重启）</li>
-                            <li>解析 front-matter → 校验 → 写 <code>zr_skill(skill_type=MD_SKILL)</code> + <code>zr_skill_version</code></li>
-                            <li>默认状态为已启用；<strong>首次启用需管理员一次确认</strong></li>
-                            <li>绑定到智能体版本后，下一轮对话即可被模型看到</li>
-                          </ol>
-                          <strong style={{ display: "block", marginTop: 10 }}>写操作</strong>
-                          <ol>
-                            <li>改数据、发邮件等：requires_confirmation: true 或全局策略 → 单人确认 + 审计</li>
-                          </ol>
-                        </div>
-                      </details>
-                    </div>
-                    <div className="skill-section">
-                      <h3>
-                        当前扫描状态
-                        <button className="btn btn-secondary btn-sm" disabled={loadingScanStatus} onClick={() => void loadScanStatus()}>刷新</button>
-                      </h3>
-                      {loadingScanStatus ? (
-                        <Loading />
-                      ) : !scanStatus ? (
-                        <div className="skill-readonly-banner">暂无扫描记录，点击「同步 md-skills」或等待自动扫描。</div>
-                      ) : (
-                        <div className="skill-form-grid">
-                          <div className="skill-field">
-                            <label>watchdog 运行中</label>
-                            <input type="text" value={scanStatus.running ? "是（自动监听变更）" : "否（仅手动触发扫描）"} disabled />
-                          </div>
-                          <div className="skill-field">
-                            <label>最近一次扫描开始</label>
-                            <input type="text" value={fmtTime(scanStatus.last_started_at)} disabled />
-                          </div>
-                          <div className="skill-field">
-                            <label>最近一次扫描结束</label>
-                            <input type="text" value={fmtTime(scanStatus.last_finished_at)} disabled />
-                          </div>
-                          <div className="skill-field">
-                            <label>最近结果</label>
-                            <input
-                              type="text"
-                              value={
-                                scanStatus.last_result
-                                  ? `发现 ${scanStatus.last_result.discovered} · 新建草稿 ${scanStatus.last_result.drafts_created} · 无变化 ${scanStatus.last_result.unchanged} · 问题 ${scanStatus.last_result.issues.length}`
-                                  : "—"
-                              }
-                              disabled
-                            />
-                          </div>
-                          {scanStatus.last_error && (
-                            <div className="skill-field full">
-                              <label>最近错误</label>
-                              <div className="skill-alert skill-alert-error" style={{ marginBottom: 0 }}>
-                                <span>⚠</span>
-                                <span>{scanStatus.last_error}</span>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                    <div className="skill-alert skill-alert-warn">
-                      <span>⚠</span>
-                      <span>控制台「同步 md-skills」仅触发扫描；不能代替管理员首次确认启用。已发布版本不因磁盘修改而原地覆盖。</span>
-                    </div>
-                  </div>
-                ) : tab === "tools" ? (
+                    </section>
+                    )}
+
+                    {/* 关联工具 */}
+                    <section id="skill-sec-tools" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="skill-section">
                       <h3 className="skill-tools-head">
-                        <span>关联工具版本 <span className="hint">技能版本绑定工具版本</span></span>
+                        <span>关联工具<span className="hint"></span></span>
                         {canEditTools && (
                           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void openBindModal()}>绑定工具</button>
                         )}
@@ -1522,8 +1440,10 @@ export function SkillsPage() {
                       </p>
                     </div>
                   </div>
-                ) : (
-                  /* versions */
+                    </section>
+
+                    {/* 版本 */}
+                    <section id="skill-sec-versions" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="skill-section">
                       <h3
@@ -1534,7 +1454,7 @@ export function SkillsPage() {
                           gap: 8,
                         }}
                       >
-                        <span>技能版本（系统递增，非文件内随意 version）</span>
+                        <span>技能版本</span>
                         {sourceOf(selected, meId) !== "official" && !detailPending && (
                           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>
                             新建草稿
@@ -1578,11 +1498,64 @@ export function SkillsPage() {
                         </div>
                       )}
                     </div>
-                    <div className="skill-alert skill-alert-info">
-                      <span>ℹ</span>
-                      <span>已发布技能版本不可原地修改。磁盘文件变更应生成新草稿版本，不覆盖正在被智能体版本引用的版本。</span>
+                  </div>
+                    </section>
+
+                    {/* 加载状态（MD-Skill 目录机制专属，固定展示在最末） */}
+                    {detailIsMd && (
+                    <section id="skill-sec-load" className="skill-anchor-section">
+                  <div className="tab-panel">
+                    <div className="skill-section">
+                      <h3>
+                        当前扫描状态
+                        <button className="btn btn-secondary btn-sm" disabled={loadingScanStatus} onClick={() => void loadScanStatus()}>刷新</button>
+                      </h3>
+                      {loadingScanStatus ? (
+                        <Loading />
+                      ) : !scanStatus ? (
+                        <div className="skill-readonly-banner">暂无扫描记录，点击「同步 md-skills」或等待自动扫描。</div>
+                      ) : (
+                        <div className="skill-form-grid">
+                          <div className="skill-field">
+                            <label>是否运行中</label>
+                            <input type="text" value={scanStatus.running ? "是（自动监听变更）" : "否（仅手动触发扫描）"} disabled />
+                          </div>
+                          <div className="skill-field">
+                            <label>最近一次扫描开始</label>
+                            <input type="text" value={fmtTime(scanStatus.last_started_at)} disabled />
+                          </div>
+                          <div className="skill-field">
+                            <label>最近一次扫描结束</label>
+                            <input type="text" value={fmtTime(scanStatus.last_finished_at)} disabled />
+                          </div>
+                          <div className="skill-field">
+                            <label>最近结果</label>
+                            <input
+                              type="text"
+                              value={
+                                scanStatus.last_result
+                                  ? `发现 ${scanStatus.last_result.discovered} · 新建草稿 ${scanStatus.last_result.drafts_created} · 无变化 ${scanStatus.last_result.unchanged} · 问题 ${scanStatus.last_result.issues.length}`
+                                  : "—"
+                              }
+                              disabled
+                            />
+                          </div>
+                          {scanStatus.last_error && (
+                            <div className="skill-field full">
+                              <label>最近错误</label>
+                              <div className="skill-alert skill-alert-error" style={{ marginBottom: 0 }}>
+                                <span>⚠</span>
+                                <span>{scanStatus.last_error}</span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
+                    </section>
+                    )}
+                  </>
                 )}
               </div>
             </>

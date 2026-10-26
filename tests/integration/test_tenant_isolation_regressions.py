@@ -6,12 +6,21 @@ from uuid import uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, select
+from sqlalchemy import select
 
 from app.db.session import SessionLocal
 from app.kernel.agent.service import bootstrap_default_parent, set_default_parent
 from app.main import app
-from app.models import Agent, AgentVersion, AuthSession, Permission, Role, Tenant, User, role_permission, user_role
+from app.models import (
+    Agent,
+    AgentVersion,
+    Permission,
+    Role,
+    Tenant,
+    User,
+    role_permission,
+    user_role,
+)
 from app.security.passwords import hash_password
 
 

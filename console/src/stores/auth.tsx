@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { request, onAuthFailure, setAccessToken, setRefreshToken } from "../services/api";
+import { clearUiPreferences } from "../services/uiPreference";
 import type { UserInfo } from "../types";
 
 interface AuthContextValue {
@@ -50,6 +51,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setAccessToken(null);
       setRefreshToken(null);
+      // 会话级 UI 偏好（如分栏宽度）随登出清除，下次登录恢复默认
+      clearUiPreferences();
       setUser(null);
     }
   }, []);

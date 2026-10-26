@@ -4,7 +4,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Permission, Role, User, role_permission, user_role
+from app.models import Permission, role_permission, user_role
 
 
 class PermissionChecker:
@@ -23,7 +23,7 @@ class PermissionChecker:
             return not names
         found: set[str]
         if self._policy_source is not None:
-            found = set(getattr(self._policy_source, "user_permissions")(db, user_id=user_id))
+            found = set(self._policy_source.user_permissions(db, user_id=user_id))
         else:
             found = set(db.scalars(
                 select(Permission.name)

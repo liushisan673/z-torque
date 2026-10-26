@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Column, ForeignKey, JSON, String, Table, Text
+from sqlalchemy import JSON, Column, ForeignKey, String, Table, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import TenantModel

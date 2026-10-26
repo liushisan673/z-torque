@@ -1,6 +1,7 @@
 """add canonical task trigger message reference"""
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 from app.db.base import GUID
 
 revision = "4f8a1c2d6e90"

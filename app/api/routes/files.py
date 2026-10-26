@@ -14,10 +14,10 @@ from app.core.ids import new_uuid7
 from app.core.responses import success_response
 from app.core.servertime import iso_utc
 from app.db.session import get_db
-from app.models import Conversation, File, User
-from app.models.message import message_file
 from app.kernel.audit.service import record_audit
 from app.kernel.ports.object_store import ObjectStore
+from app.models import Conversation, File, User
+from app.models.message import message_file
 from app.services.file_parser import SUPPORTED, parse_file
 
 router = APIRouter(prefix="/files", tags=["files"])

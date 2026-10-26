@@ -1,7 +1,9 @@
 """Stage 07 connector and tool provenance schema."""
 from typing import Sequence
-from alembic import op
+
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "e7f8a9b0c1d2"
 down_revision: str | None = "c7f4a2b91d30"

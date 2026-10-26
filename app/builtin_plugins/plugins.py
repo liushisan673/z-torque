@@ -14,31 +14,39 @@ from typing import Any
 from pydantic import SecretStr
 from sqlalchemy import Engine
 
+from app.builtin_plugins.a2a_gateway import A2AGatewayPlugin
 from app.builtin_plugins.approval_provider import ApprovalProviderPlugin
+from app.builtin_plugins.audit_export_archive import AuditExportArchivePlugin
 from app.builtin_plugins.authz_provider import AuthzProviderPlugin
-from app.builtin_plugins.interceptor import InterceptorPlugin
-from app.builtin_plugins.manifest import PluginManifest, PluginSdk, validate_manifest
+from app.builtin_plugins.db_executors import ConnectorDbExecutor
+from app.builtin_plugins.executors import (
+    DbQueryExecutor,
+    HttpExecutor,
+    McpExecutor,
+    MdSkillScriptExecutor,
+    MockExecutor,
+)
 from app.builtin_plugins.identity_provider import IdentityProviderPlugin
+from app.builtin_plugins.interceptor import InterceptorPlugin
 from app.builtin_plugins.lock_provider import LockProviderPlugin
 from app.builtin_plugins.long_memory import LongMemoryPlugin
+from app.builtin_plugins.manifest import PluginManifest, PluginSdk, validate_manifest
+from app.builtin_plugins.mcp import StdioServerRegistry, make_http_connector
 from app.builtin_plugins.model_gateway import MockModelGateway, OpenAICompatibleGateway
-from app.kernel.plugin_guard import GuardedModelGateway, PluginGuardRegistry
 from app.builtin_plugins.model_selector import RuleBasedModelSelectorPlugin
 from app.builtin_plugins.notify_channel import NotifyChannelPlugin
 from app.builtin_plugins.object_store import ObjectStorePlugin
 from app.builtin_plugins.observability_sink import ObservabilitySinkPlugin
 from app.builtin_plugins.policy_source import PolicySourcePlugin
+from app.builtin_plugins.queue_driver import InMemoryQueueDriver
 from app.builtin_plugins.sandbox_driver import SandboxDriverPlugin
 from app.builtin_plugins.secret_provider import SecretProviderPlugin
 from app.builtin_plugins.short_memory import ShortMemoryPlugin
 from app.builtin_plugins.working_memory import WorkingMemoryPlugin
+from app.kernel.plugin_guard import GuardedModelGateway, PluginGuardRegistry
 from app.kernel.ports.specs import PORT_SPEC_BY_NAME
 from app.kernel.registry.port_registry import AssemblyError
 from app.kernel.skill_gateway import SkillGateway
-from app.builtin_plugins.db_executors import ConnectorDbExecutor
-from app.builtin_plugins.executors import DbQueryExecutor, HttpExecutor, MdSkillScriptExecutor, McpExecutor, MockExecutor
-from app.builtin_plugins.mcp import StdioServerRegistry, make_http_connector
-from app.builtin_plugins.queue_driver import InMemoryQueueDriver
 
 logger = logging.getLogger("z_torque.plugins")
 
@@ -160,7 +168,7 @@ class QueueDriverPlugin:
         sdk.register_port("queue.driver", InMemoryQueueDriver, label="builtin_inmemory_queue")
 
 
-BUILTIN_PLUGINS: tuple[type, ...] = (PolicySourcePlugin, ObservabilitySinkPlugin, InterceptorPlugin, NotifyChannelPlugin, ApprovalProviderPlugin, IdentityProviderPlugin, AuthzProviderPlugin, SecretProviderPlugin, SandboxDriverPlugin, ObjectStorePlugin, WorkingMemoryPlugin, ShortMemoryPlugin, LongMemoryPlugin, ModelProviderPlugin, RuleBasedModelSelectorPlugin, SkillExecutorPlugin, McpConnectorPlugin, QueueDriverPlugin, LockProviderPlugin)
+BUILTIN_PLUGINS: tuple[type, ...] = (PolicySourcePlugin, ObservabilitySinkPlugin, InterceptorPlugin, NotifyChannelPlugin, ApprovalProviderPlugin, IdentityProviderPlugin, AuthzProviderPlugin, SecretProviderPlugin, SandboxDriverPlugin, ObjectStorePlugin, WorkingMemoryPlugin, ShortMemoryPlugin, LongMemoryPlugin, ModelProviderPlugin, RuleBasedModelSelectorPlugin, SkillExecutorPlugin, McpConnectorPlugin, QueueDriverPlugin, LockProviderPlugin, AuditExportArchivePlugin, A2AGatewayPlugin)
 
 _KNOWN_PORTS = set(PORT_SPEC_BY_NAME)
 for _plugin_cls in BUILTIN_PLUGINS:

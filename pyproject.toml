@@ -30,7 +30,9 @@ build-backend = "setuptools.build_meta"
 include = ["app*"]
 
 [project.optional-dependencies]
-test = ["pytest==8.3.4", "pytest-asyncio==0.25.3", "httpx==0.28.1"]
+test = ["pytest==8.3.4", "pytest-asyncio==0.25.3", "httpx==0.28.1", "pg8000==1.31.5"]
+# 静态门禁工具单独成组：CI 的 python-static job 用它，运行时不依赖
+lint = ["ruff==0.17.2"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -38,3 +40,37 @@ pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
+target-version = "py312"
+# 只扫源码，不扫构建产物与本地数据目录
+extend-exclude = ["data", "console", "md-skills", ".venv", "docs"]
+
+[tool.ruff.lint]
+# 门禁口径（2026-10-26 定版）：只收「真实缺陷」类规则，不含纯风格偏好。
+#   F      pyflakes：未定义名 / 未使用导入与变量 / 重复定义
+#   E4/E7/E9  pycodestyle 的语法与缩进类（不含 E501 行长，行长交给格式化）
+#   I      isort：导入分区与排序
+#   B      flake8-bugbear：可疑逻辑（可变默认值、except 裸 raise、无用表达式等）
+#   ASYNC  flake8-async：异步函数里误用阻塞调用
+# ignore 清单是「本项目明确接受的写法」，每条都有原因，不得随手扩充：
+#   E402  按需延迟导入（conftest 必须先设环境变量再 import app.*）
+#   E701/E702  `if x: return`、`with a: b()` 这类紧凑单行，测试与装配代码里大量使用
+#   B008  FastAPI 依赖注入惯例：`Depends(...)`/`Query(...)` 必须写在默认参数位
+#   B904  except 内 `raise ApiError(...)` 不带 from：错误链由 ApiError 自己承载上下文
+#   B905  zip() 未显式 strict：两侧长度由调用点自行保证，加 strict 会改变既有行为
+#   B017  `pytest.raises(Exception)`：少数用例专门断言「任意异常都要被兜住」
+#   ASYNC109  `async def` 带 timeout 参数：本项目的 sandbox/skill 接口签名由契约固定
+select = ["F", "E4", "E7", "E9", "I", "B", "ASYNC"]
+ignore = ["E402", "E701", "E702", "B008", "B904", "B905", "B017", "ASYNC109"]
+
+[tool.ruff.lint.isort]
+# 项目自有包在 app/ 下，第三方在 site-packages：分开成独立分区
+known-first-party = ["app", "tests", "scripts"]
+
+[tool.ruff.lint.per-file-ignores]
+# 迁移脚本里的 `x = op.create_table(...)` 等是 alembic DSL，F841 会误报
+"alembic/versions/*" = ["F841"]
+# 内核 Port 契约文件已冻结（改内容=改契约）：不为了 import 排序去格式化它们，
+# 因此这里豁免 I001。新增契约文件不在此列，仍受门禁约束。
+"app/kernel/ports/__init__.py" = ["I001"]
+"app/kernel/ports/model_selector.py" = ["I001"]
+"app/kernel/ports/specs.py" = ["I001"]

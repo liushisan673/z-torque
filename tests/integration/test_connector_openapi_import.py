@@ -8,12 +8,10 @@
 
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select
 
 from app.db.session import SessionLocal
 from app.main import app
@@ -28,6 +26,7 @@ from app.models import (
     user_role,
 )
 from app.security.passwords import hash_password
+from tests.support.ddl import fk_off, fk_on
 
 CONNECTORS = "/api/z-torque/connectors"
 # 真实 AsyncClient：monkeypatch 之后 httpx.AsyncClient 已变成 spy，必须先抓引用避免递归
@@ -74,7 +73,7 @@ SPEC = {
 def baseline():
     with SessionLocal.begin() as db:
         # 关闭 FK 校验：清理顺序不必精确匹配依赖图（与其它集成测试一致）
-        db.execute(text("PRAGMA foreign_keys=OFF"))
+        fk_off(db)
         db.execute(delete(user_role))
         db.execute(delete(role_permission))
         db.execute(delete(Permission))
@@ -83,7 +82,7 @@ def baseline():
         db.execute(delete(User))
         db.execute(delete(Role))
         db.execute(delete(Tenant))
-        db.execute(text("PRAGMA foreign_keys=ON"))
+        fk_on(db)
 
         tenant = Tenant(name="conn-tenant")
         db.add(tenant)
@@ -350,7 +349,6 @@ async def test_reconfigure_connector_tool_publishes_new_version():
             },
         )
         assert reg.status_code == 200, reg.text
-        v1 = reg.json()["data"]["tool_version_id"]
         tool_id = reg.json()["data"]["tool_id"]
 
         resp = await client.post(

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
@@ -15,9 +15,12 @@ import { SecretRefInput } from "../components/SecretRefInput";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { useAuth } from "../stores/auth";
 
 const API = "/api/z-torque/connectors";
+// 已注册工具列表分页大小（客户端分页）
+const TOOL_PAGE_SIZE = 10;
 
 // 选中记忆：跳转页面后返回时恢复上次选中的连接器（sessionStorage 按标签页隔离）
 const SELECTED_KEY = "zt.connectors.selectedId";
@@ -36,7 +39,14 @@ function splitTags(text: string): string[] {
     .slice(0, 20);
 }
 
-type Tab = "overview" | "config" | "auth" | "ops" | "test";
+// 详情区锚点配置：无页签，详情一次纵向展示全部，顶部锚点仅做快捷跳转
+const DETAIL_ANCHORS = [
+  { id: "overview", label: "概览" },
+  { id: "test", label: "健康检查" },
+  { id: "config", label: "连接配置" },
+  { id: "auth", label: "认证与密钥" },
+  { id: "ops", label: "工具" },
+];
 type Filter = "all" | "REST" | "DB" | "MCP";
 
 // 连接类型展示信息（对齐 connector.html 的 tag 配色体系）
@@ -169,18 +179,31 @@ export function ConnectorsPage() {
   const [detail, setDetail] = useState<Connector | null>(null);
   const [tools, setTools] = useState<ConnectorToolLink[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  // 已注册工具筛选与分页：关键字匹配名称/说明/标签，类型下拉筛选，每页 10 条
+  const [toolKeyword, setToolKeyword] = useState("");
+  const [toolType, setToolType] = useState("all");
+  const [toolPage, setToolPage] = useState(1);
 
   const [filter, setFilter] = useState<Filter>("all");
   const [keyword, setKeyword] = useState("");
-  const [tab, setTab] = useState<Tab>("overview");
+  // 左右分栏宽度：拖拽把手调整，会话内保持，退出登录恢复默认
+  const listPane = usePaneWidth("connector", "--connector-list-w");
+  // 顶部锚点导航：当前高亮区块；详情内容纵向滚动一次展示全部（无页签）
+  const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
+  const detailBodyRef = useRef<HTMLDivElement | null>(null);
 
   // 编辑态（名称/描述 + 当前类型 config 字段 + 认证字段）
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
+  // 目标安全策略编辑态（REST）：回显连接器当前 target_policy.allow_private_network
+  const [editAllowPrivate, setEditAllowPrivate] = useState(false);
   const [editConfig, setEditConfig] = useState<Record<string, string>>({});
   // REST 凭据头编辑行（连接器级认证头：覆盖该连接器全部导入工具的同名头模板）
   const [authHeadersRows, setAuthHeadersRows] = useState<{ key: string; value: string }[]>([]);
+  // 凭据头编辑弹窗：打开时快照当前行，取消时还原
+  const [headersOpen, setHeadersOpen] = useState(false);
+  const [headersSnapshot, setHeadersSnapshot] = useState<{ key: string; value: string }[]>([]);
 
   // 健康检查结果（本会话内保留，按连接 id 记忆）
   const [testResults, setTestResults] = useState<Record<string, ConnectorTestResult>>({});
@@ -207,6 +230,8 @@ export function ConnectorsPage() {
   const [createDesc, setCreateDesc] = useState("");
   const [createTarget, setCreateTarget] = useState("");
   const [createSecret, setCreateSecret] = useState("");
+  // 目标安全策略（REST）：内网/明文 http 目标需显式放行（后端 fail-closed，未声明即拦截）
+  const [createAllowPrivate, setCreateAllowPrivate] = useState(false);
   // 数据库连接向导字段（类型为 DB 时显示）
   const [createDriver, setCreateDriver] = useState("postgresql");
   const [createHost, setCreateHost] = useState("");
@@ -300,14 +325,69 @@ export function ConnectorsPage() {
     }
   }, []);
 
+  // 已注册工具：类型选项（按当前列表实际出现的类型生成）与筛选/分页派生
+  const toolTypeOptions = useMemo(() => {
+    const set = new Set<string>();
+    tools.forEach((t) => { if (t.tool_type) set.add(t.tool_type); });
+    return [...set];
+  }, [tools]);
+  const filteredTools = useMemo(() => {
+    const kw = toolKeyword.trim().toLowerCase();
+    return tools.filter((t) => {
+      if (toolType !== "all" && (t.tool_type ?? "") !== toolType) return false;
+      if (!kw) return true;
+      const hay = [t.name, t.external_name, t.description, ...(t.tags ?? [])]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(kw);
+    });
+  }, [tools, toolKeyword, toolType]);
+  const toolTotalPages = Math.max(1, Math.ceil(filteredTools.length / TOOL_PAGE_SIZE));
+  // 筛选结果变少时页码自动收敛，避免停留在空页
+  const toolPageSafe = Math.min(toolPage, toolTotalPages);
+  const pagedTools = useMemo(
+    () => filteredTools.slice((toolPageSafe - 1) * TOOL_PAGE_SIZE, toolPageSafe * TOOL_PAGE_SIZE),
+    [filteredTools, toolPageSafe],
+  );
+
+  // 锚点跳转：平滑滚动到对应区块（CSS scroll-margin-top 预留吸顶导航高度）
+  function scrollToSection(id: string) {
+    setActiveAnchor(id);
+    document.getElementById(`connector-sec-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // 滚动跟随：按区块相对滚动容器顶部的位置高亮当前锚点，触底时强制高亮最后一项
+  function handleDetailScroll() {
+    const container = detailBodyRef.current;
+    if (!container) return;
+    const ids = DETAIL_ANCHORS.map((a) => a.id);
+    const containerTop = container.getBoundingClientRect().top;
+    let current = ids[0] ?? null;
+    for (const id of ids) {
+      const el = document.getElementById(`connector-sec-${id}`);
+      if (!el) continue;
+      if (el.getBoundingClientRect().top - containerTop <= 96) current = id;
+    }
+    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 4) {
+      current = ids[ids.length - 1] ?? current;
+    }
+    setActiveAnchor(current);
+  }
+
   async function openDetail(c: Connector) {
     setSelectedId(c.id);
     writeSelectedId(SELECTED_KEY, c.id);
     setDetail(c);
-    setTab("overview");
+    setActiveAnchor("overview");
+    if (detailBodyRef.current) detailBodyRef.current.scrollTop = 0;
     setEditing(false);
     setTestFailure(null);
     setDiscovered(null);
+    // 切换连接器时重置已注册工具的筛选与页码，避免残留上一连接的过滤条件
+    setToolKeyword("");
+    setToolType("all");
+    setToolPage(1);
     setLoadingDetail(true);
     setError(null);
     try {
@@ -315,6 +395,7 @@ export function ConnectorsPage() {
       setDetail(d);
       setEditName(d.name);
       setEditDesc(d.description ?? "");
+      setEditAllowPrivate(Boolean(d.target_policy?.allow_private_network));
       setEditConfig(initEditConfig(d));
       setAuthHeadersRows(initAuthHeaders(d));
       setTableSelection(initTableSelection(d));
@@ -429,6 +510,8 @@ export function ConnectorsPage() {
           name: editName.trim(),
           description: editDesc.trim() || null,
           config: buildConfig(),
+          // 目标安全策略：连接器表独立字段（非 config 内），执行期实时叠加、保存即生效
+          ...(detail.connector_type === "REST" ? { target_policy: { allow_private_network: editAllowPrivate } } : {}),
         },
       });
       setDetail(d);
@@ -633,6 +716,8 @@ export function ConnectorsPage() {
           description: createDesc.trim() || null,
           config,
           secret_ref: createSecret.trim() || null,
+          // REST 内网/明文目标需显式放行（fail-closed）
+          ...(createType === "REST" ? { target_policy: { allow_private_network: createAllowPrivate } } : {}),
         },
       });
       setCreateOpen(false);
@@ -641,6 +726,7 @@ export function ConnectorsPage() {
       setCreateDesc("");
       setCreateTarget("");
       setCreateSecret("");
+      setCreateAllowPrivate(false);
       setCreateHost("");
       setCreatePort("5432");
       setCreateDbName("");
@@ -650,12 +736,12 @@ export function ConnectorsPage() {
       toast("success", "连接已创建");
       if (d.connector_type === "DB") {
         // 数据库连接创建后直接进入健康检查，探测表清单供勾选
-        setTab("test");
+        scrollToSection("test");
         await runTest(d);
       }
       if (d.connector_type === "MCP") {
         // MCP 连接创建后直接进入健康检查，真实握手（initialize + tools/list）
-        setTab("test");
+        scrollToSection("test");
         await runTest(d);
       }
     } catch (err) {
@@ -1042,7 +1128,7 @@ export function ConnectorsPage() {
         </div>
       )}
 
-      <div className="connector-shell">
+      <div className="connector-shell" style={listPane.style}>
         {/* 左侧列表 */}
         <aside className="connector-list-pane">
           <div className="connector-list-header">
@@ -1115,6 +1201,9 @@ export function ConnectorsPage() {
           </div>
         </aside>
 
+        {/* 左右分栏拖拽把手 */}
+        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+
         {/* 右侧详情 */}
         <section className="connector-detail-pane">
           {!selected ? (
@@ -1144,7 +1233,7 @@ export function ConnectorsPage() {
                   </div>
                   <div className="connector-detail-actions">
                     {enabled && (
-                      <button className="btn btn-primary" disabled={busy} onClick={() => { setTab("test"); void runTest(); }}>测试连接</button>
+                      <button className="btn btn-primary" disabled={busy} onClick={() => { scrollToSection("test"); void runTest(); }}>测试连接</button>
                     )}
                     {canManage && !editing && selected.status !== "ARCHIVED" && (
                       <button className="btn btn-secondary" disabled={busy} onClick={() => setEditing(true)}>编辑</button>
@@ -1186,31 +1275,25 @@ export function ConnectorsPage() {
                 </div>
               </div>
 
-              <div className="connector-tabs">
-                {(["overview", "config", "auth", "ops", "test"] as Tab[]).map((t) => (
-                  <button
-                    key={t}
-                    className={`connector-tab${tab === t ? " active" : ""}`}
-                    type="button"
-                    onClick={() => setTab(t)}
-                  >
-                    {t === "overview" ? "概览" : t === "config" ? "连接配置" : t === "auth" ? "认证与密钥" : t === "ops" ? "工具" : "健康检查"}
-                  </button>
-                ))}
-              </div>
-
-              <div className="connector-detail-body">
+              <div className="connector-detail-body" ref={detailBodyRef} onScroll={handleDetailScroll}>
                 {loadingDetail ? (
                   <Loading />
-                ) : tab === "overview" ? (
+                ) : (
+                  <>
+                  <nav className="skill-anchor-nav" aria-label="详情锚点导航">
+                    {DETAIL_ANCHORS.map((a) => (
+                      <button
+                        key={a.id}
+                        type="button"
+                        className={`skill-anchor-link${activeAnchor === a.id ? " active" : ""}`}
+                        onClick={() => scrollToSection(a.id)}
+                      >
+                        {a.label}
+                      </button>
+                    ))}
+                  </nav>
+                  <section id="connector-sec-overview" className="skill-anchor-section">
                   <div className="tab-panel">
-                    <div className="connector-alert connector-alert-info">
-                      <span>ℹ</span>
-                      <span>
-                        连接由管理员配置。前端不得绕过连接器与 SkillGateway 直连目标系统。数据库连接必须为<strong>只读</strong>并限制表与查询。敏感项只引用 Secret URI。
-                      </span>
-                    </div>
-
                     <div className="connector-section">
                       <h3>基本信息</h3>
                       <div className="connector-form-grid">
@@ -1232,7 +1315,6 @@ export function ConnectorsPage() {
                             <option>启用</option>
                             <option>已停用</option>
                           </select>
-                          <div className="help">启停请使用右上角操作按钮</div>
                         </div>
                         <div className="connector-field">
                           <label>最近检查</label>
@@ -1267,360 +1349,9 @@ export function ConnectorsPage() {
 
                     {editingFields && editBar()}
                   </div>
-                ) : tab === "config" ? (
-                  <div className="tab-panel">
-                    {selected.connector_type === "REST" && (
-                      <div className="connector-section">
-                        <h3>REST 目标 <span className="hint">须通过后端策略校验</span></h3>
-                        <div className="connector-form-grid">
-                          {fields.map((f) => (
-                            <div key={f.key} className={`connector-field${f.full ? " full" : ""}`}>
-                              <label>{f.label}</label>
-                              {f.kind === "select" ? (
-                                <select
-                                  value={editConfig[f.key] ?? ""}
-                                  disabled={!editingFields}
-                                  onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
-                                >
-                                  {(f.options ?? []).map((o) => <option key={o}>{o}</option>)}
-                                </select>
-                              ) : (
-                                <input
-                                  type={f.kind === "number" ? "number" : "text"}
-                                  value={editConfig[f.key] ?? ""}
-                                  disabled={!editingFields}
-                                  placeholder={f.hint ?? ""}
-                                  onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
-                                />
-                              )}
-                              {f.hint && <div className="help">{f.hint}</div>}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {selected.connector_type === "DB" && (
-                      <div className="connector-section">
-                        <h3>只读数据库 <span className="hint">必须只读 · 限制表与查询</span></h3>
-                        <div className="connector-form-grid">
-                          {fields.map((f) => (
-                            <div key={f.key} className={`connector-field${f.full ? " full" : ""}`}>
-                              <label>{f.label}</label>
-                              <input
-                                type="text"
-                                value={editConfig[f.key] ?? ""}
-                                disabled={!editingFields || f.disabled}
-                                placeholder={f.hint ?? ""}
-                                onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
-                              />
-                              {f.hint && <div className="help">{f.hint}</div>}
-                            </div>
-                          ))}
-                        </div>
-                        <div className="connector-alert connector-alert-warn" style={{ marginTop: 12, marginBottom: 0 }}>
-                          <span>⚠</span>
-                          <span>生产默认拒绝写入账号与无表限制配置。凭证走 Secret URI。</span>
-                        </div>
-                      </div>
-                    )}
-                    {selected.connector_type === "MCP" && (
-                      <div className="connector-section">
-                        <h3>MCP 传输 <span className="hint">JSON-RPC 2.0 · tools/list · tools/call</span></h3>
-                        <div className="connector-form-grid">
-                          {fields.map((f) => (
-                            <div key={f.key} className={`connector-field${f.full ? " full" : ""}`}>
-                              <label>{f.label}</label>
-                              {f.kind === "select" ? (
-                                <select
-                                  value={editConfig[f.key] ?? ""}
-                                  disabled={!editingFields}
-                                  onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
-                                >
-                                  {(f.options ?? []).map((o) => <option key={o}>{o}</option>)}
-                                </select>
-                              ) : (
-                                <input
-                                  type={f.kind === "number" ? "number" : "text"}
-                                  value={editConfig[f.key] ?? ""}
-                                  disabled={!editingFields}
-                                  placeholder={f.hint ?? ""}
-                                  onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
-                                />
-                              )}
-                              {f.hint && <div className="help">{f.hint}</div>}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    {editingFields && editBar()}
-                  </div>
-                ) : tab === "auth" ? (
-                  <div className="tab-panel">
-                    <div className="connector-alert connector-alert-warn">
-                      <span>⚠</span>
-                      <span>支持 API Key / Bearer、Basic，以及管理员明确允许的匿名连接。凭证只存 Secret 引用，页面不展示明文。</span>
-                    </div>
-                    <div className="connector-section">
-                      <h3>认证模式</h3>
-                      <div className="connector-form-grid">
-                        <div className="connector-field">
-                          <label>模式</label>
-                          <select
-                            value={editConfig["auth_mode"] ?? AUTH_MODES[0]}
-                            disabled={!editingFields}
-                            onChange={(e) => setEditConfig((p) => ({ ...p, auth_mode: e.target.value }))}
-                          >
-                            {AUTH_MODES.map((m) => <option key={m} value={m}>{authModeLabel(m)}</option>)}
-                          </select>
-                        </div>
-                        <div className="connector-field">
-                          <label>请求头名（如适用）</label>
-                          <input
-                            type="text"
-                            value={editConfig["auth_header"] ?? "Authorization"}
-                            disabled={!editingFields}
-                            onChange={(e) => setEditConfig((p) => ({ ...p, auth_header: e.target.value }))}
-                          />
-                        </div>
-                      </div>
-                      <div style={{ marginTop: 16 }}>
-                        <label style={{ fontSize: 12, fontWeight: 500, color: "var(--text-muted)", display: "block", marginBottom: 8 }}>凭证</label>
-                        <div className="connector-secret-row">
-                          <div className="secret-status">
-                            <span className={`connector-tag ${selected.secret_configured ? "connector-tag-secret" : "connector-tag-off"}`}>
-                              {selected.secret_configured ? "已配置" : "未配置"}
-                            </span>
-                            <code>{selected.secret_configured ? selected.secret_ref_masked ?? "已配置（仅引用，不展示明文）" : "—"}</code>
-                          </div>
-                          {canManage && (
-                            <button className="btn btn-secondary" type="button" onClick={() => { setSecretValue(""); setSecretOpen(true); }}>更换凭证</button>
-                          )}
-                        </div>
-                      </div>
-                      {detail?.connector_type === "REST" && (
-                        <div style={{ marginTop: 16 }}>
-                          <label style={{ fontSize: 12, fontWeight: 500, color: "var(--text-muted)", display: "block", marginBottom: 8 }}>
-                            凭据头（覆盖导入工具的同名头模板，一次配置对该连接器全部工具生效）
-                          </label>
-                          {editingFields && authHeadersRows.map((row, idx) => (
-                            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
-                              <input
-                                type="text"
-                                placeholder="头名（如 CSRF-TOKEN）"
-                                style={{ flex: 1 }}
-                                value={row.key}
-                                onChange={(e) => setAuthHeadersRows((p) => p.map((r, i) => (i === idx ? { ...r, key: e.target.value } : r)))}
-                              />
-                              <input
-                                type="text"
-                                placeholder={row.value.startsWith("secret://") ? "已加密保存（输入新值可更换）" : "值（保存时自动加密，不落明文）"}
-                                style={{ flex: 2 }}
-                                value={row.value}
-                                onChange={(e) => setAuthHeadersRows((p) => p.map((r, i) => (i === idx ? { ...r, value: e.target.value } : r)))}
-                              />
-                              <button className="btn btn-secondary" type="button" onClick={() => setAuthHeadersRows((p) => p.filter((_, i) => i !== idx))}>删除</button>
-                            </div>
-                          ))}
-                          {editingFields && (
-                            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                              <button className="btn btn-secondary" type="button" onClick={() => setAuthHeadersRows((p) => [...p, { key: "", value: "" }])}>添加凭据头</button>
-                              <span className="hint">明文保存后自动转为加密引用；头名与导入工具 headers 模板同名时执行期自动覆盖</span>
-                            </div>
-                          )}
-                          {!editingFields && authHeadersRows.length === 0 && <span className="hint">未配置（进入编辑可添加）</span>}
-                        </div>
-                      )}
-                    </div>
-                    {editingFields && editBar()}
-                  </div>
-                ) : tab === "ops" ? (
-                  <div className="tab-panel">
-                    <div className="connector-section">
-                      <h3>
-                        已注册工具
-                        <span className="hint">登记后供技能绑定调用</span>
-                      </h3>
-                      <div className="skill-alert skill-alert-info" style={{ marginBottom: 12 }}>
-                        <span>ℹ</span>
-                        <span>
-                          仅 <strong>GET / POST</strong> 方法的接口可注册为工具并被执行：导入时自动跳过、
-                          手动注册直接报错；存量同类工具已归档（列表中标「不支持执行」，不会被技能调用）。
-                        </span>
-                      </div>
-                      {tools.length === 0 ? (
-                        <div className="skill-readonly-banner">当前连接尚未注册任何工具。</div>
-                      ) : (
-                        <table className="connector-op-table">
-                          <thead>
-                            <tr>
-                              <th>工具</th>
-                              <th>方法</th>
-                              <th>类型</th>
-                              <th>说明</th>
-                              <th>标签</th>
-                              <th>授权</th>
-                              {canManage && <th>操作</th>}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {tools.map((t) => (
-                              <tr key={t.id}>
-                                <td className="op-name">
-                                  {t.name ?? t.external_name ?? t.id}
-                                  {t.is_business_tool && <span className="skill-tag skill-tag-mine">业务封装</span>}
-                                  {t.status === "ARCHIVED" && <span className="connector-tag connector-tag-warn">已归档</span>}
-                                </td>
-                                <td>
-                                  {/* HTTP 方法显式展示：避免把 POST 的 batchDelete/update 误认为被拦截的 DELETE 方法 */}
-                                  {t.method ? (
-                                    ["GET", "POST"].includes(t.method) ? (
-                                      <span className="connector-tag connector-tag-ok">{t.method}</span>
-                                    ) : (
-                                      <span className="connector-tag connector-tag-warn">{t.method} · 不支持执行</span>
-                                    )
-                                  ) : (
-                                    "—"
-                                  )}
-                                </td>
-                                <td>{toolTypeLabel(t.tool_type)}{t.published_version_number ? <span className="connector-tool-ver">v{t.published_version_number}</span> : null}</td>
-                                <td>{t.description ?? "—"}</td>
-                                <td>
-                                  <div className="connector-tool-tags">
-                                    {(t.tags ?? []).length === 0
-                                      ? "—"
-                                      : (t.tags ?? []).map((tag) => (
-                                          <span key={tag} className="skill-tag skill-tag-neutral">{tag}</span>
-                                        ))}
-                                  </div>
-                                </td>
-                                <td>
-                                  <span className={`connector-tag ${t.approved ? "connector-tag-ok" : "connector-tag-warn"}`}>
-                                    {t.approved ? "已注册" : "待授权"}
-                                  </span>
-                                </td>
-                                {canManage && (
-                                  <td className="connector-tool-op">
-                                    <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => openToolMeta(t)}>
-                                      编辑标签
-                                    </button>
-                                    <button
-                                      className="btn btn-ghost btn-sm"
-                                      disabled={busy || editLoading || !t.published_version_id}
-                                      onClick={() => (t.tool_type === "COMPOSITE" ? void openCompositeEdit(t) : void openEditTool(t))}
-                                      title="生成新发布版本，历史版本与既有 Skill 绑定不受影响"
-                                    >
-                                      更新配置
-                                    </button>
-                                    {t.status === "ARCHIVED" ? (
-                                      <button
-                                        className="skill-btn-danger-outline btn-sm"
-                                        disabled={busy}
-                                        onClick={() => setConfirmToolDelete({ id: t.id, name: t.name ?? t.external_name ?? t.id })}
-                                      >
-                                        删除
-                                      </button>
-                                    ) : (
-                                      <button
-                                        className="skill-btn-danger-outline btn-sm"
-                                        disabled={busy}
-                                        onClick={() => setConfirmToolArchive({ id: t.id, name: t.name ?? t.external_name ?? t.id })}
-                                      >
-                                        归档
-                                      </button>
-                                    )}
-                                  </td>
-                                )}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                      {canManage && enabled && (
-                        <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setRegType(selected.connector_type === "DB" ? "DB_SQL" : "HTTP"); setRegOpen(true); }}>登记新工具</button>
-                          <button className="btn btn-secondary btn-sm" disabled={busy || compositeCandidates.length === 0} onClick={openComposite} title="把本连接器多个已发布工具组合为一个业务工具（线性、无分支）">
-                            登记业务封装工具
-                          </button>
-                          {selected.connector_type === "REST" && (
-                            <button
-                              className="btn btn-secondary btn-sm"
-                              disabled={busy}
-                              onClick={() => { setOaResult(null); setOaOpen(true); }}
-                              title="上传或拉取 OpenAPI 3.x 文档，一次性把 N 个接口登记为工具"
-                            >
-                              从 OpenAPI 导入
-                            </button>
-                          )}
-                          {selected.connector_type === "MCP" && (
-                            <button className="btn btn-secondary btn-sm" disabled={busy || discovering} onClick={() => void runDiscover()}>
-                              {discovering ? "发现中…" : "从 MCP 服务发现工具"}
-                            </button>
-                          )}
-                          {selected.connector_type === "MCP" && discovered !== null && (
-                            <button
-                              className="btn btn-primary btn-sm"
-                              disabled={busy || discovering || discovered.every((t) => registeredNames.has(t.name.trim()))}
-                              onClick={() => void registerAllDiscovered()}
-                              title="把发现结果中尚未登记的工具按默认名称一次性注册"
-                            >
-                              批量登记未注册工具（{discovered.filter((t) => !registeredNames.has(t.name.trim())).length}）
-                            </button>
-                          )}
-                        </div>
-                      )}
-                      {/* MCP 发现结果：发现 ≠ 已授权，注册后才能被 Skill 绑定调用 */}
-                      {selected.connector_type === "MCP" && discovered !== null && (
-                        <div className="connector-section" style={{ marginTop: 12, marginBottom: 0 }}>
-                          <h3>发现结果 <span className="hint">来自 MCP 服务 tools/list · 需注册后才可用</span></h3>
-                          {discovered.length === 0 ? (
-                            <div className="skill-readonly-banner">MCP 服务未返回任何工具。</div>
-                          ) : (
-                            <table className="connector-op-table">
-                              <thead>
-                                <tr>
-                                  <th>工具</th>
-                                  <th>说明</th>
-                                  {canManage && enabled && <th>操作</th>}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {discovered.map((t) => {
-                                  const already = registeredNames.has(t.name.trim());
-                                  return (
-                                    <tr key={t.name}>
-                                      <td className="op-name">{t.name}</td>
-                                      <td>{t.description || "—"}</td>
-                                      {canManage && enabled && (
-                                        <td>
-                                          {already ? (
-                                            <span className="connector-tag connector-tag-ok">已登记</span>
-                                          ) : (
-                                            <button
-                                              className="btn btn-secondary btn-sm"
-                                              disabled={busy}
-                                              onClick={() => { setRegType("MCP"); setRegName(t.name); setRegExternal(t.name); setRegDesc(t.description); setRegOpen(true); }}
-                                            >
-                                              登记为工具
-                                            </button>
-                                          )}
-                                        </td>
-                                      )}
-                                    </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          )}
-                        </div>
-                      )}
-                      <p className="connector-foot-hint">
-                        发现工具 ≠ 已授权。注册与启停由后端与权限控制；前端不能直接调用目标系统。
-                      </p>
-                    </div>
-                  </div>
-                ) : (
-                  /* 健康检查 */
+                </section>
+                <section id="connector-sec-test" className="skill-anchor-section">
+                  {/* 健康检查 */}
                   <div className="tab-panel">
                     <div className="connector-section">
                       <h3>健康检查 / 测试连接</h3>
@@ -1730,6 +1461,394 @@ export function ConnectorsPage() {
                       )}
                     </div>
                   </div>
+                </section>
+                <section id="connector-sec-config" className="skill-anchor-section">
+                  <div className="tab-panel">
+                    {selected.connector_type === "REST" && (
+                      <div className="connector-section">
+                        <h3>REST 目标 <span className="hint">须通过后端策略校验</span></h3>
+                        <div className="connector-form-grid">
+                          {fields.map((f) => (
+                            <div key={f.key} className={`connector-field${f.full ? " full" : ""}`}>
+                              <label>{f.label}</label>
+                              {f.kind === "select" ? (
+                                <select
+                                  value={editConfig[f.key] ?? ""}
+                                  disabled={!editingFields}
+                                  onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
+                                >
+                                  {(f.options ?? []).map((o) => <option key={o}>{o}</option>)}
+                                </select>
+                              ) : (
+                                <input
+                                  type={f.kind === "number" ? "number" : "text"}
+                                  value={editConfig[f.key] ?? ""}
+                                  disabled={!editingFields}
+                                  placeholder={f.hint ?? ""}
+                                  onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
+                                />
+                              )}
+                              {f.hint && <div className="help">{f.hint}</div>}
+                            </div>
+                          ))}
+                          <div className="connector-field full">
+                            <label>目标安全策略</label>
+                            <label className="connector-check">
+                              <input type="checkbox" checked={editAllowPrivate} disabled={!editingFields} onChange={(e) => setEditAllowPrivate(e.target.checked)} />
+                              <span>允许访问</span>
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {selected.connector_type === "DB" && (
+                      <div className="connector-section">
+                        <h3>只读数据库 <span className="hint">必须只读 · 限制表与查询</span></h3>
+                        <div className="connector-form-grid">
+                          {fields.map((f) => (
+                            <div key={f.key} className={`connector-field${f.full ? " full" : ""}`}>
+                              <label>{f.label}</label>
+                              <input
+                                type="text"
+                                value={editConfig[f.key] ?? ""}
+                                disabled={!editingFields || f.disabled}
+                                placeholder={f.hint ?? ""}
+                                onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
+                              />
+                              {f.hint && <div className="help">{f.hint}</div>}
+                            </div>
+                          ))}
+                        </div>
+                        <div className="connector-alert connector-alert-warn" style={{ marginTop: 12, marginBottom: 0 }}>
+                          <span>⚠</span>
+                          <span>生产默认拒绝写入账号与无表限制配置。凭证走 Secret URI。</span>
+                        </div>
+                      </div>
+                    )}
+                    {selected.connector_type === "MCP" && (
+                      <div className="connector-section">
+                        <h3>MCP 传输 <span className="hint">JSON-RPC 2.0 · tools/list · tools/call</span></h3>
+                        <div className="connector-form-grid">
+                          {fields.map((f) => (
+                            <div key={f.key} className={`connector-field${f.full ? " full" : ""}`}>
+                              <label>{f.label}</label>
+                              {f.kind === "select" ? (
+                                <select
+                                  value={editConfig[f.key] ?? ""}
+                                  disabled={!editingFields}
+                                  onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
+                                >
+                                  {(f.options ?? []).map((o) => <option key={o}>{o}</option>)}
+                                </select>
+                              ) : (
+                                <input
+                                  type={f.kind === "number" ? "number" : "text"}
+                                  value={editConfig[f.key] ?? ""}
+                                  disabled={!editingFields}
+                                  placeholder={f.hint ?? ""}
+                                  onChange={(e) => setEditConfig((p) => ({ ...p, [f.key]: e.target.value }))}
+                                />
+                              )}
+                              {f.hint && <div className="help">{f.hint}</div>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {editingFields && editBar()}
+                  </div>
+                </section>
+                <section id="connector-sec-auth" className="skill-anchor-section">
+                  <div className="tab-panel">
+                    <div className="connector-section">
+                      <h3>认证模式</h3>
+                      <div className="connector-form-grid">
+                        <div className="connector-field">
+                          <label>模式</label>
+                          <select
+                            value={editConfig["auth_mode"] ?? AUTH_MODES[0]}
+                            disabled={!editingFields}
+                            onChange={(e) => setEditConfig((p) => ({ ...p, auth_mode: e.target.value }))}
+                          >
+                            {AUTH_MODES.map((m) => <option key={m} value={m}>{authModeLabel(m)}</option>)}
+                          </select>
+                        </div>
+                        <div className="connector-field">
+                          <label>请求头名（如适用）</label>
+                          <input
+                            type="text"
+                            value={editConfig["auth_header"] ?? "Authorization"}
+                            disabled={!editingFields}
+                            onChange={(e) => setEditConfig((p) => ({ ...p, auth_header: e.target.value }))}
+                          />
+                        </div>
+                        {detail?.connector_type === "REST" && (
+                          <div className="connector-field">
+                            <label>凭据头</label>
+                            <div className="connector-headers-entry">
+                              <button
+                                className="btn btn-secondary"
+                                type="button"
+                                disabled={!editingFields}
+                                onClick={() => {
+                                  setHeadersSnapshot(authHeadersRows.map((r) => ({ ...r })));
+                                  setHeadersOpen(true);
+                                }}
+                              >
+                                管理凭据头（{authHeadersRows.length}）
+                              </button>
+                            </div>
+                            <span className="hint">
+                              {authHeadersRows.length === 0 ? "未配置（进入编辑后可添加）" : `已配置 ${authHeadersRows.length} 个`}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ marginTop: 16 }}>
+                        <label style={{ fontSize: 12, fontWeight: 500, color: "var(--text-muted)", display: "block", marginBottom: 8 }}>凭证</label>
+                        <div className="connector-secret-row">
+                          <div className="secret-status">
+                            <span className={`connector-tag ${selected.secret_configured ? "connector-tag-secret" : "connector-tag-off"}`}>
+                              {selected.secret_configured ? "已配置" : "未配置"}
+                            </span>
+                            <code>{selected.secret_configured ? selected.secret_ref_masked ?? "已配置（仅引用，不展示明文）" : "—"}</code>
+                          </div>
+                          {canManage && (
+                            <button className="btn btn-secondary" type="button" onClick={() => { setSecretValue(""); setSecretOpen(true); }}>更换凭证</button>
+                          )}
+                        </div>
+                      </div>
+                      {detail?.connector_type === "REST" && authHeadersRows.length > 0 && (
+                        <div className="connector-headers-entry">
+                          <span className="hint">已配置 {authHeadersRows.length} 个凭据头，点击「管理凭据头」查看与调整</span>
+                        </div>
+                      )}
+                    </div>
+                    {editingFields && editBar()}
+                  </div>
+                </section>
+                <section id="connector-sec-ops" className="skill-anchor-section">
+                  <div className="tab-panel">
+                    <div className="connector-section">
+                      <h3>
+                        已注册工具
+                        <span className="hint">登记后供技能绑定调用</span>
+                      </h3>
+                      {canManage && enabled && (
+                        <div style={{ marginTop: 14, marginBottom: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setRegType(selected.connector_type === "DB" ? "DB_SQL" : "HTTP"); setRegOpen(true); }}>登记新工具</button>
+                          <button className="btn btn-secondary btn-sm" disabled={busy || compositeCandidates.length === 0} onClick={openComposite} title="把本连接器多个已发布工具组合为一个业务工具（线性、无分支）">
+                            登记业务封装工具
+                          </button>
+                          {selected.connector_type === "REST" && (
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              disabled={busy}
+                              onClick={() => { setOaResult(null); setOaOpen(true); }}
+                              title="上传或拉取 OpenAPI 3.x 文档，一次性把 N 个接口登记为工具"
+                            >
+                              从 OpenAPI 导入
+                            </button>
+                          )}
+                          {selected.connector_type === "MCP" && (
+                            <button className="btn btn-secondary btn-sm" disabled={busy || discovering} onClick={() => void runDiscover()}>
+                              {discovering ? "发现中…" : "从 MCP 服务发现工具"}
+                            </button>
+                          )}
+                          {selected.connector_type === "MCP" && discovered !== null && (
+                            <button
+                              className="btn btn-primary btn-sm"
+                              disabled={busy || discovering || discovered.every((t) => registeredNames.has(t.name.trim()))}
+                              onClick={() => void registerAllDiscovered()}
+                              title="把发现结果中尚未登记的工具按默认名称一次性注册"
+                            >
+                              批量登记未注册工具（{discovered.filter((t) => !registeredNames.has(t.name.trim())).length}）
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {tools.length > 0 && (
+                        <div className="connector-tool-toolbar">
+                          <div className="connector-tool-search">
+                            <input
+                              type="text"
+                              placeholder="搜索工具名称 / 说明 / 标签"
+                              value={toolKeyword}
+                              onChange={(e) => { setToolKeyword(e.target.value); setToolPage(1); }}
+                            />
+                          </div>
+                          <select
+                            value={toolType}
+                            onChange={(e) => { setToolType(e.target.value); setToolPage(1); }}
+                            aria-label="按工具类型筛选"
+                          >
+                            <option value="all">全部类型</option>
+                            {toolTypeOptions.map((tt) => (
+                              <option key={tt} value={tt}>{toolTypeLabel(tt)}</option>
+                            ))}
+                          </select>
+                          <span className="connector-tool-count">共 {filteredTools.length} 条</span>
+                        </div>
+                      )}
+                      {tools.length === 0 ? (
+                        <div className="skill-readonly-banner">当前连接尚未注册任何工具。</div>
+                      ) : filteredTools.length === 0 ? (
+                        <div className="skill-readonly-banner">没有符合筛选条件的工具。</div>
+                      ) : (
+                        <table className="connector-op-table">
+                          <thead>
+                            <tr>
+                              <th>工具</th>
+                              <th>方法</th>
+                              <th>类型</th>
+                              <th>说明</th>
+                              <th>标签</th>
+                              <th>授权</th>
+                              {canManage && <th>操作</th>}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pagedTools.map((t) => (
+                              <tr key={t.id}>
+                                <td className="op-name">
+                                  {t.name ?? t.external_name ?? t.id}
+                                  {t.is_business_tool && <span className="skill-tag skill-tag-mine">业务封装</span>}
+                                  {t.status === "ARCHIVED" && <span className="connector-tag connector-tag-warn">已归档</span>}
+                                </td>
+                                <td>
+                                  {/* HTTP 方法显式展示：避免把 POST 的 batchDelete/update 误认为被拦截的 DELETE 方法 */}
+                                  {t.method ? (
+                                    ["GET", "POST"].includes(t.method) ? (
+                                      <span className="connector-tag connector-tag-ok">{t.method}</span>
+                                    ) : (
+                                      <span className="connector-tag connector-tag-warn">{t.method} · 不支持执行</span>
+                                    )
+                                  ) : (
+                                    "—"
+                                  )}
+                                </td>
+                                <td>{toolTypeLabel(t.tool_type)}{t.published_version_number ? <span className="connector-tool-ver">v{t.published_version_number}</span> : null}</td>
+                                <td>{t.description ?? "—"}</td>
+                                <td>
+                                  <div className="connector-tool-tags">
+                                    {(t.tags ?? []).length === 0
+                                      ? "—"
+                                      : (t.tags ?? []).map((tag) => (
+                                          <span key={tag} className="skill-tag skill-tag-neutral">{tag}</span>
+                                        ))}
+                                  </div>
+                                </td>
+                                <td>
+                                  <span className={`connector-tag ${t.approved ? "connector-tag-ok" : "connector-tag-warn"}`}>
+                                    {t.approved ? "已注册" : "待授权"}
+                                  </span>
+                                </td>
+                                {canManage && (
+                                  <td className="connector-tool-op">
+                                    <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => openToolMeta(t)}>
+                                      编辑标签
+                                    </button>
+                                    <button
+                                      className="btn btn-ghost btn-sm"
+                                      disabled={busy || editLoading || !t.published_version_id}
+                                      onClick={() => (t.tool_type === "COMPOSITE" ? void openCompositeEdit(t) : void openEditTool(t))}
+                                      title="生成新发布版本，历史版本与既有 Skill 绑定不受影响"
+                                    >
+                                      更新配置
+                                    </button>
+                                    {t.status === "ARCHIVED" ? (
+                                      <button
+                                        className="skill-btn-danger-outline btn-sm"
+                                        disabled={busy}
+                                        onClick={() => setConfirmToolDelete({ id: t.id, name: t.name ?? t.external_name ?? t.id })}
+                                      >
+                                        删除
+                                      </button>
+                                    ) : (
+                                      <button
+                                        className="skill-btn-danger-outline btn-sm"
+                                        disabled={busy}
+                                        onClick={() => setConfirmToolArchive({ id: t.id, name: t.name ?? t.external_name ?? t.id })}
+                                      >
+                                        归档
+                                      </button>
+                                    )}
+                                  </td>
+                                )}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                      {filteredTools.length > TOOL_PAGE_SIZE && (
+                        <div className="connector-tool-pager">
+                          <span>第 {toolPageSafe} / {toolTotalPages} 页 · 共 {filteredTools.length} 条</span>
+                          <div className="spacer" />
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            disabled={toolPageSafe <= 1}
+                            onClick={() => setToolPage(toolPageSafe - 1)}
+                          >
+                            上一页
+                          </button>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            disabled={toolPageSafe >= toolTotalPages}
+                            onClick={() => setToolPage(toolPageSafe + 1)}
+                          >
+                            下一页
+                          </button>
+                        </div>
+                      )}
+                      {/* MCP 发现结果：发现 ≠ 已授权，注册后才能被 Skill 绑定调用 */}
+                      {selected.connector_type === "MCP" && discovered !== null && (
+                        <div className="connector-section" style={{ marginTop: 12, marginBottom: 0 }}>
+                          <h3>发现结果 <span className="hint">来自 MCP 服务 tools/list · 需注册后才可用</span></h3>
+                          {discovered.length === 0 ? (
+                            <div className="skill-readonly-banner">MCP 服务未返回任何工具。</div>
+                          ) : (
+                            <table className="connector-op-table">
+                              <thead>
+                                <tr>
+                                  <th>工具</th>
+                                  <th>说明</th>
+                                  {canManage && enabled && <th>操作</th>}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {discovered.map((t) => {
+                                  const already = registeredNames.has(t.name.trim());
+                                  return (
+                                    <tr key={t.name}>
+                                      <td className="op-name">{t.name}</td>
+                                      <td>{t.description || "—"}</td>
+                                      {canManage && enabled && (
+                                        <td>
+                                          {already ? (
+                                            <span className="connector-tag connector-tag-ok">已登记</span>
+                                          ) : (
+                                            <button
+                                              className="btn btn-secondary btn-sm"
+                                              disabled={busy}
+                                              onClick={() => { setRegType("MCP"); setRegName(t.name); setRegExternal(t.name); setRegDesc(t.description); setRegOpen(true); }}
+                                            >
+                                              登记为工具
+                                            </button>
+                                          )}
+                                        </td>
+                                      )}
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </section>
+                  </>
                 )}
               </div>
             </>
@@ -1765,6 +1884,15 @@ export function ConnectorsPage() {
           <div className="form-field">
             <label>{createType === "REST" ? "Base URL" : "MCP 端点"}</label>
             <input className="input" value={createTarget} onChange={(e) => setCreateTarget(e.target.value)} placeholder={createType === "REST" ? "https://crm.example.com/api/v2" : "https://mcp.example.com/rpc"} />
+          </div>
+        )}
+        {createType === "REST" && (
+          <div className="form-field">
+            <label>目标安全策略</label>
+            <label className="connector-check">
+              <input type="checkbox" checked={createAllowPrivate} onChange={(e) => setCreateAllowPrivate(e.target.checked)} />
+              <span>允许访问</span>
+            </label>
           </div>
         )}
         {createType === "DB" && (
@@ -1827,6 +1955,51 @@ export function ConnectorsPage() {
         <div className="form-field">
           <label>Secret URI</label>
           <SecretRefInput value={secretValue} onChange={setSecretValue} placeholder="secret://vault/xxx" />
+        </div>
+      </Modal>
+
+      {/* 凭据头编辑弹窗：REST 认证头行（头名 / 加密值），取消还原进入弹窗前的内容 */}
+      <Modal
+        open={headersOpen}
+        title="管理凭据头"
+        onClose={() => setHeadersOpen(false)}
+        footer={
+          <>
+            <button
+              className="btn btn-secondary"
+              onClick={() => { setAuthHeadersRows(headersSnapshot.map((r) => ({ ...r }))); setHeadersOpen(false); }}
+            >
+              取消
+            </button>
+            <button className="btn btn-primary" onClick={() => setHeadersOpen(false)}>完成</button>
+          </>
+        }
+      >
+        <div className="connector-headers-editor">
+          {authHeadersRows.map((row, idx) => (
+            <div key={idx} className="connector-header-row">
+              <input
+                type="text"
+                className="connector-header-key"
+                placeholder="头名（如 CSRF-TOKEN）"
+                value={row.key}
+                onChange={(e) => setAuthHeadersRows((p) => p.map((r, i) => (i === idx ? { ...r, key: e.target.value } : r)))}
+              />
+              <input
+                type="text"
+                className="connector-header-value"
+                placeholder={row.value.startsWith("secret://") ? "已加密保存（输入新值可更换）" : "值（保存时自动加密，不落明文）"}
+                value={row.value}
+                onChange={(e) => setAuthHeadersRows((p) => p.map((r, i) => (i === idx ? { ...r, value: e.target.value } : r)))}
+              />
+              <button className="btn btn-secondary btn-sm" type="button" onClick={() => setAuthHeadersRows((p) => p.filter((_, i) => i !== idx))}>删除</button>
+            </div>
+          ))}
+          {authHeadersRows.length === 0 && <div className="skill-readonly-banner">暂无凭据头，点击下方按钮添加。</div>}
+          <div className="connector-headers-actions">
+            <button className="btn btn-secondary btn-sm" type="button" onClick={() => setAuthHeadersRows((p) => [...p, { key: "", value: "" }])}>添加凭据头</button>
+          </div>
+          <span className="hint">「完成」保留修改（仍需在编辑条中保存）；「取消」还原进入弹窗前的内容。</span>
         </div>
       </Modal>
 

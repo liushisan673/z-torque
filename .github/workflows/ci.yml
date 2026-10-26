@@ -1,0 +1,261 @@
+name: ci
+
+# Gates (see docs/Z-Torque_..._v1.3.md section 12.2 for the original commands):
+#   1. pytest-sqlite   : Linux + SQLite, full suite. POSIX rlimit / killpg branches must RUN, not skip.
+#   2. pytest-postgres : Linux + PostgreSQL 16, full suite (cross-dialect coverage).
+#   3. migrations      : clean PG databases -> alembic upgrade head + alembic check,
+#                        migration gate pytest, offline DDL (--sql) re-applied to another
+#                        empty database -> zero drift (total=0).
+#   4. console         : npm ci + tsc --noEmit + vite build.
+#   5. python-static   : ruff check (rule set fixed in pyproject.toml) + compileall.
+#   6. pytest-windows  : optional Windows job; POSIX sandbox cases skip there by design.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # app/config.py declares JWT_SECRET_KEY and SECRET_STORE_KEY as required fields, and .env
+  # is gitignored, so a fresh checkout cannot start without them. These values are CI-only
+  # dummies (never real secrets); SECRET_STORE_KEY must be a valid Fernet key
+  # (urlsafe base64 of 32 bytes), otherwise SecretStore raises SecretStoreError.
+  JWT_SECRET_KEY: "ci-only-jwt-secret-not-for-production-0123456789"
+  SECRET_STORE_KEY: "ei10b3JxdWUtY2ktc2VjcmV0LXN0b3JlLWtleS0zMmI="
+
+jobs:
+  pytest-sqlite:
+    name: pytest (ubuntu + sqlite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project (editable, test extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      - name: pytest tests (full suite)
+        run: |
+          set -o pipefail
+          python -m pytest tests -q -rs -p no:cacheprovider | tee pytest-sqlite.log
+      - name: Guard - POSIX sandbox branches must not be skipped on Linux
+        run: |
+          if grep -q "POSIX rlimit / killpg" pytest-sqlite.log; then
+            echo "::error::POSIX rlimit / killpg cases were skipped on Linux; the hardening branch is not exercised"
+            exit 1
+          fi
+          echo "POSIX rlimit / killpg cases executed"
+
+  pytest-postgres:
+    name: pytest (ubuntu + postgres 16)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DB: zt
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d zt"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # tests/support/ddl.py uses session_replication_role, which needs a superuser:
+      # the postgres role of this service container is one.
+      ZTORQUE_TEST_DATABASE_URL: postgresql+pg8000://postgres:pass@localhost:5432/zt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project (editable, test extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      - name: pytest tests (postgres dialect)
+        run: python -m pytest tests -q -rs -p no:cacheprovider
+
+  migrations:
+    name: migrations (clean postgres databases)
+    runs-on: ubuntu-latest
+    needs: [pytest-sqlite, pytest-postgres]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pass
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGPASSWORD: pass
+      PG_CLEAN_URL: postgresql+pg8000://postgres:pass@localhost:5432/zt_clean
+      PG_DDL_URL: postgresql+pg8000://postgres:pass@localhost:5432/zt_ddl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project (editable, test extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      - name: Ensure psql client
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+          psql --version
+      - name: Create empty databases (zt_clean, zt_ddl)
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE zt_clean" \
+            -c "CREATE DATABASE zt_ddl"
+      - name: alembic upgrade head + alembic check (zt_clean)
+        run: |
+          set -euo pipefail
+          export DATABASE_URL="$PG_CLEAN_URL"
+          alembic upgrade head
+          alembic current
+          alembic check
+      - name: Migration gate pytest (ZTORQUE_MIGRATION_CHECK_URL = zt_clean)
+        run: |
+          set -euo pipefail
+          ZTORQUE_MIGRATION_CHECK_URL="$PG_CLEAN_URL" \
+            python -m pytest tests/integration/test_alembic_migrations.py -q -rs -p no:cacheprovider
+      - name: Offline DDL into zt_ddl, then assert zero drift
+        run: |
+          set -euo pipefail
+          DATABASE_URL="$PG_DDL_URL" alembic upgrade head --sql > schema.sql
+          wc -l schema.sql
+          psql -h localhost -U postgres -d zt_ddl -v ON_ERROR_STOP=1 -q -f schema.sql
+          HEAD_REV="$(DATABASE_URL="$PG_DDL_URL" alembic heads | awk '{print $1}')"
+          APPLIED_REV="$(psql -h localhost -U postgres -d zt_ddl -t -A -c 'select version_num from alembic_version' | tr -d '[:space:]')"
+          test "$HEAD_REV" = "$APPLIED_REV"
+          echo "offline DDL applied at revision $APPLIED_REV"
+          DATABASE_URL="$PG_DDL_URL" python scripts/check_migration_drift.py | tee drift-ddl.txt
+          grep -qx "total=0" drift-ddl.txt
+          DATABASE_URL="$PG_CLEAN_URL" python scripts/check_migration_drift.py | tee drift-clean.txt
+          grep -qx "total=0" drift-clean.txt
+      - name: Upload offline DDL script
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-ddl-schema
+          path: schema.sql
+          if-no-files-found: warn
+
+  console:
+    name: console (tsc + vite build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+      - name: Type check
+        run: npx tsc --noEmit
+      - name: Build
+        run: npm run build
+
+  python-static:
+    name: python static (ruff + compileall)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project (editable, test + lint extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,lint]"
+      # 规则口径（select/ignore）与每条 ignore 的原因都写在 pyproject.toml 里；
+      # 版本由 [project.optional-dependencies].lint 钉住，避免新版默认规则变动造成假红。
+      - name: ruff check
+        run: python -m ruff check app scripts alembic tests
+      - name: Compile all app modules
+        run: python -m compileall -q app
+
+  plugin-conformance:
+    name: plugin conformance (import isolation + contracts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project (editable, test extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      # 标准插件（可移植）契约：只经 SDK、结构化 config_schema、api_version、entry_points 发现
+      - name: Plugin redlines & contracts
+        run: |
+          set -o pipefail
+          python -m pytest \
+            tests/unit/test_plugin_redlines.py \
+            tests/unit/test_plugin_error_codes.py \
+            tests/unit/test_plugin_discovery.py \
+            tests/unit/test_plugin_config_schema.py \
+            tests/unit/test_plugin_manifest_contract.py \
+            -q -rs -p no:cacheprovider
+      # 可移植性硬指标：单插件 import 不得拉起兄弟插件 / 内核实现 / 服务层，双 profile 必须能装配
+      - name: Single-plugin import isolation & profile smoke
+        run: |
+          set -o pipefail
+          python -m pytest tests/integration/test_plugin_minimal_assembly.py -q -rs -p no:cacheprovider
+
+  pytest-windows:
+    name: pytest (windows + sqlite)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install project (editable, test extras)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+      # Expected skips on Windows: POSIX rlimit / killpg cases (the Windows fail-closed
+      # case runs instead) and the PG clean-database migration check (no PG here).
+      - name: pytest tests (full suite)
+        run: python -m pytest tests -q -rs -p no:cacheprovider

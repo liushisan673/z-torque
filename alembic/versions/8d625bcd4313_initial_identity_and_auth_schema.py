@@ -3,10 +3,10 @@
 
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
-from app.db.base import GUID
 
+from alembic import op
+from app.db.base import GUID
 
 revision: str = '8d625bcd4313'
 down_revision: Union[str, None] = None

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.core.errors import ApiError
-from app.kernel.ports.specs import PORT_SPEC_BY_NAME, GROUPS, PortSpec
+from app.kernel.ports.specs import GROUPS, PORT_SPEC_BY_NAME, PortSpec
 
 logger = logging.getLogger("z_torque.port_registry")
 

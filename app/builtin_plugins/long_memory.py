@@ -9,7 +9,6 @@ from uuid import UUID
 
 from app.builtin_plugins.manifest import PluginManifest
 from app.kernel.ports.memory_long import LongTermMemoryStore
-from app.kernel.registry.port_registry import PortPriority
 
 
 class InProcessKvLongMemory(LongTermMemoryStore):

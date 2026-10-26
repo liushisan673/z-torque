@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.builtin_plugins.manifest import PluginManifest
 from app.config import get_settings
 from app.kernel.ports.policy_source import PolicySource
-from app.kernel.registry.port_registry import PortPriority
 from app.models import Permission, role_permission, user_role
 
 

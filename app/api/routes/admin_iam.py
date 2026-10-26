@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
@@ -36,7 +35,6 @@ from app.models import (
 )
 from app.security.passwords import hash_password
 from app.security.permissions import require_admin
-
 
 router = APIRouter(prefix="/admin/iam", tags=["admin-iam"])
 

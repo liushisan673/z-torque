@@ -1,13 +1,13 @@
+import logging
 from datetime import datetime, timezone
 from uuid import UUID
-import logging
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.core.errors import ApiError
-from app.kernel.model_gateway import ModelGateway, ModelRequest, ModelGatewayError
+from app.kernel.model_gateway import ModelGateway, ModelGatewayError, ModelRequest
 from app.kernel.ports.memory_short import ShortTermMemoryProvider
 from app.kernel.ports.model_selector import snapshot_model_params
 from app.kernel.security_context import SecurityContext
@@ -17,7 +17,11 @@ from app.models import Agent, AgentVersion, Conversation, Message, Task
 from app.models.message import message_file
 from app.security.permissions import admin_owned_clause
 from app.services.chat_service import ChatResult
-from app.services.context_builder import assistant_reasoning_parts, build_agent_system_prompt, build_context
+from app.services.context_builder import (
+    assistant_reasoning_parts,
+    build_agent_system_prompt,
+    build_context,
+)
 from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
 

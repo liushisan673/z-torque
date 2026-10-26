@@ -18,13 +18,15 @@ from app.models import (
     ToolVersion,
 )
 from app.services.tool_mapping_builder import _sanitize_schema, build_tool_mappings
+from tests.support.ddl import fk_off, fk_on
 
 
 @pytest.fixture(autouse=True)
 def cleanup():
     yield
     with SessionLocal.begin() as db:
-        # 顺序无关：外键约在 SQLite 关闭时不强制；测试内按依赖顺序创建
+        # 清理会跨用例触碰到别人留下的引用行，先关外键再按依赖顺序删
+        fk_off(db)
         db.execute(delete(AgentVersionSkill))
         db.execute(delete(SkillVersionTool))
         db.execute(delete(ToolVersion))
@@ -34,6 +36,7 @@ def cleanup():
         db.execute(delete(AgentVersion))
         db.execute(delete(Agent))
         db.execute(delete(Tenant))
+        fk_on(db)
 
 
 def _fixture(db, input_schema, *, skill_requires_confirmation: bool = False, tool_requires_confirmation: bool = False):

@@ -6,7 +6,16 @@
 import hashlib
 from uuid import UUID
 
-from app.models import Agent, AgentVersion, AgentVersionSkill, Skill, SkillVersion, SkillVersionTool, Tool, ToolVersion
+from app.models import (
+    Agent,
+    AgentVersion,
+    AgentVersionSkill,
+    Skill,
+    SkillVersion,
+    SkillVersionTool,
+    Tool,
+    ToolVersion,
+)
 from app.services.function_calling import ToolMapping, safe_function_name
 
 

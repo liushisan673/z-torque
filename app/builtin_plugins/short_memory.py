@@ -16,7 +16,6 @@ from app.config import get_settings
 from app.core.errors import ApiError
 from app.kernel.model_gateway import ModelGateway, ModelMessage, ModelRequest
 from app.kernel.ports.memory_short import ShortTermMemoryProvider
-from app.kernel.registry.port_registry import PortPriority
 from app.models import Conversation, Message, ShortTermMemory
 
 _SECRET_PATTERN = re.compile(r"(?i)(api[_ -]?key|token|password|secret|authorization)\s*[:=]\s*[^\s,;]+")

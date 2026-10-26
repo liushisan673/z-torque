@@ -1,15 +1,17 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { request } from "../services/api";
+import { downloadFile, request } from "../services/api";
 import { errorText } from "../services/errorText";
 import type { AuditEvent, AuditListResponse } from "../types";
 import { Loading } from "../components/Loading";
+import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { useAuth } from "../stores/auth";
 
 const API = "/api/z-torque/audit";
 const PAGE_SIZE_OPTIONS = [20, 50, 100];
 
 // 行为类别（后端 audit_category 映射为唯一数据源）：筛选与"类型"列共用，value 需与后端一致
+// v1.3 新增 audit / a2a / sandbox 三类（企业版导出、协作与沙箱执行留痕）
 const CATEGORY_OPTIONS: { value: string; label: string }[] = [
   { value: "config", label: "配置变更" },
   { value: "model_call", label: "模型调用" },
@@ -20,6 +22,9 @@ const CATEGORY_OPTIONS: { value: string; label: string }[] = [
   { value: "task", label: "任务运行" },
   { value: "iam", label: "账号权限" },
   { value: "kernel", label: "系统/内核" },
+  { value: "audit", label: "审计合规" },
+  { value: "a2a", label: "智能体协作" },
+  { value: "sandbox", label: "沙箱执行" },
 ];
 
 // 类别 → 类型列标签与配色（复用现有 audit-tag-* 色板）
@@ -33,6 +38,9 @@ const CATEGORY_TAG: Record<string, { label: string; cls: string }> = {
   task: { label: "任务运行", cls: "audit-tag-conn" },
   iam: { label: "账号权限", cls: "audit-tag-skill" },
   kernel: { label: "系统/内核", cls: "audit-tag-other" },
+  audit: { label: "审计合规", cls: "audit-tag-confirm" },
+  a2a: { label: "智能体协作", cls: "audit-tag-agent" },
+  sandbox: { label: "沙箱执行", cls: "audit-tag-file" },
 };
 
 type RangeKey = "24h" | "7d" | "30d" | "all" | "custom";
@@ -163,6 +171,22 @@ const ACTION_LABEL: Record<string, string> = {
   CONFIRMATION_RESOLVED: "处理确认",
   // 内核能力
   CAPABILITY_UNAVAILABLE: "能力不可用",
+  // 沙箱执行（v1.3 M1）
+  SANDBOX_DENIED: "沙箱拒绝",
+  SANDBOX_RESOURCE_EXCEEDED: "沙箱资源超限",
+  SANDBOX_TIMEOUT: "沙箱超时",
+  // 审计导出与归档（v1.3 M2）
+  AUDIT_EXPORTED: "导出审计",
+  AUDIT_EXPORT_FAILED: "导出失败",
+  AUDIT_EXPORT_DENIED: "导出拒绝",
+  AUDIT_EXPORT_CREATED: "创建导出任务",
+  AUDIT_EXPORT_DOWNLOADED: "下载导出件",
+  AUDIT_ARCHIVED: "归档审计",
+  AUDIT_ARCHIVE_FAILED: "归档失败",
+  // A2A 协作（v1.3 M3）
+  A2A_INVOKED: "A2A 调用",
+  A2A_DENIED: "A2A 拒绝",
+  A2A_FAILED: "A2A 失败",
 };
 
 function resourceTypeLabel(t: string): string {
@@ -256,17 +280,50 @@ const SUMMARY_LABEL: Record<string, string> = {
   // 确认
   "execution confirmation requested": "发起执行确认",
   "execution confirmation resolved": "处理执行确认",
+  // 沙箱执行（v1.3 M1）
+  "sandbox execution denied": "沙箱拒绝执行",
+  "sandbox resource limit exceeded": "沙箱资源超限",
+  "sandbox execution timed out": "沙箱执行超时",
+  // 审计导出与归档（v1.3 M2）
+  "audit export completed": "审计导出完成",
+  "audit export failed": "审计导出失败",
+  "audit export denied": "审计导出被拒绝",
+  "audit export shard downloaded": "下载审计导出分片",
+  "audit archive completed": "审计归档完成",
+  "audit archive failed": "审计归档失败",
+  // A2A 协作（v1.3 M3）
+  "a2a inbound denied": "A2A 入站拒绝",
 };
 
 // 动态摘要：能力不可用（summary 内嵌端口名，无法静态枚举）
 const CAPABILITY_SUMMARY_RE = /^capability (\S+) is unavailable$/;
+// 动态摘要：导出/归档/沙箱带计数或层级，无法静态枚举
+const EXPORT_COMPLETED_RE = /^audit export completed \((\d+) rows, (\d+) shards\)$/;
+const ARCHIVE_COMPLETED_RE = /^audit archive completed \((\d+) rows, (\d+) objects\)$/;
+const EXPORT_SHARD_RE = /^audit export shard downloaded \(#(\d+)\)$/;
+const SANDBOX_DENIED_RE = /^sandbox (\w+) denied: (.*)$/;
+const A2A_CALL_RE = /^a2a (\w+) call (SUCCEEDED|FAILED|DENIED)$/;
 
 function summaryLabel(summary: string | null | undefined): string {
   if (!summary) return "—";
   const direct = SUMMARY_LABEL[summary];
   if (direct) return direct;
-  const m = CAPABILITY_SUMMARY_RE.exec(summary);
-  if (m) return `能力 ${m[1]} 不可用`;
+  const capability = CAPABILITY_SUMMARY_RE.exec(summary);
+  if (capability) return `能力 ${capability[1]} 不可用`;
+  const exported = EXPORT_COMPLETED_RE.exec(summary);
+  if (exported) return `审计导出完成（${exported[1]} 行 / ${exported[2]} 个分片）`;
+  const archived = ARCHIVE_COMPLETED_RE.exec(summary);
+  if (archived) return `审计归档完成（${archived[1]} 行 / ${archived[2]} 个对象）`;
+  const shard = EXPORT_SHARD_RE.exec(summary);
+  if (shard) return `下载审计导出分片 #${shard[1]}`;
+  const denied = SANDBOX_DENIED_RE.exec(summary);
+  if (denied) return `沙箱拒绝执行：${denied[2]}`;
+  const a2a = A2A_CALL_RE.exec(summary);
+  if (a2a) {
+    const route = a2a[1] === "remote" ? "远端" : "本地";
+    const status = a2a[2] === "SUCCEEDED" ? "成功" : a2a[2] === "DENIED" ? "拒绝" : "失败";
+    return `A2A ${route}调用${status}`;
+  }
   return summary;
 }
 
@@ -319,6 +376,22 @@ const ERROR_CODE_LABEL: Record<string, string> = {
   VALIDATION_ERROR: "参数校验未通过",
   NOT_FOUND: "目标资源不存在",
   CONFLICT: "资源状态冲突",
+  // v1.3 沙箱 / 导出归档 / A2A（与 services/errorText.ts 同源口径）
+  AI_SANDBOX_DENIED: "沙箱拒绝执行",
+  AI_SANDBOX_RESOURCE_EXCEEDED: "沙箱资源超限",
+  AI_SKILL_TIMEOUT: "技能执行超时",
+  AI_SKILL_FAILED: "技能执行失败",
+  AI_AUDIT_EXPORT_DENIED: "无导出该范围审计的权限",
+  AI_AUDIT_EXPORT_TOO_LARGE: "导出范围超过行数上限",
+  AI_AUDIT_EXPORT_FAILED: "审计导出失败",
+  AI_AUDIT_ARCHIVE_FAILED: "审计归档失败",
+  AI_AUDIT_ARCHIVE_KEY_MISSING: "归档对象缺少可用密钥",
+  AI_A2A_DISABLED: "A2A 未启用",
+  AI_A2A_DENIED: "A2A 调用被拒绝",
+  AI_A2A_TIMEOUT: "A2A 对端超时",
+  AI_A2A_PEER_UNAVAILABLE: "A2A 对端不可用",
+  AI_A2A_DEPTH_EXCEEDED: "A2A 调用层级超限",
+  AI_A2A_ROUTE_FAILED: "A2A 路由失败",
 };
 
 // 事件参数键 → 中文标签（展示层映射，不改存储值）
@@ -380,11 +453,277 @@ function failureMessage(e: AuditEvent): { text: string; code: string | null } | 
   return { text: msg ?? codeText ?? "未知原因", code };
 }
 
+// ---- 审计导出 / 归档（v1.3 M2）----
+const EXPORT_API = "/api/z-torque/audit-exports";
+const ARCHIVE_API = "/api/z-torque/audit-archive-runs";
+
+interface ExportShard {
+  seq: number;
+  object_key: string;
+  rows: number;
+  size_bytes: number;
+  sha256: string | null;
+}
+
+interface ExportJob {
+  id: string;
+  status: "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  format: string;
+  filters: Record<string, unknown>;
+  rows_total: number;
+  shards_total: number;
+  size_total: number;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  finished_at: string | null;
+  shards?: ExportShard[];
+}
+
+interface ArchiveRun {
+  id: string;
+  status: string;
+  trigger: string;
+  window_start: string;
+  window_end: string;
+  rows: number;
+  objects: { seq: number; object_key: string; rows: number; size_bytes: number; sha256: string }[];
+  sha256_total: string | null;
+  size_total: number;
+  encryption: string;
+  error_code: string | null;
+  created_at: string;
+}
+
+function fmtBytes(size: number): string {
+  if (!size) return "0 B";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function jobStatusLabel(status: string): { label: string; cls: string } {
+  if (status === "SUCCEEDED") return { label: "已完成", cls: "audit-result audit-result-ok" };
+  if (status === "FAILED") return { label: "失败", cls: "audit-result audit-result-fail" };
+  if (status === "RUNNING") return { label: "执行中", cls: "audit-result" };
+  return { label: "排队中", cls: "audit-result" };
+}
+
+/** 导出 / 归档入口：按当前筛选范围出域，任务在后台分片执行，前台轮询状态。 */
+function AuditExportPanel({ canExport, canArchive, category, start, end }: {
+  canExport: boolean;
+  canArchive: boolean;
+  category: string;
+  start?: string;
+  end?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [format, setFormat] = useState<"JSONL" | "CSV">("JSONL");
+  const [job, setJob] = useState<ExportJob | null>(null);
+  const [jobs, setJobs] = useState<ExportJob[]>([]);
+  const [runs, setRuns] = useState<ArchiveRun[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [list, archives] = await Promise.all([
+        request<{ items: ExportJob[] }>(EXPORT_API, { query: { limit: 10 } }),
+        canArchive
+          ? request<{ items: ArchiveRun[] }>(ARCHIVE_API, { query: { limit: 10 } })
+          : Promise.resolve({ items: [] as ArchiveRun[] }),
+      ]);
+      setJobs(list.items);
+      setRuns(archives.items);
+    } catch (e) {
+      setErr(errorText(e, "加载导出任务失败"));
+    }
+  }, [canArchive]);
+
+  useEffect(() => {
+    if (open) void refresh();
+  }, [open, refresh]);
+
+  // 运行中的任务 1.5s 轮询一次；到终态停止并刷新列表
+  useEffect(() => {
+    if (!job || (job.status !== "PENDING" && job.status !== "RUNNING")) return;
+    const timer = window.setTimeout(() => {
+      request<ExportJob>(`${EXPORT_API}/${job.id}`)
+        .then((next) => {
+          setJob(next);
+          if (next.status === "SUCCEEDED" || next.status === "FAILED") void refresh();
+        })
+        .catch(() => { /* 轮询失败静默，下一轮继续 */ });
+    }, 1500);
+    return () => window.clearTimeout(timer);
+  }, [job, refresh]);
+
+  async function startExport() {
+    setBusy(true);
+    setErr(null);
+    setNotice(null);
+    try {
+      const created = await request<ExportJob>(EXPORT_API, {
+        method: "POST",
+        body: { format, category: category || undefined, start_time: start, end_time: end },
+      });
+      setJob(created);
+      setNotice("导出任务已创建，完成后可在下方下载分片");
+    } catch (e) {
+      setErr(errorText(e, "创建导出任务失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startArchive() {
+    setBusy(true);
+    setErr(null);
+    setNotice(null);
+    try {
+      const run = await request<ArchiveRun>(ARCHIVE_API, { method: "POST", body: {} });
+      setNotice(`归档批次已生成：${run.rows} 行 / ${run.objects.length} 个对象`);
+      await refresh();
+    } catch (e) {
+      setErr(errorText(e, "触发归档失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function download(jobId: string, shard: ExportShard) {
+    setErr(null);
+    try {
+      await downloadFile(`${EXPORT_API}/${jobId}/shards/${shard.seq}/download`, `${jobId}-part-${shard.seq}.jsonl`);
+    } catch (e) {
+      setErr(errorText(e, "下载失败"));
+    }
+  }
+
+  if (!canExport && !canArchive) return null;
+
+  return (
+    <div className="audit-export-bar">
+      <div className="audit-export-head">
+        <div>
+          <strong>导出与归档</strong>
+          <span className="audit-export-hint">
+            按当前筛选范围生成脱敏分片；导出件含敏感字段，下载行为本身会留下审计
+          </span>
+        </div>
+        <button className="btn btn-secondary btn-sm" onClick={() => setOpen((v) => !v)}>
+          {open ? "收起" : "展开"}
+        </button>
+      </div>
+      {open && (
+        <div className="audit-export-body">
+          {canExport && (
+            <div className="audit-export-row">
+              <label>
+                格式
+                <select value={format} onChange={(e) => setFormat(e.target.value as "JSONL" | "CSV")}>
+                  <option value="JSONL">JSONL</option>
+                  <option value="CSV">CSV</option>
+                </select>
+              </label>
+              <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void startExport()}>
+                {busy ? "处理中…" : "导出当前筛选"}
+              </button>
+              {canArchive && (
+                <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void startArchive()}>
+                  触发归档
+                </button>
+              )}
+            </div>
+          )}
+          {!canExport && canArchive && (
+            <div className="audit-export-row">
+              <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void startArchive()}>
+                {busy ? "处理中…" : "触发归档"}
+              </button>
+            </div>
+          )}
+
+          {notice && <div className="audit-export-note">{notice}</div>}
+          {err && <div className="audit-export-error">{err}</div>}
+
+          {job && (
+            <div className="audit-export-job">
+              <div>
+                <span className={jobStatusLabel(job.status).cls}>{jobStatusLabel(job.status).label}</span>
+                <span className="audit-export-meta">
+                  {job.rows_total} 行 · {job.shards_total} 分片 · {fmtBytes(job.size_total)}
+                </span>
+              </div>
+              {job.status === "FAILED" && (
+                <div className="audit-export-error">
+                  {job.error_code ? (ERROR_CODE_LABEL[job.error_code] ?? job.error_code) : "导出失败"}
+                  {job.error_message ? `：${job.error_message}` : ""}
+                </div>
+              )}
+              {job.status === "SUCCEEDED" && (job.shards ?? []).length > 0 && (
+                <div className="audit-export-shards">
+                  {(job.shards ?? []).map((s) => (
+                    <button key={s.seq} className="btn btn-secondary btn-sm" onClick={() => void download(job.id, s)}>
+                      分片 #{s.seq}（{s.rows} 行）
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {jobs.length > 0 && (
+            <div className="audit-export-list">
+              <div className="audit-export-list-title">最近导出任务</div>
+              {jobs.map((item) => (
+                <div key={item.id} className="audit-export-list-row">
+                  <span className="audit-export-time">{fmtListTime(item.created_at)}</span>
+                  <span className={jobStatusLabel(item.status).cls}>{jobStatusLabel(item.status).label}</span>
+                  <span className="audit-export-meta">
+                    {item.format.toUpperCase()} · {item.rows_total} 行 · {item.shards_total} 分片
+                  </span>
+                  {canExport && item.status === "SUCCEEDED" && (
+                    <button className="btn btn-secondary btn-sm" onClick={() => void request<ExportJob>(`${EXPORT_API}/${item.id}`).then(setJob).catch(() => setErr("加载任务失败"))}>
+                      查看分片
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {canArchive && runs.length > 0 && (
+            <div className="audit-export-list">
+              <div className="audit-export-list-title">最近归档批次</div>
+              {runs.map((run) => (
+                <div key={run.id} className="audit-export-list-row">
+                  <span className="audit-export-time">{fmtListTime(run.created_at)}</span>
+                  <span className={jobStatusLabel(run.status).cls}>{jobStatusLabel(run.status).label}</span>
+                  <span className="audit-export-meta">
+                    {run.rows} 行 · {run.objects.length} 对象 · {run.encryption === "none" ? "明文冷副本" : "AES-256-GCM"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AuditPage() {
   const { user } = useAuth();
   // 权限范围：audit.read_all（admin）看全量；普通用户仅自己相关（后端同步强制收缩）
   const canReadAll = user?.permissions?.includes("audit.read_all") ?? false;
+  // 导出/归档是显式授权的高危动作（v1.3 §5.3）：无权限时不渲染入口，避免"点了才 403"
+  const canExport = user?.permissions?.includes("audit.export") ?? false;
+  const canArchive = user?.permissions?.includes("audit.archive") ?? false;
 
+  // 左右分栏宽度：拖拽把手调整右侧详情宽度，会话内保持，退出登录恢复默认
+  const listPane = usePaneWidth("audit", "--audit-detail-w");
   const [data, setData] = useState<AuditListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -412,20 +751,27 @@ export function AuditPage() {
   const [traceChain, setTraceChain] = useState<AuditEvent[] | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
 
+  // 时间范围边界：列表查询与导出共用同一口径，避免"看到的"与"导出的"不一致
+  const rangeBounds = useCallback((): { start?: string; end?: string } => {
+    if (range === "custom") {
+      return {
+        start: startCustom ? new Date(startCustom).toISOString() : undefined,
+        end: endCustom ? new Date(endCustom).toISOString() : undefined,
+      };
+    }
+    if (range === "24h") return { start: isoDaysAgo(1) };
+    if (range === "7d") return { start: isoDaysAgo(7) };
+    if (range === "30d") return { start: isoDaysAgo(30) };
+    return {};
+  }, [range, startCustom, endCustom]);
+
   const buildQuery = useCallback((offset: number) => {
     const qs = new URLSearchParams();
     qs.set("offset", String(offset));
     qs.set("limit", String(pageSize));
-    if (range === "custom") {
-      if (startCustom) qs.set("start_time", new Date(startCustom).toISOString());
-      if (endCustom) qs.set("end_time", new Date(endCustom).toISOString());
-    } else if (range === "24h") {
-      qs.set("start_time", isoDaysAgo(1));
-    } else if (range === "7d") {
-      qs.set("start_time", isoDaysAgo(7));
-    } else if (range === "30d") {
-      qs.set("start_time", isoDaysAgo(30));
-    }
+    const bounds = rangeBounds();
+    if (bounds.start) qs.set("start_time", bounds.start);
+    if (bounds.end) qs.set("end_time", bounds.end);
     if (category) qs.set("category", category);
     if (username.trim()) qs.set("actor_username", username.trim());
     if (agentId.trim()) {
@@ -435,7 +781,7 @@ export function AuditPage() {
     if (traceInput.trim()) qs.set("trace_id", traceInput.trim());
     if (keyword.trim()) qs.set("keyword", keyword.trim());
     return qs.toString();
-  }, [range, startCustom, endCustom, category, username, agentId, traceInput, keyword, pageSize]);
+  }, [rangeBounds, category, username, agentId, traceInput, keyword, pageSize]);
 
   const load = useCallback(async (offset: number) => {
     setLoading(true);
@@ -541,17 +887,11 @@ export function AuditPage() {
   const total = data?.total ?? 0;
   const offset = data?.offset ?? 0;
   const scope = data?.scope ?? (canReadAll ? "all" : "self");
+  const bounds = rangeBounds();
 
   return (
-    <div className="audit-page">
+    <div className="audit-page" style={listPane.style}>
       {/* 范围提示 */}
-      <div className={`audit-scope-banner ${scope === "all" ? "audit-scope-all" : "audit-scope-self"}`}>
-        <span>{scope === "all" ? "✓" : "ℹ"}</span>
-        <span>
-          {scope === "all" ? "管理员 · 可查看全量审计" : "普通用户 · 仅显示与你相关的记录"}
-          {" · "}审计记录只读，不可删除或关闭。
-        </span>
-      </div>
 
       {/* 筛选栏 */}
       <div className="audit-filter-bar">
@@ -608,16 +948,6 @@ export function AuditPage() {
             )}
           </div>
           <div className="audit-field">
-            <label>关键字</label>
-            <input
-              type="text"
-              placeholder="摘要全文检索"
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
-              style={{ width: 150 }}
-            />
-          </div>
-          <div className="audit-field">
             <label>智能体</label>
             <select value={agentId} onChange={(e) => setAgentId(e.target.value)} style={{ width: 180 }}>
               <option value="">全部智能体</option>
@@ -629,6 +959,16 @@ export function AuditPage() {
           <div className="audit-field">
             <label>Trace ID</label>
             <input type="text" placeholder="精确关联" value={traceInput} onChange={(e) => setTraceInput(e.target.value)} style={{ width: 220 }} />
+          </div>
+          <div className="audit-field">
+            <label>关键字</label>
+            <input
+              type="text"
+              placeholder="摘要全文检索"
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              style={{ width: 150 }}
+            />
           </div>
           {/* 筛选变更已自动防抖查询，此处仅保留「重置」入口 */}
           <div className="audit-filter-actions">
@@ -642,6 +982,15 @@ export function AuditPage() {
           </div>
         </div>
       </div>
+
+      {/* 导出 / 归档：范围与列表筛选同源，避免"看到的是 A、导出的是 B" */}
+      <AuditExportPanel
+        canExport={canExport}
+        canArchive={canArchive}
+        category={category}
+        start={bounds.start}
+        end={bounds.end}
+      />
 
       {error && (
         <div className="skill-alert skill-alert-error" style={{ marginBottom: 12 }}>
@@ -742,6 +1091,9 @@ export function AuditPage() {
             <button className="btn btn-secondary btn-sm" disabled={loading || offset + pageSize >= total} onClick={() => { const p = page + 1; setPage(p); setPageJump(String(p + 1)); void load(p * pageSize); }}>下一页</button>
           </div>
         </div>
+
+        {/* 左右分栏拖拽把手（反向：调整右侧详情宽度） */}
+        <PaneResizer invert onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
 
         {/* 详情抽屉 */}
         {detail && (

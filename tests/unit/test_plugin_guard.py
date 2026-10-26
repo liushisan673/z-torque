@@ -10,10 +10,9 @@ import pytest
 from app.core.errors import ApiError
 from app.kernel.model_gateway import ModelGateway, ModelGatewayError, ModelRequest, ModelResponse
 from app.kernel.plugin_guard import CircuitBreaker, GuardedModelGateway, PluginGuardRegistry
-from app.kernel.skill_gateway import SkillGateway
 from app.kernel.ports.skill_executor import ExecutionResult
 from app.kernel.security_context import SecurityContext
-
+from app.kernel.skill_gateway import SkillGateway
 
 # ---- 熔断器 ----
 

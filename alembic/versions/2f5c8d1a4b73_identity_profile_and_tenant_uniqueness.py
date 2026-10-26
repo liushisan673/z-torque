@@ -8,6 +8,7 @@
 from typing import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "2f5c8d1a4b73"
@@ -19,12 +20,24 @@ depends_on: str | Sequence[str] | None = None
 _NAMING_CONVENTION = {"uq": "uq_%(table_name)s_%(column_0_name)s"}
 
 
+def _offline() -> bool:
+    """offline 模式（``alembic upgrade --sql``）没有真实连接，无法反射。
+
+    此时按「从空库一路升到本版本」静态推演：列一律视为不存在、旧的全局限定一律视为存在。
+    这是生成建库 DDL 的唯一合理假设，否则 --sql 会在 sa.inspect 上直接抛
+    NoInspectionAvailable 使整条迁移链不可导出。
+    """
+    return bool(op.get_context().as_sql)
+
+
 def _inspector():
     return sa.inspect(op.get_bind())
 
 
 def _drop_stale_batch_tables(*tables: str) -> None:
     """SQLite batch 模式中途失败会残留 _alembic_tmp_<table>，导致重跑时"table already exists"。"""
+    if _offline():
+        return
     bind = op.get_bind()
     if bind.dialect.name != "sqlite":
         return
@@ -36,15 +49,34 @@ def _drop_stale_batch_tables(*tables: str) -> None:
 
 
 def _column_names(table: str) -> set[str]:
+    if _offline():
+        return set()
     return {column["name"] for column in _inspector().get_columns(table)}
 
 
-def _unique_constraints(table: str) -> dict[tuple[str, ...], str | None]:
+def _unique_constraints(table: str, *, post_upgrade: bool = False) -> dict[tuple[str, ...], str | None]:
+    """返回 {列组合: 约束名}; post_upgrade 表示按本版本升级后的结构推演（供 downgrade 用）。"""
+    if _offline():
+        if post_upgrade:
+            return {("tenant_id", "name"): f"uq_{table}_tenant_name"}
+        return {("name",): None}
     return {tuple(uc["column_names"]): uc.get("name") for uc in _inspector().get_unique_constraints(table)}
+
+
+def _drop_unique_if_exists(table: str, *names: str) -> None:
+    """离线脚本专用：旧约束名在不同历史库上可能是自动命名，按候选逐个 IF EXISTS 删除。"""
+    for name in names:
+        op.execute(sa.text(f'ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}"'))
 
 
 def _drop_legacy_name_uniqueness(table: str) -> None:
     """把 name 单列全局唯一改为 (tenant_id, name) 租户内唯一。"""
+    if _offline():
+        _drop_unique_if_exists(table, f"uq_{table}_name", f"{table}_name_key")
+        op.execute(
+            sa.text(f'ALTER TABLE "{table}" ADD CONSTRAINT "uq_{table}_tenant_name" UNIQUE ("tenant_id", "name")')
+        )
+        return
     unique = _unique_constraints(table)
     if ("tenant_id", "name") in unique:
         return  # 已迁移
@@ -59,7 +91,11 @@ def _drop_legacy_name_uniqueness(table: str) -> None:
 
 
 def _restore_global_name_uniqueness(table: str) -> None:
-    unique = _unique_constraints(table)
+    if _offline():
+        _drop_unique_if_exists(table, f"uq_{table}_tenant_name")
+        op.execute(sa.text(f'ALTER TABLE "{table}" ADD CONSTRAINT "uq_{table}_name" UNIQUE ("name")'))
+        return
+    unique = _unique_constraints(table, post_upgrade=True)
     with op.batch_alter_table(table, naming_convention=_NAMING_CONVENTION) as batch_op:
         if ("tenant_id", "name") in unique:
             batch_op.drop_constraint(unique[("tenant_id", "name")] or f"uq_{table}_tenant_name", type_="unique")

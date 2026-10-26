@@ -1,12 +1,10 @@
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.core.errors import ApiError
-from app.core.ids import new_uuid7
 from app.models import AuthSession, User
 from app.security.passwords import verify_password
 from app.security.tokens import create_access_token, create_refresh_token, hash_refresh_token

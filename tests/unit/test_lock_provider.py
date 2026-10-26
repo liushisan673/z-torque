@@ -4,16 +4,17 @@ import asyncio
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
 from app.builtin_plugins.lock_provider import InProcessLockProvider, LockProviderPlugin
 from app.builtin_plugins.manifest import PluginSdk
 from app.db.session import SessionLocal
-from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.kernel.ports.specs import PORT_SPECS
+from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.kernel.task.dispatcher import OutboxDispatcher
 from app.models import Agent, AgentVersion, AuthSession, Outbox, Task, TaskEvent, Tenant, User
 from app.security.passwords import hash_password
+from tests.support.ddl import fk_off, fk_on
 
 
 @pytest.fixture(autouse=True)
@@ -21,7 +22,7 @@ def cleanup():
     yield
     with SessionLocal.begin() as db:
         # 全局清理会触碰其他用例残留的外键引用行，沿用 test_auth_flow 的 FK-OFF 模式
-        db.execute(text("PRAGMA foreign_keys=OFF"))
+        fk_off(db)
         db.execute(delete(TaskEvent))
         db.execute(delete(Outbox))
         db.execute(delete(Task))
@@ -30,7 +31,7 @@ def cleanup():
         db.execute(delete(AuthSession))
         db.execute(delete(User))
         db.execute(delete(Tenant))
-        db.execute(text("PRAGMA foreign_keys=ON"))
+        fk_on(db)
 
 
 def test_named_locks_are_mutually_exclusive():

@@ -6,14 +6,12 @@
 """
 
 import hashlib
-from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
 from app.builtin_plugins.manifest import PluginManifest
 from app.core.errors import ApiError
 from app.kernel.ports.object_store import ObjectPutResult, ObjectStore
-from app.kernel.registry.port_registry import PortPriority
 
 _CHUNK_SIZE = 1024 * 1024
 

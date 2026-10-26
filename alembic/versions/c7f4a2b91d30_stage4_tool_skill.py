@@ -1,8 +1,9 @@
 """Stage 04 Tool, Skill, confirmation, and execution log schema."""
 from typing import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision: str = "c7f4a2b91d30"
 down_revision: str | None = "b6e3f0a1c290"

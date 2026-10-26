@@ -1,8 +1,9 @@
 """Stage 9 memory and file resources."""
 from typing import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision: str = "f9a1b2c3d4e5"
 down_revision: str | tuple[str, str] = ("a2b3c4d5e6f7", "e7f8a9b0c1d2")

@@ -2,27 +2,26 @@
 
 import asyncio
 import io
-import json
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, text
+from sqlalchemy import delete
 
 from app.builtin_plugins.long_memory import InProcessKvLongMemory, LongMemoryPlugin
 from app.builtin_plugins.manifest import PluginSdk
 from app.builtin_plugins.object_store import LocalObjectStore, ObjectStorePlugin
-from app.builtin_plugins.sandbox_driver import SandboxDriverPlugin
+from app.builtin_plugins.sandbox_driver import ProcessSandboxDriver, SandboxDriverPlugin
 from app.builtin_plugins.short_memory import DbShortTermMemoryProvider, ShortMemoryPlugin
 from app.builtin_plugins.working_memory import InProcessWorkingMemory, WorkingMemoryPlugin
 from app.core.errors import ApiError
 from app.db.session import SessionLocal
-from app.kernel.md_skill_runtime import ProcessSandboxDriver
-from app.kernel.registry.port_registry import PortRegistry, PortState
 from app.kernel.ports.specs import PORT_SPECS
-from app.models import ShortTermMemory, Tenant, User
+from app.kernel.registry.port_registry import PortRegistry, PortState
+from app.models import Agent, Conversation, ShortTermMemory, Tenant, User
 from app.security.passwords import hash_password
-
+from tests.support.ddl import fk_off, fk_on
 
 # ---- memory.working ----
 
@@ -83,11 +82,11 @@ def test_long_memory_plugin_registers_port():
 def cleanup_short_memory():
     yield
     with SessionLocal.begin() as db:
-        db.execute(text("PRAGMA foreign_keys=OFF"))
+        fk_off(db)
         db.execute(delete(ShortTermMemory))
         db.execute(delete(User))
         db.execute(delete(Tenant))
-        db.execute(text("PRAGMA foreign_keys=ON"))
+        fk_on(db)
 
 
 def test_short_memory_active_memory_readonly_query():
@@ -98,13 +97,21 @@ def test_short_memory_active_memory_readonly_query():
         user = User(tenant_id=tenant.id, username=f"u-{uuid4()}", password_hash=hash_password("pass"))
         db.add(user)
         db.flush()
-        conversation, agent = uuid4(), uuid4()
-        item = ShortTermMemory(tenant_id=tenant.id, user_id=user.id, agent_id=agent, conversation_id=conversation, summary="s", source_start=0, source_end=1, source_message_ids=[], status="ACTIVE")
+        # agent_id / conversation_id 都是真外键，必须建实体行：
+        # 用 uuid4() 顶替只在"外键恰好没被强制"的方言上能过，PG 会直接 23503
+        agent = Agent(tenant_id=tenant.id, owner_user_id=user.id, name=f"a-{uuid4()}", source_type="USER", status="ACTIVE")
+        db.add(agent)
+        db.flush()
+        conversation = Conversation(tenant_id=tenant.id, owner_user_id=user.id, agent_id=agent.id)
+        db.add(conversation)
+        db.flush()
+
+        item = ShortTermMemory(tenant_id=tenant.id, user_id=user.id, agent_id=agent.id, conversation_id=conversation.id, summary="s", source_start=0, source_end=1, source_message_ids=[], status="ACTIVE")
         db.add(item)
         db.flush()
         provider = DbShortTermMemoryProvider()
-        assert provider.active_memory(db, tenant_id=tenant.id, user_id=user.id, agent_id=agent, conversation_id=conversation) is item
-        assert provider.active_memory(db, tenant_id=tenant.id, user_id=user.id, agent_id=agent, conversation_id=uuid4()) is None
+        assert provider.active_memory(db, tenant_id=tenant.id, user_id=user.id, agent_id=agent.id, conversation_id=conversation.id) is item
+        assert provider.active_memory(db, tenant_id=tenant.id, user_id=user.id, agent_id=agent.id, conversation_id=uuid4()) is None
         db.rollback()
 
 
@@ -173,10 +180,17 @@ def test_process_sandbox_driver_times_out(tmp_path):
     assert error.value.code == "AI_SKILL_TIMEOUT"
 
 
-def test_sandbox_plugin_registers_port():
+def test_sandbox_plugin_registers_port(tmp_path):
     spec = next(s for s in PORT_SPECS if s.name == "sandbox.driver")
     registry = PortRegistry((spec,))
-    SandboxDriverPlugin().contribute(PluginSdk.of(SandboxDriverPlugin(), registry=registry, objects={}))
+    # v1.3：白名单在装配期强制校验，直构场景必须显式提供
+    settings = SimpleNamespace(
+        sandbox_allowed_roots=[str(tmp_path / "skills")],
+        sandbox_rlimit_enabled=False,
+        sandbox_max_processes=64,
+        sandbox_max_file_bytes=64 * 1024 * 1024,
+    )
+    SandboxDriverPlugin().contribute(PluginSdk.of(SandboxDriverPlugin(), registry=registry, objects={}, settings=settings))
     registry.resolve()
     resolution = registry.resolution("sandbox.driver")
     assert resolution.state == PortState.RESOLVED
@@ -184,8 +198,17 @@ def test_sandbox_plugin_registers_port():
     assert isinstance(resolution.instance, ProcessSandboxDriver)
 
 
-def test_md_skill_runtime_defaults_to_kernel_sandbox_driver(tmp_path):
+def test_md_skill_runtime_has_no_builtin_sandbox_default(tmp_path):
+    """实现归插件（标准插件可移植性）：内核不再自带默认执行后端。
+
+    未注入 sandbox.driver Port 时必须显式拒绝执行，而不是在内核里偷偷跑一份默认实现——
+    否则"插件是空壳、实现在内核"的问题会借着兜底路径复活。
+    """
     from app.kernel.md_skill_runtime import MdSkillRuntime
 
-    runtime = MdSkillRuntime(tmp_path)
-    assert isinstance(runtime._sandbox, ProcessSandboxDriver)
+    runtime = MdSkillRuntime(tmp_path, enabled=True)
+    assert runtime._sandbox is None
+    source = (Path(__file__).resolve().parents[2] / "app" / "kernel" / "md_skill_runtime.py").read_text(encoding="utf-8")
+    # 内核文件不得再出现执行实现的特征符号（加固逻辑已整体下沉到插件）
+    for marker in ("setrlimit", "killpg", "start_new_session", "create_subprocess_exec"):
+        assert marker not in source

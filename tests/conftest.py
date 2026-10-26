@@ -9,13 +9,17 @@
 
 import os
 
-os.environ["DATABASE_URL"] = "sqlite:///./data/z_torque_test.db"
+# 方言验证（如 PostgreSQL）必须**显式**通过 ZTORQUE_TEST_DATABASE_URL 指定，
+# 绝不读取普通 DATABASE_URL：避免有人带着生产连接串跑测试，被 drop_all 清库。
+os.environ["DATABASE_URL"] = os.environ.get("ZTORQUE_TEST_DATABASE_URL", "sqlite:///./data/z_torque_test.db")
 
 import pytest  # noqa: E402
 
+# 插件私有表（方案 b）：模型随插件目录，需显式 import 才能进 create_all 的 metadata
+import app.builtin_plugins.audit_export_archive.models  # noqa: E402, F401
+import app.models  # noqa: E402, F401  # 注册所有模型到 Base.metadata
 from app.db.base import Base  # noqa: E402
 from app.db.session import engine  # noqa: E402
-import app.models  # noqa: E402, F401  # 注册所有模型到 Base.metadata
 
 
 @pytest.fixture(scope="session", autouse=True)

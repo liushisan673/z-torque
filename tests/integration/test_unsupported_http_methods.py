@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select
 
 from app.db.session import SessionLocal
 from app.models import (
@@ -19,14 +19,19 @@ from app.models import (
     ToolVersion,
     User,
 )
-from scripts.archive_unsupported_http_tools import archive, collect_unsupported, composite_dependents
+from scripts.archive_unsupported_http_tools import (
+    archive,
+    collect_unsupported,
+    composite_dependents,
+)
+from tests.support.ddl import fk_off, fk_on
 
 
 def _reset(db) -> None:
-    db.execute(text("PRAGMA foreign_keys=OFF"))
+    fk_off(db)
     for model in (SkillVersionTool, ConnectorTool, ToolVersion, Tool, Connector):
         db.execute(delete(model))
-    db.execute(text("PRAGMA foreign_keys=ON"))
+    fk_on(db)
 
 
 def _seed(db, method: str, name: str) -> tuple[Tool, ToolVersion]:

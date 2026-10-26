@@ -2,7 +2,18 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import GUID, TenantModel, UUIDModel
@@ -45,7 +56,9 @@ class AgentVersion(TenantModel):
     config_schema_version: Mapped[str] = mapped_column(String(32), nullable=False, default="1")
     config_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     snapshot_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    published_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # 迁移里该列是 timestamptz，模型必须声明 timezone=True，
+    # 否则 PG 读出来是 aware、模型以为是 naive，跨类型比较会抛 TypeError
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     delegation_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     allowed_child_agent_versions: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     child_necessity_policy: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)

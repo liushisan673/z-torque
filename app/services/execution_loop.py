@@ -1,13 +1,19 @@
+import asyncio
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
-from datetime import datetime, timezone
-import asyncio
 
-from sqlalchemy import select, update
+from sqlalchemy import update
 
 from app.core.errors import ApiError
-from app.kernel.model_gateway import ModelGateway, ModelGatewayError, ModelMessage, ModelRequest, ModelResponse
+from app.kernel.model_gateway import (
+    ModelGateway,
+    ModelGatewayError,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+)
 from app.kernel.ports.model_selector import ModelSelector, resolve_model_selection
 from app.kernel.ports.skill_executor import ExecutionResult
 from app.kernel.security_context import SecurityContext
@@ -62,8 +68,6 @@ class AgentExecutionLoop:
         delegation_depth: int = 0,
         resume: dict | None = None,
     ) -> LoopResult:
-        tenant_id = ctx.tenant_id
-        user_id = ctx.user_id
         task = db.get(Task, task_id) if task_id else None
         if resume is not None:
             # 审批恢复续跑：从挂起时的上下文快照重建消息，回填已重放的工具结果后继续循环

@@ -9,7 +9,6 @@ import logging
 
 from app.builtin_plugins.manifest import PluginManifest
 from app.kernel.ports.observability_sink import ObservabilitySink
-from app.kernel.registry.port_registry import PortPriority
 
 logger = logging.getLogger("z_torque.observability")
 

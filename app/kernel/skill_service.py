@@ -6,9 +6,18 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.core.limits import MAX_SKILL_BOUND_TOOLS
-from app.kernel.audit.service import record_audit
 from app.kernel.agent.version_service import _snapshot_hash
-from app.models import AgentVersionSkill, ConnectorTool, Skill, SkillExecutionLog, SkillVersion, SkillVersionTool, Tool, ToolVersion
+from app.kernel.audit.service import record_audit
+from app.models import (
+    AgentVersionSkill,
+    ConnectorTool,
+    Skill,
+    SkillExecutionLog,
+    SkillVersion,
+    SkillVersionTool,
+    Tool,
+    ToolVersion,
+)
 
 MAX_TOOL_TAGS = 20
 MAX_TOOL_TAG_LENGTH = 32

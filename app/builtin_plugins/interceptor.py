@@ -7,7 +7,6 @@ skill_executors（SkillGateway 执行侧审计发射点）。
 
 from app.builtin_plugins.manifest import PluginManifest
 from app.kernel.audit.service import AuditExecutionInterceptor
-from app.kernel.registry.port_registry import PortPriority
 
 
 class InterceptorPlugin:

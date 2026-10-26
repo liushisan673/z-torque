@@ -5,11 +5,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.security.permissions import admin_owned_clause
 from app.core.errors import ApiError
 from app.core.responses import success_response
 from app.db.session import get_db
-from app.kernel.agent.service import archive_agent, copy_agent, create_agent, delete_agent, update_agent
+from app.kernel.agent.service import (
+    archive_agent,
+    copy_agent,
+    create_agent,
+    delete_agent,
+    update_agent,
+)
 from app.kernel.agent.skill_service import attach_skill_version, detach_skill_version
 from app.kernel.agent.version_service import (
     archive_check,
@@ -28,6 +33,7 @@ from app.schemas.agent import (
     VersionCreate,
 )
 from app.schemas.agent_skill import AgentSkillAttachRequest
+from app.security.permissions import admin_owned_clause
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 

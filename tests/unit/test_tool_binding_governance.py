@@ -21,6 +21,7 @@ from app.kernel.skill_service import (
     validate_binding_role,
 )
 from app.models import Skill, SkillVersion, SkillVersionTool, Tenant, Tool, ToolVersion, User
+from tests.support.ddl import fk_off, fk_on
 
 
 def test_normalize_tags_trims_dedupes_and_limits():
@@ -112,6 +113,7 @@ def test_resolve_step_arguments_explicit_templates_still_resolved():
 def binding_cleanup():
     yield
     with SessionLocal.begin() as db:
+        fk_off(db)
         db.execute(delete(SkillVersionTool))
         db.execute(delete(ToolVersion))
         db.execute(delete(Tool))
@@ -119,6 +121,7 @@ def binding_cleanup():
         db.execute(delete(Skill))
         db.execute(delete(User))
         db.execute(delete(Tenant))
+        fk_on(db)
 
 
 def _binding_fixture(db, *, skill_status: str = "DRAFT"):

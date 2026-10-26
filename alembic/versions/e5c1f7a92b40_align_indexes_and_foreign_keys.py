@@ -10,6 +10,7 @@ SQLite 不支持 ``ALTER TABLE ADD CONSTRAINT``，加外键走 batch 重建表�
 from typing import Sequence
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision: str = "e5c1f7a92b40"
@@ -92,6 +93,9 @@ def _ident(name: str) -> str:
 
 def upgrade() -> None:
     conn = op.get_bind()
+    # offline 模式（--sql）只有 MockConnection，读不到数据：孤儿校验无法进行，
+    # 跳过即可（离线脚本面向空库/审计，不存在历史脏数据）。
+    offline = bool(op.get_context().as_sql)
 
     for table, column in _NULLABLE_ORPHANS:
         op.execute(
@@ -102,18 +106,19 @@ def upgrade() -> None:
             )
         )
 
-    for table, column, referred in _NOT_NULL_ORPHANS:
-        count = conn.execute(
-            sa.text(
-                f"SELECT COUNT(*) FROM {_ident(table)} "
-                f"WHERE {_ident(column)} NOT IN (SELECT id FROM {_ident(referred)})"
-            )
-        ).scalar_one()
-        if count:
-            raise RuntimeError(
-                f"{table}.{column} 存在 {count} 行孤儿引用（{referred} 中已无对应记录），"
-                f"无法安全添加外键；请先修复数据后重跑 alembic upgrade head。"
-            )
+    if not offline:
+        for table, column, referred in _NOT_NULL_ORPHANS:
+            count = conn.execute(
+                sa.text(
+                    f"SELECT COUNT(*) FROM {_ident(table)} "
+                    f"WHERE {_ident(column)} NOT IN (SELECT id FROM {_ident(referred)})"
+                )
+            ).scalar_one()
+            if count:
+                raise RuntimeError(
+                    f"{table}.{column} 存在 {count} 行孤儿引用（{referred} 中已无对应记录），"
+                    f"无法安全添加外键；请先修复数据后重跑 alembic upgrade head。"
+                )
 
     for table, name, referred, columns, referred_columns, ondelete in _FOREIGN_KEYS:
         # batch 在 SQLite 上重建表、在 PG 上退化为 ALTER TABLE

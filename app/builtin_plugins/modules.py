@@ -7,6 +7,7 @@ Profile 条目既可以是 Module 名，也可以直接是插件名（细粒度�
 
 from app.builtin_plugins.manifest import ModuleSpec, validate_module
 from app.builtin_plugins.plugins import BUILTIN_PLUGINS
+from app.kernel.registry.port_registry import AssemblyError
 
 MODULE_REGISTRY: dict[str, ModuleSpec] = {
     "governance": ModuleSpec(
@@ -57,6 +58,12 @@ MODULE_REGISTRY: dict[str, ModuleSpec] = {
         plugins=("mcp_connector",),
         requires_ports=("skill.executor",),
     ),
+    "a2a": ModuleSpec(
+        name="a2a",
+        description="Agent-to-Agent 发现、路由与会话（企业版）",
+        plugins=("a2a_gateway",),
+        requires_ports=("skill.executor", "identity.provider", "authz.provider"),
+    ),
 }
 
 # Profile → 模块清单（声明式装配；展开顺序即 contribute 顺序，
@@ -73,6 +80,25 @@ PROFILE_COMMUNITY: tuple[str, ...] = (
     "execution",
     "connectivity",
 )
+
+# 企业版 Profile：社区集合 + 审计导出归档（governance 域追加插件）+ a2a 模块。
+# 显式保留 skill_executors / model_provider / mcp_connector（契约 §2.3），禁止写成
+# 「社区集合之外仅两项」这类隐式覆盖。
+PROFILE_ENTERPRISE: tuple[str, ...] = (*PROFILE_COMMUNITY, "audit_export_archive", "a2a")
+
+PROFILE_REGISTRY: dict[str, tuple[str, ...]] = {
+    "community": PROFILE_COMMUNITY,
+    "enterprise": PROFILE_ENTERPRISE,
+}
+
+
+def resolve_profile(name: str | None) -> tuple[str, ...]:
+    """Profile 名 → 条目元组；未知名字引用即拒绝启动（不静默回退社区版）。"""
+    key = (name or "community").strip().lower()
+    if key not in PROFILE_REGISTRY:
+        raise AssemblyError(f"unknown assembly profile: {name!r} (expect one of {sorted(PROFILE_REGISTRY)})")
+    return PROFILE_REGISTRY[key]
+
 
 _KNOWN_PLUGINS = {plugin_cls.manifest.name: plugin_cls for plugin_cls in BUILTIN_PLUGINS}
 for _spec in MODULE_REGISTRY.values():

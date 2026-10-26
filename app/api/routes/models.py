@@ -1,13 +1,12 @@
-from typing import Annotated
-from uuid import UUID
-
 import time
+from typing import Annotated
+from urllib.parse import urlparse
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-from urllib.parse import urlparse
 
 from app.api.deps import get_current_user
 from app.core.errors import ApiError

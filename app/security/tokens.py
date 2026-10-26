@@ -6,7 +6,6 @@ import jwt
 
 from app.config import get_settings
 
-
 ALGORITHM = "HS256"
 
 

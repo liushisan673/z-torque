@@ -1,4 +1,3 @@
-import asyncio
 from uuid import uuid4
 
 import pytest
@@ -8,7 +7,18 @@ from app.db.session import SessionLocal
 from app.kernel.security_context import SecurityContext
 from app.kernel.task.service import create_task, transition_task
 from app.kernel.task.states import TaskStatus
-from app.models import Agent, AgentVersion, AuthSession, Conversation, Message, Outbox, Task, TaskEvent, Tenant, User
+from app.models import (
+    Agent,
+    AgentVersion,
+    AuthSession,
+    Conversation,
+    Message,
+    Outbox,
+    Task,
+    TaskEvent,
+    Tenant,
+    User,
+)
 from app.security.passwords import hash_password
 
 

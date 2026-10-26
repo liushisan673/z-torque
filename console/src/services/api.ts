@@ -213,6 +213,37 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   return envelope.data;
 }
 
+/**
+ * 受保护文件下载：先带 Bearer 头取回二进制，再触发浏览器保存。
+ * 直接 `<a href>` 无法携带 Authorization（跨源 + 无 cookie 场景），会 401。
+ */
+export async function downloadFile(path: string, filename: string): Promise<void> {
+  const url = buildUrl(path);
+  const token = getAccessToken();
+  const resp = await fetchWithAuth(url, {
+    method: "GET",
+    credentials: "same-origin",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!resp.ok) {
+    const envelope = await safeEnvelope(resp);
+    throw new ApiRequestError(
+      String(envelope?.code ?? "AI_INTERNAL_ERROR"),
+      envelope?.message ?? `下载失败（${resp.status}）`,
+      resp.status,
+    );
+  }
+  const blob = await resp.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
 async function safeEnvelope(resp: Response): Promise<Partial<ApiEnvelope<unknown>> | null> {
   try {
     const contentType = resp.headers.get("content-type") || "";

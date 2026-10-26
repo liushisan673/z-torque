@@ -20,12 +20,12 @@ from app.kernel.ports.lock_provider import LockProvider
 from app.kernel.ports.memory_short import ShortTermMemoryProvider
 from app.kernel.ports.model_selector import ModelSelection, ModelSelector, resolve_model_selection
 from app.kernel.ports.queue_driver import QueueDriver
-from app.kernel.registry.active import call_optional, emit_event
+from app.kernel.registry.active import call_optional
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.dispatcher import OutboxDispatcher, execute_simulated
-from app.kernel.task.service import append_task_event, sanitize_summary, transition_task
+from app.kernel.task.service import sanitize_summary, transition_task
 from app.kernel.task.states import TERMINAL_STATES, TaskStatus
 from app.kernel.task.worker import Worker
 from app.models import (
@@ -42,7 +42,11 @@ from app.models import (
     TaskEvent,
     ToolVersion,
 )
-from app.services.context_builder import assistant_reasoning_parts, build_agent_system_prompt, build_context
+from app.services.context_builder import (
+    assistant_reasoning_parts,
+    build_agent_system_prompt,
+    build_context,
+)
 from app.services.execution_loop import AgentExecutionLoop
 from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
@@ -217,7 +221,12 @@ class TaskRuntime:
         return replace(selection, max_tokens=max_tokens)
 
     async def _claim(self, db, task_id: UUID) -> bool:
-        """原子认领 QUEUED→RUNNING，并补写 TASK_STARTED 事件（claim 是裸更新，事件流需要"开始执行"步骤）。"""
+        """原子认领 QUEUED→RUNNING，并补写 TASK_STARTED 事件。
+
+        裸 UPDATE + rowcount 保证并发认领原子性；状态迁移与开始事件合并为单次
+        commit，避免两段提交间崩溃产生「RUNNING 但无开始事件」的任务
+        （契约不变量2：状态迁移与事件流一致性）。
+        """
         claimed = db.execute(
             update(Task).where(Task.id == task_id, Task.status == TaskStatus.QUEUED)
             .values(status=TaskStatus.RUNNING, started_at=datetime.now(UTC), attempt_count=Task.attempt_count + 1)
@@ -225,7 +234,6 @@ class TaskRuntime:
         if claimed.rowcount != 1:
             db.rollback()
             return False
-        db.commit()
         task = db.get(Task, task_id)
         db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq + 1, event_type="TASK_STARTED", from_state=TaskStatus.QUEUED, to_state=TaskStatus.RUNNING, summary="task started"))
         task.last_event_seq += 1
@@ -351,7 +359,6 @@ class TaskRuntime:
             return self._fail_model_task(db, task, "AI_TASK_CONTEXT_INVALID", "task context is invalid")
         agent_version = db.get(AgentVersion, task.agent_version_id)
         mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id)
-        system_prompt = build_agent_system_prompt(db, agent_version, [m.skill_version_id for m in mappings.values() if m.skill_version_id])
         # 重放挂起的工具调用（checkpoint 合法性与幂等检查：已成功执行过则直接取日志结果）
         call = checkpoint.pending_call
         tool_id = UUID(str(call["tool_version_id"]))

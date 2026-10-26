@@ -8,8 +8,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
-from app.db.session import SessionLocal
 from app.builtin_plugins.queue_driver import InMemoryQueueDriver
+from app.db.session import SessionLocal
 from app.kernel.model_gateway.contracts import ModelRequest, ModelResponse
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_confirmation import pause_task_for_confirmation

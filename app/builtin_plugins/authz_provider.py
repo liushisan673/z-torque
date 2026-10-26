@@ -13,7 +13,6 @@ from sqlalchemy.orm import Session
 from app.builtin_plugins.manifest import PluginManifest
 from app.kernel.authz import PermissionChecker
 from app.kernel.ports.authz_provider import AuthzProvider
-from app.kernel.registry.port_registry import PortPriority
 
 
 class BuiltinAuthzProvider(AuthzProvider):

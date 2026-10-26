@@ -1,9 +1,18 @@
+"""MD-Skill 脚本运行时（内核调用方，**不含执行实现**）。
+
+实现归属已下沉到插件 `app/builtin_plugins/sandbox_driver/`（标准插件可移植性）：
+内核只保留 Port 抽象 `app/kernel/ports/sandbox_driver.py` 与本调用方。
+
+语义变化（有意为之，不再静默降级）：
+- 装配期由 `sandbox_driver` 插件注入 Port 实例，正常路径语义不变；
+- **未注入实现时直接拒绝执行**（`AI_CAPABILITY_UNAVAILABLE`），而不是在内核里
+  偷偷跑一份"默认实现"——那会让"插件只是空壳、实现在内核"的问题重新出现，
+  也会让企业版换掉 Port 后仍有一条绕过路径。
+"""
+
 from __future__ import annotations
 
-import asyncio
-import json
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -14,41 +23,6 @@ from app.kernel.md_skill import MdSkillManifest, validate_input
 from app.kernel.ports.sandbox_driver import SandboxDriver
 
 
-class ProcessSandboxDriver(SandboxDriver):
-    """sandbox.driver 内核默认实现：进程内受限执行（独立解释器 -I + 最小环境变量）。
-
-    Windows 无可靠的进程级网络/文件系统沙箱，由调用方（MdSkillRuntime）按平台
-    显式降级；企业版可经 PortRegistry 以 PLUGIN/EXPLICIT 优先级替换为容器隔离。
-    """
-
-    async def run(self, *, script_path: Path, arguments: dict[str, Any], cwd: Path, timeout_seconds: float, max_output_bytes: int) -> dict[str, Any]:
-        return await run_isolated_process(script_path=script_path, arguments=arguments, cwd=cwd, timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes)
-
-
-async def run_isolated_process(*, script_path: Path, arguments: dict[str, Any], cwd: Path, timeout_seconds: float, max_output_bytes: int) -> dict[str, Any]:
-    """受控执行单脚本：stdin 传 JSON 参数、stdout 收 JSON 结果（sandbox.driver 内核实现核心）。"""
-    env = {"PATH": os.environ.get("PATH", ""), "PYTHONNOUSERSITE": "1"}
-    process = await asyncio.create_subprocess_exec(sys.executable, "-I", str(script_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd), env=env)
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(json.dumps(arguments).encode()), timeout=timeout_seconds)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        raise ApiError("AI_SKILL_TIMEOUT", "MD-Skill script timed out", 504)
-    if len(stdout) > max_output_bytes or len(stderr) > max_output_bytes:
-        raise ApiError("AI_SKILL_FAILED", "MD-Skill script output exceeded limit", 500)
-    if process.returncode != 0:
-        raise ApiError("AI_SKILL_FAILED", "MD-Skill script failed", 500)
-    try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        # 脚本输出非 JSON 属"执行结果不合约"，必须转为 ApiError，不能冒泡成 500 未处理异常
-        raise ApiError("AI_SKILL_FAILED", "MD-Skill script output is not valid JSON", 500) from exc
-    if not isinstance(payload, dict):
-        raise ApiError("AI_SKILL_FAILED", "MD-Skill script output must be a JSON object", 500)
-    return payload
-
-
 class MdSkillRuntime:
     """Run only registered scripts; capability stays unavailable without isolation."""
 
@@ -57,9 +31,8 @@ class MdSkillRuntime:
         self.enabled = enabled
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
-        # sandbox.driver Port 解析结果由装配根经插件注入（P2 收口）；未注入时
-        # 使用内核默认进程内受限执行（直构场景语义不变，单一路径无分支）
-        self._sandbox = sandbox_driver or ProcessSandboxDriver()
+        # sandbox.driver Port 由装配根经插件注入；缺省不构造任何实现（见模块 docstring）
+        self._sandbox = sandbox_driver
 
     async def execute(self, manifest: MdSkillManifest, arguments: dict[str, Any]) -> dict[str, Any]:
         validate_input(manifest, arguments)
@@ -70,6 +43,9 @@ class MdSkillRuntime:
         # Windows has no reliable process-level network/filesystem sandbox here.
         if os.name == "nt":
             raise ApiError("AI_CAPABILITY_UNAVAILABLE", "MD-Skill script isolation is unavailable on this platform", 503)
+        if self._sandbox is None:
+            # 能力缺失必须显式暴露：未装 sandbox_driver 插件时不允许执行脚本
+            raise ApiError("AI_CAPABILITY_UNAVAILABLE", "no sandbox.driver implementation is resolved", 503)
         if len(manifest.script_files) != 1:
             raise ApiError("AI_SKILL_INVALID_MANIFEST", "exactly one script is required", 422)
         script = (self.root / manifest.relative_path / manifest.script_files[0]).resolve()

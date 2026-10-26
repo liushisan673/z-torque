@@ -1,0 +1,1288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Z-Torque · Skill</title>
+  <style>
+    /* ========== macOS-inspired design tokens ========== */
+    :root {
+      --bg-app: #f5f5f7;
+      --bg-sidebar: #ececef;
+      --bg-surface: #ffffff;
+      --bg-hover: rgba(0, 0, 0, 0.04);
+      --bg-active: rgba(0, 122, 255, 0.12);
+      --bg-input: #ffffff;
+      --border: rgba(0, 0, 0, 0.08);
+      --border-strong: rgba(0, 0, 0, 0.12);
+      --separator: rgba(0, 0, 0, 0.06);
+      --text: #1d1d1f;
+      --text-secondary: #6e6e73;
+      --text-tertiary: #86868b;
+      --text-inverse: #ffffff;
+      --accent: #007aff;
+      --accent-hover: #0066d6;
+      --accent-soft: rgba(0, 122, 255, 0.1);
+      --success: #34c759;
+      --success-soft: rgba(52, 199, 89, 0.12);
+      --warning: #ff9f0a;
+      --warning-soft: rgba(255, 159, 10, 0.12);
+      --danger: #ff3b30;
+      --danger-soft: rgba(255, 59, 48, 0.1);
+      --violet: #af52de;
+      --violet-soft: rgba(175, 82, 222, 0.12);
+      --cyan: #32ade6;
+      --cyan-soft: rgba(50, 173, 230, 0.12);
+      --amber: #ff9f0a;
+      --amber-soft: rgba(255, 159, 10, 0.14);
+      --radius-sm: 6px;
+      --radius: 10px;
+      --radius-lg: 14px;
+      --radius-pill: 999px;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+      --shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 0 1px rgba(0, 0, 0, 0.04);
+      --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08), 0 0 1px rgba(0, 0, 0, 0.04);
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+        "Helvetica Neue", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --font-mono: "SF Mono", ui-monospace, Menlo, Monaco, "Cascadia Mono", monospace;
+      --topbar-h: 52px;
+      --sidebar-w: 380px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg-app);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 13px;
+      line-height: 1.47;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    /* ---------- Top toolbar (macOS window toolbar feel) ---------- */
+    .topbar {
+      height: var(--topbar-h);
+      background: rgba(255, 255, 255, 0.72);
+      backdrop-filter: saturate(180%) blur(20px);
+      -webkit-backdrop-filter: saturate(180%) blur(20px);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px 0 20px;
+      position: relative;
+      z-index: 10;
+    }
+    .topbar-brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 600;
+      font-size: 14px;
+      letter-spacing: -0.01em;
+      min-width: 140px;
+    }
+    .topbar-brand .logo {
+      width: 26px;
+      height: 26px;
+      background: linear-gradient(180deg, #0a84ff 0%, #007aff 100%);
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      box-shadow: 0 1px 3px rgba(0, 122, 255, 0.35);
+    }
+    .topbar-nav {
+      display: flex;
+      gap: 2px;
+      flex-wrap: wrap;
+      justify-content: center;
+      flex: 1;
+    }
+    .topbar-nav a {
+      padding: 5px 12px;
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      text-decoration: none;
+      font-size: 13px;
+      font-weight: 500;
+      transition: background 0.12s, color 0.12s;
+    }
+    .topbar-nav a:hover {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+    .topbar-nav a.active {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .topbar-user {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      min-width: 120px;
+      justify-content: flex-end;
+    }
+    .topbar-user .avatar {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #5ac8fa, #007aff);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 11px;
+    }
+    .btn-text {
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 13px;
+      padding: 4px 8px;
+      border-radius: var(--radius-sm);
+      font-family: inherit;
+    }
+    .btn-text:hover {
+      color: var(--danger);
+      background: var(--danger-soft);
+    }
+
+    /* ---------- Main layout ---------- */
+    .main {
+      display: flex;
+      height: calc(100vh - var(--topbar-h));
+    }
+
+    /* ---------- Left list (sidebar style) ---------- */
+    .list-pane {
+      width: var(--sidebar-w);
+      background: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .list-header {
+      padding: 16px 14px 12px;
+      border-bottom: 1px solid var(--separator);
+      background: transparent;
+    }
+    .list-header h1 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 4px;
+      color: var(--text);
+    }
+    .list-header .sub {
+      font-size: 11.5px;
+      color: var(--text-tertiary);
+      margin-bottom: 12px;
+      line-height: 1.45;
+    }
+    .list-header .sub code {
+      font-size: 11px;
+      background: rgba(0, 0, 0, 0.05);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+    }
+    .list-actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 10px;
+      flex-wrap: wrap;
+    }
+
+    /* Buttons — native macOS push-button feel */
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 28px;
+      padding: 0 12px;
+      border: none;
+      border-radius: var(--radius-sm);
+      background: var(--accent);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+      box-shadow: 0 1px 2px rgba(0, 122, 255, 0.25);
+      transition: background 0.12s;
+    }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-primary:active { background: #005bbf; }
+
+    .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: 28px;
+      padding: 0 11px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--bg-surface);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+      box-shadow: var(--shadow-sm);
+      transition: background 0.12s, border-color 0.12s;
+    }
+    .btn-secondary:hover {
+      background: #fafafa;
+      border-color: rgba(0, 0, 0, 0.18);
+    }
+
+    .btn-danger-outline {
+      height: 28px;
+      padding: 0 11px;
+      border: 1px solid rgba(255, 59, 48, 0.35);
+      border-radius: var(--radius-sm);
+      background: var(--bg-surface);
+      color: var(--danger);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .btn-danger-outline:hover { background: var(--danger-soft); }
+
+    .btn-success {
+      height: 28px;
+      padding: 0 11px;
+      border: none;
+      border-radius: var(--radius-sm);
+      background: var(--success);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+      box-shadow: 0 1px 2px rgba(52, 199, 89, 0.3);
+    }
+    .btn-success:hover { background: #2db350; }
+
+    /* Search — macOS search field */
+    .search-box {
+      width: 100%;
+      height: 28px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 0 10px 0 30px;
+      font-size: 13px;
+      outline: none;
+      background: var(--bg-surface)
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='13' viewBox='0 0 24 24' fill='none' stroke='%2386868b' stroke-width='2.2'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='M21 21l-4.35-4.35'/%3E%3C/svg%3E")
+        no-repeat 9px center;
+      color: var(--text);
+      font-family: inherit;
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    .search-box::placeholder { color: var(--text-tertiary); }
+    .search-box:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.2), inset 0 1px 2px rgba(0, 0, 0, 0.03);
+      background-color: #fff;
+    }
+
+    /* Filter pills */
+    .filter-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 10px;
+    }
+    .filter-tab {
+      padding: 3px 10px;
+      border-radius: var(--radius-pill);
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.12s, color 0.12s;
+    }
+    .filter-tab:hover { background: var(--bg-hover); color: var(--text); }
+    .filter-tab.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    /* Skill list */
+    .skill-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px 8px 16px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+    }
+    .skill-list::-webkit-scrollbar { width: 8px; }
+    .skill-list::-webkit-scrollbar-thumb {
+      background: rgba(0, 0, 0, 0.12);
+      border-radius: 4px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }
+
+    .skill-card {
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      border: 1px solid transparent;
+      margin-bottom: 2px;
+      transition: background 0.1s, border-color 0.1s;
+    }
+    .skill-card:hover { background: rgba(255, 255, 255, 0.55); }
+    .skill-card.active {
+      background: var(--bg-surface);
+      border-color: var(--border);
+      box-shadow: var(--shadow-sm);
+    }
+    .skill-card.active .name { color: var(--accent); }
+
+    .skill-card .row1 {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 3px;
+    }
+    .skill-card .name {
+      font-size: 13.5px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .skill-card .desc {
+      font-size: 12px;
+      color: var(--text-secondary);
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      margin-bottom: 6px;
+      line-height: 1.4;
+    }
+    .skill-card .meta {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+    .skill-card .path {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 5px;
+      font-family: var(--font-mono);
+    }
+
+    /* Tags — soft system colors */
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+    }
+    .tag-md { background: var(--violet-soft); color: #8e3cb8; }
+    .tag-official { background: rgba(0, 122, 255, 0.1); color: #0066d6; }
+    .tag-mine { background: rgba(255, 45, 85, 0.1); color: #d70015; }
+    .tag-published { background: var(--success-soft); color: #248a3d; }
+    .tag-draft { background: var(--warning-soft); color: #c93400; }
+    .tag-pending { background: rgba(255, 149, 0, 0.14); color: #c93400; border: 1px solid rgba(255, 149, 0, 0.25); }
+    .tag-instruction { background: var(--cyan-soft); color: #0071a4; }
+    .tag-script { background: var(--amber-soft); color: #9a6700; }
+    .tag-confirm { background: var(--danger-soft); color: #d70015; }
+    .ver { font-size: 11px; color: var(--text-tertiary); }
+
+    /* ---------- Detail pane ---------- */
+    .detail-pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      overflow: hidden;
+      background: var(--bg-app);
+    }
+    .detail-header {
+      padding: 18px 24px 14px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .detail-header .breadcrumb {
+      font-size: 11.5px;
+      color: var(--text-tertiary);
+      margin-bottom: 6px;
+    }
+    .detail-header .title-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .detail-header h2 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      margin-bottom: 4px;
+      color: var(--text);
+    }
+    .detail-header .subtitle {
+      font-size: 13px;
+      color: var(--text-secondary);
+      max-width: 560px;
+      line-height: 1.45;
+    }
+    .detail-actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .detail-tags {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+      flex-wrap: wrap;
+    }
+    .detail-tags .tag {
+      font-size: 11.5px;
+      padding: 2px 9px;
+    }
+
+    /* Segmented control style tabs */
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      padding: 0 24px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .tab {
+      padding: 11px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      margin-bottom: -1px;
+      font-family: inherit;
+      transition: color 0.12s;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+
+    .detail-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px 40px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+    }
+
+    /* Cards / sections */
+    .section {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 18px 20px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-sm);
+    }
+    .section h3 {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 8px;
+      letter-spacing: -0.01em;
+    }
+    .section h3 .hint {
+      font-size: 11.5px;
+      font-weight: 400;
+      color: var(--text-tertiary);
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    .form-grid .full { grid-column: 1 / -1; }
+
+    .field label {
+      display: block;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      margin-bottom: 5px;
+    }
+    .field input {
+      width: 100%;
+      height: 30px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 0 10px;
+      font-size: 13px;
+      color: var(--text);
+      outline: none;
+      background: var(--bg-input);
+      font-family: inherit;
+      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.03);
+      transition: border-color 0.12s, box-shadow 0.12s;
+    }
+    .field input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.18);
+    }
+    .field input:disabled {
+      color: var(--text-secondary);
+      background: #f9f9fb;
+      cursor: not-allowed;
+    }
+    .field .help {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-top: 4px;
+      line-height: 1.4;
+    }
+
+    .md-preview {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      background: #fafafa;
+      font-size: 13px;
+      line-height: 1.6;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .md-preview h4 {
+      font-size: 13px;
+      font-weight: 600;
+      margin: 12px 0 6px;
+      color: var(--text);
+    }
+    .md-preview h4:first-child { margin-top: 0; }
+    .md-preview ul { padding-left: 18px; color: var(--text-secondary); }
+    .md-preview li { margin-bottom: 3px; }
+    .md-preview p { color: var(--text-secondary); margin-bottom: 8px; }
+
+    .schema-box {
+      font-family: var(--font-mono);
+      font-size: 12px;
+      background: #1d1d1f;
+      color: #e8e8ed;
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      overflow-x: auto;
+      line-height: 1.5;
+      white-space: pre;
+    }
+
+    .file-list { display: flex; flex-direction: column; gap: 6px; }
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 11px;
+      background: #f9f9fb;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      font-size: 13px;
+    }
+    .file-item .icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 7px;
+      background: var(--amber-soft);
+      color: #9a6700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .file-item .name { font-weight: 500; }
+    .file-item .path {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      font-family: var(--font-mono);
+    }
+
+    .flag-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .flag-card {
+      padding: 11px 12px;
+      background: #f9f9fb;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+    .flag-card .label {
+      font-size: 11px;
+      color: var(--text-tertiary);
+      margin-bottom: 3px;
+    }
+    .flag-card .value {
+      font-size: 13.5px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .version-item {
+      display: flex;
+      gap: 12px;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--separator);
+    }
+    .version-item:last-child { border-bottom: none; }
+    .version-item .v-badge {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: #f0f0f2;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+    .version-item.current .v-badge {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .version-item .v-body { flex: 1; min-width: 0; }
+    .version-item .v-title {
+      font-size: 13px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .version-item .v-meta {
+      font-size: 12px;
+      color: var(--text-tertiary);
+      margin-top: 2px;
+    }
+
+    .alert {
+      padding: 11px 13px;
+      border-radius: var(--radius);
+      font-size: 12.5px;
+      margin-bottom: 14px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      line-height: 1.5;
+    }
+    .alert-info {
+      background: var(--accent-soft);
+      color: #0055b3;
+      border: 1px solid rgba(0, 122, 255, 0.2);
+    }
+    .alert-warn {
+      background: var(--warning-soft);
+      color: #9a6700;
+      border: 1px solid rgba(255, 159, 10, 0.25);
+    }
+    .alert-violet {
+      background: var(--violet-soft);
+      color: #7a2e9e;
+      border: 1px solid rgba(175, 82, 222, 0.2);
+    }
+
+    .tag-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+    .tag-chip {
+      font-size: 12px;
+      padding: 2px 9px;
+      border-radius: var(--radius-pill);
+      background: #f0f0f2;
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    .load-steps {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.55;
+      padding: 12px;
+      background: #f9f9fb;
+      border-radius: var(--radius);
+      border: 1px dashed var(--border-strong);
+    }
+    .load-steps ol { padding-left: 18px; margin-top: 6px; }
+    .load-steps li { margin-bottom: 3px; }
+
+    code {
+      font-size: 11.5px;
+      background: rgba(0, 0, 0, 0.05);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-family: var(--font-mono);
+    }
+
+    @media (max-width: 900px) {
+      .list-pane { width: 320px; }
+      .form-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-brand">
+      <div class="logo">Z</div>
+      <span>Z-Torque</span>
+    </div>
+    <nav class="topbar-nav">
+      <a href="chat.html">Chat</a>
+      <a href="agent.html">Agent</a>
+      <a href="#" class="active">Skill</a>
+      <a href="model.html">Model</a>
+      <a href="connector.html">Connector</a>
+      <a href="audit.html">Audit</a>
+      <a href="users.html">用户</a>
+    </nav>
+    <div class="topbar-user">
+      <div class="avatar">管</div>
+      <span>admin</span>
+      <button class="btn-text" type="button">退出</button>
+    </div>
+  </header>
+
+  <div class="main">
+    <aside class="list-pane">
+      <div class="list-header">
+        <h1>Skill</h1>
+        <p class="sub">
+          MD-Skill 来自目录 <code>md-skills/&lt;name&gt;/</code>，扫描入库后在此展示。
+          <strong>无单独 MD-Skill 导航页。</strong>
+        </p>
+        <div class="list-actions">
+          <button class="btn-secondary" type="button" title="触发后端重新扫描 md-skills/">同步 md-skills</button>
+          <button class="btn-primary" type="button">创建 Skill</button>
+        </div>
+        <input class="search-box" type="search" placeholder="搜索名称、描述或标签…" id="searchInput" />
+        <div class="filter-tabs">
+          <button class="filter-tab active" data-filter="all" type="button">全部</button>
+          <button class="filter-tab" data-filter="md" type="button">MD-Skill</button>
+          <button class="filter-tab" data-filter="instruction" type="button">纯指令</button>
+          <button class="filter-tab" data-filter="script" type="button">脚本</button>
+          <button class="filter-tab" data-filter="pending" type="button">待确认启用</button>
+        </div>
+      </div>
+
+      <div class="skill-list" id="skillList">
+        <div class="skill-card" data-id="contract-review" data-kind="md" data-mode="instruction" data-status="pending">
+          <div class="row1">
+            <span class="name">contract-review</span>
+            <span class="tag tag-pending">待确认启用</span>
+          </div>
+          <div class="desc">审查合同风险条款</div>
+          <div class="meta">
+            <span class="tag tag-md">MD-Skill</span>
+            <span class="tag tag-instruction">纯指令</span>
+            <span class="tag tag-confirm">可配确认</span>
+            <span class="ver">扫描草稿</span>
+          </div>
+          <div class="path">md-skills/contract-review/</div>
+        </div>
+
+        <div class="skill-card active" data-id="data-analysis" data-kind="md" data-mode="script" data-status="published">
+          <div class="row1">
+            <span class="name">data-analysis</span>
+            <span class="tag tag-published">已发布</span>
+          </div>
+          <div class="desc">分析结构化数据并生成摘要，支持区域汇总与异常检测。</div>
+          <div class="meta">
+            <span class="tag tag-md">MD-Skill</span>
+            <span class="tag tag-script">脚本</span>
+            <span class="tag tag-official">平台</span>
+            <span class="ver">v2</span>
+          </div>
+          <div class="path">md-skills/data-analysis/</div>
+        </div>
+
+        <div class="skill-card" data-id="text-summary" data-kind="md" data-mode="instruction" data-status="published">
+          <div class="row1">
+            <span class="name">text-summary</span>
+            <span class="tag tag-published">已发布</span>
+          </div>
+          <div class="desc">对长文本提取要点与结论，纯指令模式。</div>
+          <div class="meta">
+            <span class="tag tag-md">MD-Skill</span>
+            <span class="tag tag-instruction">纯指令</span>
+            <span class="ver">v1</span>
+          </div>
+          <div class="path">md-skills/text-summary/</div>
+        </div>
+
+        <div class="skill-card" data-id="my-reply" data-kind="custom" data-mode="instruction" data-status="draft">
+          <div class="row1">
+            <span class="name">客户回复模板</span>
+            <span class="tag tag-draft">草稿</span>
+          </div>
+          <div class="desc">个人维护的回复结构，非 md-skills 目录来源。</div>
+          <div class="meta">
+            <span class="tag tag-mine">我的</span>
+            <span class="tag tag-instruction">纯指令</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <section class="detail-pane">
+      <div class="detail-header">
+        <div class="breadcrumb" id="breadcrumb">Skill / MD-Skill / md-skills/data-analysis/</div>
+        <div class="title-row">
+          <div>
+            <h2 id="detailTitle">data-analysis</h2>
+            <p class="subtitle" id="detailDesc">分析结构化数据并生成摘要，支持区域汇总与异常检测。</p>
+            <div class="detail-tags" id="detailTags">
+              <span class="tag tag-md">Markdown 技能</span>
+              <span class="tag tag-script">可执行脚本</span>
+              <span class="tag tag-published">已启用 · 已发布 v2</span>
+              <span class="tag" style="background:#f0f0f2;color:#6e6e73">超时 60 秒</span>
+            </div>
+          </div>
+          <div class="detail-actions" id="detailActions">
+            <button class="btn-secondary" type="button">复制到我的</button>
+            <button class="btn-secondary" type="button">查看快照</button>
+            <button class="btn-primary" type="button">发布新版本</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="info" type="button">基本信息</button>
+        <button class="tab" data-tab="body" type="button">正文 · 操作手册</button>
+        <button class="tab" data-tab="scripts" type="button">脚本与示例</button>
+        <button class="tab" data-tab="load" type="button">加载与生效</button>
+        <button class="tab" data-tab="versions" type="button">版本</button>
+      </div>
+
+      <div class="detail-body">
+        <div class="tab-panel" id="panel-info">
+          <div class="alert alert-violet">
+            <span>◈</span>
+            <span>
+              <strong>关于 Markdown 技能</strong>：放在
+              <code>md-skills/&lt;name&gt;/</code> 目录，含 <code>SKILL.md</code>。
+              扫描入库后需管理员确认才能启用；可选择是否允许执行
+              <code>scripts/</code> 下的脚本。
+            </span>
+          </div>
+
+          <div class="section">
+            <h3>基本信息</h3>
+            <div class="form-grid">
+              <div class="field">
+                <label>技能标识</label>
+                <input type="text" id="fName" value="data-analysis" disabled />
+                <div class="help">唯一标识，用于调用与目录名；建议小写字母、数字与连字符</div>
+              </div>
+              <div class="field">
+                <label>功能描述</label>
+                <input type="text" id="fDesc" value="分析结构化数据并生成摘要，支持区域汇总与异常检测。" disabled />
+              </div>
+              <div class="field">
+                <label>允许执行脚本</label>
+                <input type="text" id="fAllowScripts" value="是（允许 scripts/ 目录下的脚本）" disabled />
+                <div class="help">开启后，模型可触发该技能目录下白名单脚本；默认关闭更安全</div>
+              </div>
+              <div class="field">
+                <label>执行前需人工确认</label>
+                <input type="text" id="fConfirm" value="否" disabled />
+                <div class="help">开启后，每次调用该技能前会弹出确认，适合高风险操作</div>
+              </div>
+              <div class="field">
+                <label>超时时间（秒）</label>
+                <input type="text" id="fTimeout" value="60" disabled />
+                <div class="help">超过该时间仍未完成会自动中止，避免长时间占用资源</div>
+              </div>
+              <div class="field">
+                <label>来源目录</label>
+                <input type="text" id="fPath" value="md-skills/data-analysis/" disabled />
+              </div>
+              <div class="field full">
+                <label>标签</label>
+                <div class="tag-chips" id="fTags">
+                  <span class="tag-chip">data</span>
+                  <span class="tag-chip">analysis</span>
+                </div>
+                <div class="help">用于分类和搜索，可添加多个</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <h3>入参定义（供模型调用时填写）</h3>
+            <div class="schema-box" id="fParams">{
+  "type": "object",
+  "properties": {
+    "question": { "type": "string", "description": "分析问题" },
+    "file_path": { "type": "string", "description": "数据文件路径" }
+  },
+  "required": ["question"]
+}</div>
+            <p class="field help" style="margin-top:10px">模型调用该技能时需要填写的参数。执行前会自动校验，格式不对会提示错误。</p>
+          </div>
+
+          <div class="section">
+            <h3>运行标志</h3>
+            <div class="flag-grid" id="fFlags">
+              <div class="flag-card">
+                <div class="label">技能类型</div>
+                <div class="value">Markdown 技能</div>
+              </div>
+              <div class="flag-card">
+                <div class="label">默认状态</div>
+                <div class="value" style="color:var(--success)">已启用</div>
+              </div>
+              <div class="flag-card">
+                <div class="label">首次启用</div>
+                <div class="value" style="font-size:13px">管理员已确认</div>
+              </div>
+              <div class="flag-card">
+                <div class="label">执行路径</div>
+                <div class="value" style="font-size:13px">脚本 · 受控子进程</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-body" style="display:none">
+          <div class="section">
+            <h3>正文 · 给模型看的操作手册 <span class="hint">不可信输入，不能覆盖系统策略 / PEP</span></h3>
+            <div class="md-preview" id="fBody">
+              <h4>适用场景</h4>
+              <ul>
+                <li>分析用户提供的结构化数据（表格、CSV 等）</li>
+                <li>提炼关键变化、区域对比与异常点</li>
+              </ul>
+              <h4>执行步骤与判断规则</h4>
+              <ul>
+                <li>先确认数据范围和分析目标</li>
+                <li>说明关键发现及其依据</li>
+                <li>不得编造数据中不存在的指标</li>
+                <li>数据不足时明确说明局限性</li>
+              </ul>
+              <h4>输出格式要求</h4>
+              <p>输出结论、关键依据和必要的局限性说明。</p>
+            </div>
+          </div>
+          <div class="alert alert-info">
+            <span>ℹ</span>
+            <span>
+              <strong>注册制路径</strong>：正文作为该工具的「操作说明」注入工具描述（或按需一次性上下文）；
+              模型据此调用；<code>params</code> 作入参 schema。
+              <strong>脚本路径</strong>（allow_scripts: true）：受控子进程执行，stdout/stderr 回传并截断。
+            </span>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-scripts" style="display:none">
+          <div class="section">
+            <h3>scripts/ <span class="hint">仅 allow_scripts: true · 扩展名白名单 .py / .sh / .js</span></h3>
+            <div class="file-list" id="fScripts">
+              <div class="file-item">
+                <div class="icon">PY</div>
+                <div>
+                  <div class="name">summarize.py</div>
+                  <div class="path">md-skills/data-analysis/scripts/summarize.py</div>
+                </div>
+              </div>
+            </div>
+            <p class="field help" style="margin-top:12px">
+              资源限制 CPU/内存；工作目录锁定在 skill 目录；默认无网络；超时强杀；拒绝 <code>..</code> 与目录外读写。
+              <strong>前端无「运行脚本」按钮。</strong>
+            </p>
+          </div>
+          <div class="section">
+            <h3>examples/ <span class="hint">可选 · 不自动获得执行权限</span></h3>
+            <div class="file-list">
+              <div class="file-item">
+                <div class="icon" style="background:rgba(0,122,255,0.12);color:#0066d6">CSV</div>
+                <div>
+                  <div class="name">sample.csv</div>
+                  <div class="path">md-skills/data-analysis/examples/sample.csv</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-load" style="display:none">
+          <div class="section">
+            <h3>加载与生效（规范）</h3>
+            <div class="load-steps">
+              <strong>后端</strong>
+              <ol>
+                <li>扫描 <code>md-skills/*/</code>，解析 <code>SKILL.md</code> front-matter</li>
+                <li>写入 Skill 表（草稿 / 待确认），不自动启用脚本权限</li>
+                <li>管理员确认后：状态 → 已启用，可选 allow_scripts</li>
+                <li>Agent / Chat 侧按策略注入工具描述与参数 schema</li>
+              </ol>
+              <strong style="display:block;margin-top:10px">前端</strong>
+              <ol>
+                <li>本页仅展示与管理，不直接执行脚本</li>
+                <li>「同步 md-skills」触发后端重新扫描</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <div class="tab-panel" id="panel-versions" style="display:none">
+          <div class="section">
+            <h3>版本历史</h3>
+            <div class="version-item current">
+              <div class="v-badge">v2</div>
+              <div class="v-body">
+                <div class="v-title">当前 · 已发布 <span class="tag tag-published">已启用</span></div>
+                <div class="v-meta">2026-10-12 · 管理员确认启用 · 允许 scripts/</div>
+              </div>
+            </div>
+            <div class="version-item">
+              <div class="v-badge">v1</div>
+              <div class="v-body">
+                <div class="v-title">历史快照</div>
+                <div class="v-meta">2026-09-28 · 首次扫描入库</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const skills = {
+      "contract-review": {
+        title: "contract-review",
+        desc: "审查合同风险条款",
+        breadcrumb: "Skill / MD-Skill / md-skills/contract-review/",
+        path: "md-skills/contract-review/",
+        allowScripts: "否",
+        confirm: "可配置",
+        timeout: "60",
+        tags: ["legal", "review"],
+        status: "pending",
+        params: `{
+  "type": "object",
+  "properties": {
+    "document": { "type": "string", "description": "合同文本或路径" }
+  },
+  "required": ["document"]
+}`,
+        body: `<h4>审查重点</h4><ul><li>违约与责任条款</li><li>期限与自动续约</li><li>数据与保密条款</li></ul>`,
+        scripts: false,
+      },
+      "data-analysis": {
+        title: "data-analysis",
+        desc: "分析结构化数据并生成摘要，支持区域汇总与异常检测。",
+        breadcrumb: "Skill / MD-Skill / md-skills/data-analysis/",
+        path: "md-skills/data-analysis/",
+        allowScripts: "是（允许 scripts/ 目录下的脚本）",
+        confirm: "否",
+        timeout: "60",
+        tags: ["data", "analysis"],
+        status: "published",
+        params: `{
+  "type": "object",
+  "properties": {
+    "question": { "type": "string", "description": "分析问题" },
+    "file_path": { "type": "string", "description": "数据文件路径" }
+  },
+  "required": ["question"]
+}`,
+        body: null,
+        scripts: true,
+      },
+      "text-summary": {
+        title: "text-summary",
+        desc: "对长文本提取要点与结论，纯指令模式。",
+        breadcrumb: "Skill / MD-Skill / md-skills/text-summary/",
+        path: "md-skills/text-summary/",
+        allowScripts: "否",
+        confirm: "否",
+        timeout: "60",
+        tags: ["text", "summary"],
+        status: "published",
+        params: `{
+  "type": "object",
+  "properties": {
+    "text": { "type": "string", "description": "待摘要文本" }
+  },
+  "required": ["text"]
+}`,
+        body: `<h4>输出要求</h4><p>要点列表 + 一段结论；保持原文事实，不添加未提及信息。</p>`,
+        scripts: false,
+      },
+      "my-reply": {
+        title: "客户回复模板",
+        desc: "个人维护的回复结构，非 md-skills 目录来源。",
+        breadcrumb: "Skill / 我的 / 非目录",
+        path: "—（控制台创建，非 MD-Skill）",
+        allowScripts: "否",
+        confirm: "否",
+        timeout: "—",
+        tags: ["personal"],
+        status: "draft",
+        params: `{ "type": "object", "properties": {} }`,
+        body: `<p>个人草稿技能示例，用于对比 MD-Skill 与自建 Skill。</p>`,
+        scripts: false,
+        notMd: true,
+      },
+    };
+
+    function setActions(status, notMd) {
+      const el = document.getElementById("detailActions");
+      if (status === "pending") {
+        el.innerHTML = `
+          <button class="btn-success" type="button">确认启用（管理员）</button>
+          <button class="btn-secondary" type="button">查看扫描结果</button>
+          <button class="btn-danger-outline" type="button">忽略</button>`;
+      } else if (notMd && status === "draft") {
+        el.innerHTML = `
+          <button class="btn-secondary" type="button">继续编辑</button>
+          <button class="btn-primary" type="button">发布</button>
+          <button class="btn-danger-outline" type="button">删除草稿</button>`;
+      } else {
+        el.innerHTML = `
+          <button class="btn-secondary" type="button">复制到我的</button>
+          <button class="btn-secondary" type="button">查看快照</button>
+          <button class="btn-primary" type="button">发布新版本</button>`;
+      }
+    }
+
+    function showSkill(id) {
+      const s = skills[id];
+      if (!s) return;
+      document.getElementById("detailTitle").textContent = s.title;
+      document.getElementById("detailDesc").textContent = s.desc;
+      document.getElementById("breadcrumb").textContent = s.breadcrumb;
+      document.getElementById("fName").value = s.title;
+      document.getElementById("fDesc").value = s.desc;
+      document.getElementById("fAllowScripts").value = s.allowScripts;
+      document.getElementById("fConfirm").value = s.confirm;
+      document.getElementById("fTimeout").value = s.timeout;
+      document.getElementById("fPath").value = s.path;
+      document.getElementById("fParams").textContent = s.params;
+      document.getElementById("fTags").innerHTML = s.tags.map((t) => `<span class="tag-chip">${t}</span>`).join("");
+
+      const tags = document.getElementById("detailTags");
+      if (s.notMd) {
+        tags.innerHTML = `<span class="tag tag-mine">我的</span><span class="tag tag-draft">草稿</span>`;
+      } else if (s.status === "pending") {
+        tags.innerHTML = `
+          <span class="tag tag-md">Markdown 技能</span>
+          <span class="tag tag-instruction">纯指令（无脚本）</span>
+          <span class="tag tag-pending">待管理员确认启用</span>`;
+      } else {
+        const script = String(s.allowScripts).includes("是") || String(s.allowScripts).includes("true");
+        tags.innerHTML = `
+          <span class="tag tag-md">Markdown 技能</span>
+          <span class="tag ${script ? "tag-script" : "tag-instruction"}">${script ? "可执行脚本" : "纯指令"}</span>
+          <span class="tag tag-published">已启用 · 已发布</span>
+          <span class="tag" style="background:#f0f0f2;color:#6e6e73">超时 ${s.timeout} 秒</span>`;
+      }
+
+      if (s.body) document.getElementById("fBody").innerHTML = s.body;
+      const scriptsPanel = document.getElementById("fScripts");
+      if (s.scripts) {
+        scriptsPanel.innerHTML = `
+          <div class="file-item">
+            <div class="icon">PY</div>
+            <div>
+              <div class="name">summarize.py</div>
+              <div class="path">${s.path}scripts/summarize.py</div>
+            </div>
+          </div>`;
+      } else {
+        scriptsPanel.innerHTML = `<p class="field help">当前技能未开启「允许执行脚本」，或没有脚本文件。示例与脚本不会自动执行。</p>`;
+      }
+      setActions(s.status, s.notMd);
+    }
+
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+        tab.classList.add("active");
+        document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+        document.getElementById("panel-" + tab.dataset.tab).style.display = "block";
+      });
+    });
+
+    document.querySelectorAll(".filter-tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".filter-tab").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const f = btn.dataset.filter;
+        document.querySelectorAll(".skill-card").forEach((card) => {
+          let show = true;
+          if (f === "md") show = card.dataset.kind === "md";
+          if (f === "instruction") show = card.dataset.mode === "instruction";
+          if (f === "script") show = card.dataset.mode === "script";
+          if (f === "pending") show = card.dataset.status === "pending";
+          card.style.display = show ? "" : "none";
+        });
+      });
+    });
+
+    document.getElementById("searchInput").addEventListener("input", (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      document.querySelectorAll(".skill-card").forEach((card) => {
+        card.style.display = !q || card.textContent.toLowerCase().includes(q) ? "" : "none";
+      });
+    });
+
+    document.querySelectorAll(".skill-card").forEach((card) => {
+      card.addEventListener("click", () => {
+        document.querySelectorAll(".skill-card").forEach((c) => c.classList.remove("active"));
+        card.classList.add("active");
+        showSkill(card.dataset.id);
+      });
+    });
+  </script>
+</body>
+</html>

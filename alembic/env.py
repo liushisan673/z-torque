@@ -4,7 +4,12 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
+
+# 插件私有表（方案 b）：模型定义随插件目录，但注册进同一个 Base.metadata，
+# 因此迁移链（alembic/versions）自动覆盖它们；内核 app/models 不反向依赖插件。
+from app.builtin_plugins.audit_export_archive import models as _audit_export_models  # noqa: F401, E402
 from app.config import get_settings
+from app.db.alembic_support import compare_type
 from app.db.base import Base
 from app.models import (  # noqa: F401
     Agent,
@@ -19,14 +24,28 @@ from app.models import (  # noqa: F401
 
 config = context.config
 if config.config_file_name:
-    fileConfig(config.config_file_name)
+    # disable_existing_loggers 必须为 False：迁移可能在应用进程内被调用
+    # （测试 / 启动时自检），默认值会把 app.* 的 logger 全部禁用，
+    # 表现为后续 caplog 断言突然拿不到日志。
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
+# URL 解析优先级：调用方显式注入（测试/临时库）> DATABASE_URL（settings）> alembic.ini。
+# 空字符串即「未注入」，此时才回落到 settings，避免 ini 默认值抢在环境变量之前。
+_injected_url = (config.get_main_option("sqlalchemy.url") or "").strip()
+config.set_main_option(
+    "sqlalchemy.url",
+    (_injected_url or get_settings().database_url).replace("%", "%%"),
+)
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
-    context.configure(url=config.get_main_option("sqlalchemy.url"), target_metadata=target_metadata, literal_binds=True)
+    context.configure(
+        url=config.get_main_option("sqlalchemy.url"),
+        target_metadata=target_metadata,
+        literal_binds=True,
+        compare_type=compare_type,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -45,6 +64,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             render_as_batch=is_sqlite,
+            compare_type=compare_type,
         )
         with context.begin_transaction():
             context.run_migrations()

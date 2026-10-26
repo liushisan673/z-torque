@@ -10,7 +10,7 @@
 白名单回退时参数一并回退全局默认（settings.model_temperature / model_max_tokens）。
 """
 
-from app.builtin_plugins.manifest import AssemblyContext, PluginManifest
+from app.builtin_plugins.manifest import PluginManifest
 from app.kernel.ports.model_selector import (
     SELECTION_SOURCE_DEFAULT,
     SELECTION_SOURCE_SNAPSHOT,
@@ -19,7 +19,6 @@ from app.kernel.ports.model_selector import (
     ModelSelectionRequest,
     ModelSelector,
 )
-from app.kernel.registry.port_registry import PortPriority
 
 
 def _or_default(snapshot_value, default_value):

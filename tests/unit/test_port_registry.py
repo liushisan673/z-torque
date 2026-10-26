@@ -93,7 +93,7 @@ def test_unavailable_capability_raises_ai_capability_unavailable():
     proxy = registry.get(spec.name)
     assert isinstance(proxy, UnavailableCapability)
     with pytest.raises(ApiError) as exc_info:
-        proxy.anything
+        _ = proxy.anything
     assert exc_info.value.code == "AI_CAPABILITY_UNAVAILABLE"
     assert exc_info.value.status_code == 503
 

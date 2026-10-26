@@ -1,17 +1,17 @@
-from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.core.ids import new_uuid7
 from app.kernel.ports.lock_provider import LockProvider
 from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import transition_task
 from app.kernel.task.states import TaskStatus
-from app.models import Confirmation, Conversation, Message, Outbox, Task, TaskCheckpoint, TaskEvent
-from app.core.ids import new_uuid7
+from app.models import Confirmation, Conversation, Message, Outbox, Task, TaskEvent
 
 
 def _aware(value: datetime | None) -> datetime | None:

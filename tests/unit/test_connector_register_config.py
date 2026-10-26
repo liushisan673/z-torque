@@ -1,8 +1,7 @@
 """连接器工具注册/更新配置的公共逻辑：DB_SQL 参数骨架自动补全 + HTTP 方法闸门。"""
 
-from uuid import uuid4
-
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 

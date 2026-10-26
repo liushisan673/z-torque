@@ -1,7 +1,6 @@
 """Add Stage 03 task relationship foreign keys."""
 from typing import Sequence
 
-import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a4d8e1f2b390"

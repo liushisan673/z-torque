@@ -1,6 +1,6 @@
 """HttpExecutor 单测：POST 透传、secret:// 凭据头、内网目标白名单（target_policy）。"""
 
-from types import SimpleNamespace
+import socket
 
 import pytest
 
@@ -130,7 +130,13 @@ def test_bad_secret_ref_fails_with_template_error(fake_http, monkeypatch):
     assert result.status == "FAILED" and result.error_code == "AI_HTTP_TEMPLATE_UNRESOLVED"
 
 
-def test_allowed_url_matrix():
+def test_allowed_url_matrix(monkeypatch):
+    """https 公网目标经 DNS 解析判定 is_global；固定解析结果，不依赖真实外网 DNS。"""
+
+    def _fake_getaddrinfo(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 443))]
+
+    monkeypatch.setattr("socket.getaddrinfo", _fake_getaddrinfo)
     allow = HttpExecutor._allowed_url
     # 白名单内 https 公网（用解析得到的 IP 判定；localhost 私网回环恒被拒）
     assert allow("https://example.com/x", ["example.com"]) is True

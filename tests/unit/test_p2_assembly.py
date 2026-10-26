@@ -6,14 +6,13 @@ import pytest
 
 from app.assembly import assemble, expand_profile
 from app.builtin_plugins.manifest import ModuleSpec, PluginSdk
-from app.builtin_plugins.modules import MODULE_REGISTRY, PROFILE_COMMUNITY
+from app.builtin_plugins.modules import MODULE_REGISTRY, PROFILE_COMMUNITY, PROFILE_ENTERPRISE
+from app.builtin_plugins.plugins import BUILTIN_PLUGINS
 from app.config import get_settings
 from app.db.session import engine
 from app.kernel.capabilities import derive_stage
-from app.kernel.registry.port_registry import AssemblyError, PortRegistry, PortState
 from app.kernel.ports.specs import PORT_SPECS
-from app.builtin_plugins.plugins import BUILTIN_PLUGINS
-
+from app.kernel.registry.port_registry import AssemblyError, PortRegistry, PortState
 
 # ---- ① stage 动态化 ----
 
@@ -80,12 +79,26 @@ def test_sdk_publish_shared_roundtrip():
 def test_profile_community_expands_to_all_19_plugins():
     expanded = expand_profile(PROFILE_COMMUNITY)
     assert len(expanded) == 19
-    assert set(expanded) == {p.manifest.name for p in BUILTIN_PLUGINS}
+    # v1.3：内置插件集合扩到 21（+audit_export_archive / a2a_gateway），但社区 Profile 不变
+    assert set(expanded) < {p.manifest.name for p in BUILTIN_PLUGINS}
     # 依赖顺序约束：secret 先于 model_provider；authz/approval/sandbox/interceptor 先于 skill_executors；mcp 最后于 skill_executors
     order = {name: i for i, name in enumerate(expanded)}
     assert order["secret_provider"] < order["model_provider"]
     assert all(order[n] < order["skill_executors"] for n in ("authz_provider", "approval_provider", "sandbox_driver", "interceptor"))
     assert order["skill_executors"] < order["mcp_connector"]
+
+
+def test_profile_enterprise_covers_all_builtin_plugins():
+    """企业版 = 社区集合 + audit_export_archive + a2a，且顺序满足依赖（不覆盖契约插件）。"""
+    expanded = expand_profile(PROFILE_ENTERPRISE)
+    assert set(expanded) == {p.manifest.name for p in BUILTIN_PLUGINS}
+    # 显式保留（契约 §2.3）：企业版不得把这三项从 Profile 中"优化掉"
+    for required in ("skill_executors", "model_provider", "mcp_connector"):
+        assert required in expanded
+    order = {name: i for i, name in enumerate(expanded)}
+    assert order["secret_provider"] < order["audit_export_archive"]
+    assert order["skill_executors"] < order["a2a_gateway"]
+    assert order["audit_export_archive"] < order["a2a_gateway"]
 
 
 def test_profile_rejects_unknown_entry():
@@ -112,6 +125,9 @@ def test_assembly_result_smoke_after_module_refactor():
     resolved = [item for item in result.registry.status() if item["state"] == PortState.RESOLVED]
     assert len(result.plugins) == 19
     assert len(resolved) == 19
+    # 社区版不装配企业插件：不得有导出/归档/A2A 服务句柄
+    assert "audit_export_service" not in result.objects
+    assert "a2a_gateway" not in result.objects
 
 
 def test_sdk_accepts_legacy_duck_context_shape():

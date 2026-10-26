@@ -1,8 +1,9 @@
-from datetime import datetime
 from uuid import UUID
+
 from pydantic import BaseModel, Field
 
 from app.core.servertime import UTCDatetime
+
 
 class ConversationCreate(BaseModel):
     agent_id: UUID | None = None

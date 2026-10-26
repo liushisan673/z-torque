@@ -1,8 +1,9 @@
-from datetime import datetime
 from uuid import UUID
+
 from pydantic import BaseModel
 
 from app.core.servertime import UTCDatetime
+
 
 class MessageResponse(BaseModel):
     id: UUID

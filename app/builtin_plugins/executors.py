@@ -18,8 +18,8 @@ import httpx
 from sqlalchemy import Engine, text
 from sqlglot import exp, parse
 
-from app.kernel.ports.skill_executor import ExecutionResult
 from app.kernel.md_skill_runtime import MdSkillRuntime
+from app.kernel.ports.skill_executor import ExecutionResult
 
 # HTTP 工具方法白名单：注册入口（OpenAPI 导入 / 手动注册）与执行器引用同一来源，
 # 将来放开新方法时改这里即可，两个闸门不会漂移

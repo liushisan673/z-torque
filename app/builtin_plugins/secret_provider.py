@@ -7,7 +7,6 @@
 
 from app.builtin_plugins.manifest import PluginManifest
 from app.kernel.ports.secret_provider import SecretProvider
-from app.kernel.registry.port_registry import PortPriority
 from app.security.secret_store import SecretStore
 
 

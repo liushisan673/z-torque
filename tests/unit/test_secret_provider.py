@@ -78,7 +78,15 @@ def test_model_provider_requires_secret_provider_fail_fast():
 
 
 def test_community_assembly_resolves_secret_and_model_ports(tmp_path):
-    settings = SimpleNamespace(model_base_url=None, model_api_key=None, model_name="mock", model_allowed_names=[], file_storage_dir=tmp_path / "files")
+    settings = SimpleNamespace(
+        model_base_url=None,
+        model_api_key=None,
+        model_name="mock",
+        model_allowed_names=[],
+        file_storage_dir=tmp_path / "files",
+        # v1.3：沙箱 cwd 白名单在装配期强制校验，轻量 settings 必须显式给出
+        sandbox_allowed_roots=[str(tmp_path / "skills")],
+    )
     result = assemble(settings, create_engine("sqlite://"))
     assert result.registry.resolution("secret.provider").state == PortState.RESOLVED
     assert result.registry.resolution("model.provider").state == PortState.RESOLVED

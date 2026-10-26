@@ -25,7 +25,6 @@ from app.api.routes.connectors import (
 from app.core.errors import ApiError
 from app.security.secret_store import SecretStore
 
-
 # ---------- 鉴权头构造 ----------
 
 def test_bearer_token_builds_authorization_header():

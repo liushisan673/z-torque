@@ -9,13 +9,28 @@ from sqlalchemy import delete
 
 from app.db.session import SessionLocal
 from app.main import app
-from app.models import Agent, AgentVersion, AuthSession, Conversation, Message, Role, Task, TaskEvent, Tenant, User
+from app.models import (
+    Agent,
+    AgentVersion,
+    AuthSession,
+    Conversation,
+    Message,
+    Role,
+    Task,
+    TaskEvent,
+    Tenant,
+    User,
+)
 from app.security.passwords import hash_password
+from tests.support.ddl import fk_off, fk_on
 
 
 @pytest.fixture(autouse=True)
 def baseline():
     with SessionLocal.begin() as db:
+        # 别的用例会留下审计行，其 actor_user_id 仍指向这里的 User；
+        # 清理前统一关外键，避免 PG 上因残留引用报 23503
+        fk_off(db)
         # 子表→父表顺序：Message.task_id 为 RESTRICT，必须先于 Task 删除
         db.execute(delete(Message))
         db.execute(delete(Conversation))
@@ -27,6 +42,7 @@ def baseline():
         db.execute(delete(User))
         db.execute(delete(Role))
         db.execute(delete(Tenant))
+        fk_on(db)
 
         tenant = Tenant(name=f"stage11-{uuid4()}")
         db.add(tenant)

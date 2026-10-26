@@ -1,8 +1,9 @@
 """Persist task checkpoints before entering human approval wait state."""
 from typing import Sequence
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision: str = "d8e5f6a7b890"
 down_revision: str | None = "c7f4a2b91d30"

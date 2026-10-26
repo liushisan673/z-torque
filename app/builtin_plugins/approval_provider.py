@@ -6,7 +6,6 @@ PLUGIN/EXPLICIT 优先级替换为审批中心。
 """
 
 from app.builtin_plugins.manifest import PluginManifest
-from app.kernel.registry.port_registry import PortPriority
 from app.kernel.skill_confirmation import BuiltinApprovalProvider
 
 

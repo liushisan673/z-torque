@@ -9,10 +9,10 @@ from app.db.session import SessionLocal
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import ModelGatewayError
 from app.kernel.model_gateway.contracts import ModelRequest
-from app.services.context_builder import assistant_reasoning_parts
 from app.kernel.security_context import SecurityContext
 from app.models import Conversation, Message
 from app.services.chat_application import _maybe_summarize, create_chat_task
+from app.services.context_builder import assistant_reasoning_parts
 
 logger = logging.getLogger("z_torque.chat_stream")
 

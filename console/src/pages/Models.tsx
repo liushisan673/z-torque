@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
@@ -7,6 +7,7 @@ import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { SecretRefInput } from "../components/SecretRefInput";
+import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { useAuth } from "../stores/auth";
@@ -14,7 +15,13 @@ import { useAuth } from "../stores/auth";
 // 选中记忆：跳转页面后返回时恢复上次选中的模型（sessionStorage 按标签页隔离）
 const SELECTED_KEY = "zt.models.selectedId";
 
-type Tab = "overview" | "endpoints" | "secret" | "test";
+// 详情区锚点配置：无页签，详情一次纵向展示全部，顶部锚点仅做快捷跳转
+const DETAIL_ANCHORS = [
+  { id: "overview", label: "概览" },
+  { id: "endpoints", label: "接入点" },
+  { id: "secret", label: "密钥" },
+  { id: "test", label: "连接测试" },
+];
 
 // Provider 状态点：停用→灰；启用但缺密钥或无启用模型→黄；其余→绿
 function providerDot(p: ModelProvider, models: ModelResource[]): "ok" | "warn" | "off" {
@@ -78,6 +85,8 @@ export function ModelsPage() {
   const { push: toast } = useToast();
   // 停用模型需要走 ConfirmDialog 确认（影响智能体配置可选项）
   const [disableModelConfirm, setDisableModelConfirm] = useState(false);
+  // 停用供应商需二次确认（其下模型全部不可用）；启用直接执行
+  const [disableProviderConfirm, setDisableProviderConfirm] = useState<ModelProvider | null>(null);
   const [providers, setProviders] = useState<ModelProvider[]>([]);
   const [models, setModels] = useState<ModelResource[]>([]);
   const [loading, setLoading] = useState(true);
@@ -87,7 +96,11 @@ export function ModelsPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ModelResource | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
-  const [tab, setTab] = useState<Tab>("overview");
+  // 左右分栏宽度：拖拽把手调整，会话内保持，退出登录恢复默认
+  const listPane = usePaneWidth("model", "--model-list-w");
+  // 顶部锚点导航：当前高亮区块；详情内容纵向滚动一次展示全部（无页签）
+  const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
+  const detailBodyRef = useRef<HTMLDivElement | null>(null);
 
   // 本会话内最近一次测试结果（无后端持久化字段，见页面说明）
   const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
@@ -170,12 +183,37 @@ export function ModelsPage() {
     setEditMaxOut(d.max_output_tokens != null ? String(d.max_output_tokens) : "");
   }
 
+  // 锚点跳转：平滑滚动到对应区块（CSS scroll-margin-top 预留吸顶导航高度）
+  function scrollToSection(id: string) {
+    setActiveAnchor(id);
+    document.getElementById(`model-sec-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // 滚动跟随：按区块相对滚动容器顶部的位置高亮当前锚点，触底时强制高亮最后一项
+  function handleDetailScroll() {
+    const container = detailBodyRef.current;
+    if (!container) return;
+    const ids = DETAIL_ANCHORS.map((a) => a.id);
+    const containerTop = container.getBoundingClientRect().top;
+    let current = ids[0] ?? null;
+    for (const id of ids) {
+      const el = document.getElementById(`model-sec-${id}`);
+      if (!el) continue;
+      if (el.getBoundingClientRect().top - containerTop <= 96) current = id;
+    }
+    if (container.scrollTop + container.clientHeight >= container.scrollHeight - 4) {
+      current = ids[ids.length - 1] ?? current;
+    }
+    setActiveAnchor(current);
+  }
+
   async function openModel(m: ModelResource) {
     setSelectedId(m.id);
     writeSelectedId(SELECTED_KEY, m.id);
     setDetail(null);
     setTestResult(null);
-    setTab("overview");
+    setActiveAnchor("overview");
+    if (detailBodyRef.current) detailBodyRef.current.scrollTop = 0;
     setLoadingDetail(true);
     setError(null);
     try {
@@ -243,6 +281,24 @@ export function ModelsPage() {
     } finally {
       setBusy(false);
       setDisableModelConfirm(false);
+    }
+  }
+
+  // 停用 / 启用供应商：停用后其下模型在智能体侧不可选用（后端仅标记状态，不删数据）
+  async function toggleProvider(p: ModelProvider) {
+    const action = p.status === "ENABLED" ? "disable" : "enable";
+    if (action === "disable" && !disableProviderConfirm) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await request<ModelProvider>(`/api/z-torque/models/providers/${p.id}/${action}`, { method: "POST" });
+      await load();
+      toast("success", action === "enable" ? "供应商已启用" : "供应商已停用");
+    } catch (err) {
+      setError(errorText(err, "操作失败"));
+    } finally {
+      setBusy(false);
+      setDisableProviderConfirm(null);
     }
   }
 
@@ -425,7 +481,7 @@ export function ModelsPage() {
         </div>
       )}
 
-      <div className="model-shell">
+      <div className="model-shell" style={listPane.style}>
         {/* 左侧 Provider 树 */}
         <aside className="model-list-pane">
           <div className="model-list-header">
@@ -455,12 +511,26 @@ export function ModelsPage() {
                       <span className={`dot ${dot}`} />
                       <span>{p.name}</span>
                       {canManage && (
-                        <button
-                          className="add-model-btn"
-                          type="button"
-                          title="添加模型"
-                          onClick={() => { setMName(""); setMIdentifier(""); setMDesc(""); setModelOpen(p.id); }}
-                        >+</button>
+                        <>
+                          <button
+                            className="provider-toggle-btn"
+                            type="button"
+                            disabled={busy}
+                            title={p.status === "ENABLED" ? "停用供应商（其下模型将不可选用）" : "启用供应商"}
+                            onClick={() => {
+                              if (p.status === "ENABLED") { setDisableProviderConfirm(p); return; }
+                              void toggleProvider(p);
+                            }}
+                          >
+                            {p.status === "ENABLED" ? "停用" : "启用"}
+                          </button>
+                          <button
+                            className="add-model-btn"
+                            type="button"
+                            title="添加模型"
+                            onClick={() => { setMName(""); setMIdentifier(""); setMDesc(""); setModelOpen(p.id); }}
+                          >+</button>
+                        </>
                       )}
                     </div>
                     {mine.length === 0 ? (
@@ -498,6 +568,9 @@ export function ModelsPage() {
           </div>
         </aside>
 
+        {/* 左右分栏拖拽把手 */}
+        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+
         {/* 右侧详情 */}
         <section className="model-detail-pane">
           {!selected ? (
@@ -534,7 +607,7 @@ export function ModelsPage() {
                   <div className="model-detail-actions">
                     {canManage && (
                       <>
-                        <button className="btn btn-primary" type="button" disabled={busy} onClick={() => { setTab("test"); void runTest(); }}>测试连接</button>
+                        <button className="btn btn-primary" type="button" disabled={busy} onClick={() => { scrollToSection("test"); void runTest(); }}>测试连接</button>
                         <button
                           className="btn btn-secondary"
                           type="button"
@@ -552,23 +625,25 @@ export function ModelsPage() {
                 </div>
               </div>
 
-              <div className="model-tabs">
-                {(["overview", "endpoints", "secret", "test"] as Tab[]).map((t) => (
-                  <button key={t} className={`model-tab${tab === t ? " active" : ""}`} type="button" onClick={() => setTab(t)}>
-                    {t === "overview" ? "概览" : t === "endpoints" ? "接入点" : t === "secret" ? "密钥" : "连接测试"}
-                  </button>
-                ))}
-              </div>
-
-              <div className="model-detail-body">
+              <div className="model-detail-body" ref={detailBodyRef} onScroll={handleDetailScroll}>
                 {loadingDetail ? (
                   <Loading />
-                ) : tab === "overview" ? (
+                ) : (
+                  <>
+                  <nav className="skill-anchor-nav" aria-label="详情锚点导航">
+                    {DETAIL_ANCHORS.map((a) => (
+                      <button
+                        key={a.id}
+                        type="button"
+                        className={`skill-anchor-link${activeAnchor === a.id ? " active" : ""}`}
+                        onClick={() => scrollToSection(a.id)}
+                      >
+                        {a.label}
+                      </button>
+                    ))}
+                  </nav>
+                  <section id="model-sec-overview" className="skill-anchor-section">
                   <div>
-                    <div className="skill-alert skill-alert-info">
-                      <span>ℹ</span>
-                      <span>模型调用由后端 ModelGateway 统一执行。API <strong>不返回密钥明文</strong>；页面仅展示是否已配置与脱敏密钥引用。更换密钥须走专用安全配置流程。</span>
-                    </div>
 
                     {!canManage && (
                       <div className="skill-alert skill-alert-warn">
@@ -646,7 +721,7 @@ export function ModelsPage() {
                     <div className="model-section">
                       <h3>
                         最近状态
-                        <span className="hint">当前无测试结果持久化接口，仅展示本会话内的测试结果</span>
+                       
                       </h3>
                       <div className="model-stat-row">
                         <div className="model-stat-card">
@@ -678,7 +753,8 @@ export function ModelsPage() {
                       </div>
                     </div>
                   </div>
-                ) : tab === "endpoints" ? (
+                </section>
+                <section id="model-sec-endpoints" className="skill-anchor-section">
                   <div>
                     <div className="model-section">
                       <h3>
@@ -726,15 +802,11 @@ export function ModelsPage() {
                           </tbody>
                         </table>
                       )}
-                      <p className="model-field help" style={{ marginTop: 12 }}>超时、重试等高级参数由后端配置；调用仍走 ModelGateway。</p>
                     </div>
                   </div>
-                ) : tab === "secret" ? (
+                </section>
+                <section id="model-sec-secret" className="skill-anchor-section">
                   <div>
-                    <div className="skill-alert skill-alert-warn">
-                      <span>⚠</span>
-                      <span>密钥通过 Secret Store 保存。页面只显示「已配置」或脱敏密钥引用，<strong>永不展示明文</strong>。更换时提交新值由后端写入密钥库。</span>
-                    </div>
                     {/* 状态联动：密钥缺失时直接给出修复入口，不用让用户猜去哪修 */}
                     {!detail?.provider?.secret_configured && (
                       <GuideCallout
@@ -760,15 +832,14 @@ export function ModelsPage() {
                         </div>
                         {canManage && <button className="btn btn-secondary" type="button" onClick={() => { setSecretValue(""); setSecretOpen(true); }}>更换密钥</button>}
                       </div>
-                      <p className="model-field help" style={{ marginTop: 10 }}>引用仅作标识展示（脱敏），不可用于还原明文。</p>
                     </div>
                   </div>
-                ) : (
+                </section>
+                <section id="model-sec-test" className="skill-anchor-section">
                   <div>
                     <div className="model-section">
                       <h3>
                         连接测试
-                        <span className="hint">由后端向上游发起探测，前端不直连上游</span>
                       </h3>
                       {!canManage && (
                         <div className="skill-alert skill-alert-warn">
@@ -796,7 +867,6 @@ export function ModelsPage() {
                               <option key={o.value} value={o.value}>{o.label}</option>
                             ))}
                           </select>
-                          <div className="help">后两种方式将真实请求上游服务</div>
                         </div>
                       </div>
                       {canManage && (
@@ -829,11 +899,10 @@ export function ModelsPage() {
                           {testResult.trace_id && <div className="trace">trace_id: {testResult.trace_id}</div>}
                         </div>
                       )}
-                      <p className="model-field help" style={{ marginTop: 12 }}>
-                        「网关就绪检查」仅做网关配置检查；「模型列表探测」「最小 Chat 请求」将真实请求上游（不落库、不进会话），可能产生少量上游调用。
-                      </p>
                     </div>
                   </div>
+                </section>
+                  </>
                 )}
               </div>
             </>
@@ -979,6 +1048,18 @@ export function ModelsPage() {
         onConfirm={() => void toggleModel()}
       >
         <p>模型「{detail?.name ?? ""}」将进入「停用」状态，Agent 配置侧将不可再选用该模型，已发布版本会自动回退到其它可用模型。</p>
+      </ConfirmDialog>
+
+      {/* 停用供应商：其下模型全部不可用，必须二次确认 */}
+      <ConfirmDialog
+        open={disableProviderConfirm !== null}
+        title="停用该供应商？"
+        confirmText="停用"
+        busy={busy}
+        onCancel={() => setDisableProviderConfirm(null)}
+        onConfirm={() => { if (disableProviderConfirm) void toggleProvider(disableProviderConfirm); }}
+      >
+        <p>供应商「{disableProviderConfirm?.name ?? ""}」将进入「停用」状态，其下所有模型在智能体侧不可选用；可随时重新启用。</p>
       </ConfirmDialog>
     </div>
   );

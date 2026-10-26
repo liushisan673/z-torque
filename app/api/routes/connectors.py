@@ -125,7 +125,7 @@ async def _probe_rest(config: dict, secret_ref: str | None) -> dict:
     返回字典至少含 http_status、method_used、auth_used；失败抛 ApiError。
     401/403 仍视为「远端可达」，单独以 status=auth_required 表达，便于前端诚实提示。
     """
-    import asyncio
+
     import httpx
 
     config = config or {}
@@ -984,8 +984,9 @@ async def import_openapi_tools(connector_id: UUID, payload: ConnectorOpenapiImpo
     if payload.source == "url":
         if not payload.url:
             raise ApiError("AI_PARAM_INVALID", "url 模式必须传 url", 400)
-        import httpx
         from urllib.parse import urlparse
+
+        import httpx
         parsed = urlparse(payload.url.strip())
         if parsed.scheme != "https" or not parsed.netloc:
             raise ApiError("AI_PARAM_INVALID", "url 必须为 https", 400)

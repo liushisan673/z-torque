@@ -1,31 +1,29 @@
 import logging
 import re
+import sys
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_optional_user
-from app.models import User
-from app.security.permissions import is_admin_user
-
-from app.assembly import assemble
+from app.api.router import router as api_router
+from app.assembly import assemble, resolve_profile
+from app.config import get_settings
 from app.core.errors import ApiError
 from app.core.responses import error_response, success_response
-from app.db.session import check_database
-from app.api.router import router as api_router
+from app.db.session import SessionLocal, check_database, engine
 from app.kernel.audit.service import set_request_trace_id
 from app.kernel.capabilities import derive_stage
+from app.kernel.md_skill_watcher import MdSkillWatcher
 from app.kernel.registry.port_registry import PortState
 from app.kernel.task.runtime import TaskRuntime
-from app.kernel.md_skill_watcher import MdSkillWatcher
-from app.db.session import SessionLocal, engine
-from app.config import get_settings
-from app.models import Tenant
+from app.models import Tenant, User
+from app.security.permissions import is_admin_user
 
 logger = logging.getLogger("z_torque")
 
@@ -34,8 +32,16 @@ logger = logging.getLogger("z_torque")
 async def lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
-    # 装配根统一装配：Profile → Plugin → Port 注册与解析校验（缺失必需 Port 时拒绝启动）
-    result = assemble(settings, engine)
+    # 装配根统一装配：Profile → Plugin → Port 注册与解析校验（缺失必需 Port 时拒绝启动）。
+    # Profile 由 settings.assembly_profile 显式派生（禁止在 assemble() 内隐式读环境变量）
+    result = assemble(settings, engine, profile=resolve_profile(settings.assembly_profile))
+    app.state.assembly_result = result
+    # 能力面按"插件名"派生（v1.3 §7.3）：静态 features 清单不足以表达三个新能力
+    app.state.assembly_plugins = tuple(manifest.name for manifest in result.plugins)
+    # 插件经 sdk.publish 发布的领域服务（audit_export / a2a）转挂 app.state，
+    # 受控 API 只读访问，不反向 import 插件包（阶段00 §3.8）
+    for object_key, object_value in result.objects.items():
+        setattr(app.state, object_key, object_value)
     app.state.port_registry = result.registry
     app.state.skill_gateway = result.skill_gateway
     app.state.model_gateway = result.model_gateway
@@ -59,6 +65,8 @@ async def lifespan(app: FastAPI):
         for connector in getattr(app.state, "mcp_connectors", []):
             await connector.close()
         await runtime.stop()
+        # 插件收尾（逆序）：释放导出线程池 / 归档定时器；插件不得自行注册 atexit
+        result.shutdown()
 
 
 # OpenAPI 文档中文分组说明：/docs 左侧 tag 树按此展示（name 必须与各路由文件的 tags=[...] 完全一致）
@@ -154,10 +162,17 @@ async def health(request: Request):
 
 
 _FEATURE_PORT_DEPS = {"working_memory": "memory.working", "short_term_memory": "memory.short"}
-_FEATURES = ["health", "configuration", "chat", "model_gateway", "function_calling", "model_selector", "task_sse", "task_recovery_and_cancel", "delegation", "md_skill_discovery", "md_skill_versions", "md_skill_watch", "connectors", "rest_connector", "readonly_db_connector", "mcp_connector", "secret_provider", "working_memory", "short_term_memory", "file_upload", "file_parsing", "audit_query", "admin_iam", "plugin_circuit_breaker", "plugin_sdk", "module_assembly"]
+# v1.3 三个新能力不新增 Port：必须按"插件是否已装配"派生（§7.3），
+# 否则社区版也会宣称 a2a / audit_export / rlimit 沙箱可用
+_FEATURE_PLUGIN_DEPS = {
+    "sandbox": "sandbox_driver",
+    "audit_export": "audit_export_archive",
+    "a2a": "a2a_gateway",
+}
+_FEATURES = ["health", "configuration", "chat", "model_gateway", "function_calling", "model_selector", "task_sse", "task_recovery_and_cancel", "delegation", "md_skill_discovery", "md_skill_versions", "md_skill_watch", "connectors", "rest_connector", "readonly_db_connector", "mcp_connector", "secret_provider", "working_memory", "short_term_memory", "file_upload", "file_parsing", "audit_query", "admin_iam", "plugin_circuit_breaker", "plugin_sdk", "module_assembly", "sandbox", "audit_export", "a2a"]
 
 
-def _available_features(registry) -> list[str]:
+def _available_features(registry, plugins: tuple[str, ...] = ()) -> list[str]:
     """features 必须反映 Port 真实解析状态：依赖的 Port 不可用时不能继续宣称可用（P2-14）。"""
     if registry is None:
         return list(_FEATURES)
@@ -170,7 +185,42 @@ def _available_features(registry) -> list[str]:
         resolution = registry.resolution(port_name)
         if resolution is not None and resolution.state == PortState.RESOLVED:
             available.append(feature)
+    for feature, plugin_name in _FEATURE_PLUGIN_DEPS.items():
+        if feature in available and plugin_name not in plugins:
+            available.remove(feature)
     return available
+
+
+def _sandbox_capability(registry, plugins: tuple[str, ...], settings) -> dict:
+    """沙箱能力如实上报：未实现级别禁止上报（§7.3）。"""
+    resolution = registry.resolution("sandbox.driver") if registry is not None else None
+    assembled = "sandbox_driver" in plugins and resolution is not None and resolution.state == PortState.RESOLVED
+    if not assembled:
+        return {"available": False, "impl": None, "isolation_level": "none"}
+    label = str(getattr(resolution, "label", "") or "")
+    if "container" in label:
+        level = "container"
+    elif settings.sandbox_rlimit_enabled and sys.platform != "win32":
+        level = "rlimit"
+    else:
+        level = "none"
+    return {"available": True, "impl": label or "builtin_process", "isolation_level": level}
+
+
+def _audit_export_capability(plugins: tuple[str, ...], settings) -> dict:
+    available = "audit_export_archive" in plugins
+    if not available:
+        return {"available": False, "formats": [], "archive": False}
+    return {
+        "available": True,
+        "formats": list(settings.audit_export_formats),
+        "archive": settings.audit_archive_schedule_hours > 0,
+    }
+
+
+def _a2a_capability(plugins: tuple[str, ...], settings) -> dict:
+    available = "a2a_gateway" in plugins
+    return {"available": available, "enabled": bool(available and settings.a2a_enabled), "max_depth": settings.a2a_max_depth}
 
 
 @app.get("/api/z-torque/capabilities")
@@ -179,6 +229,7 @@ async def capabilities(request: Request, user: User | None = Depends(get_optiona
     # Port 能力来自注册表真实解析状态（阶段00 §3.5），不再是静态清单；
     # stage 由装配状态推导（P2-5），不再硬编码
     registry = getattr(request.app.state, "port_registry", None)
+    assembled_plugins = getattr(request.app.state, "assembly_plugins", ())
     ports = registry.status() if registry is not None else []
     model_resolution = registry.resolution("model.provider") if registry is not None else None
     model_implementation = model_resolution.label if model_resolution is not None else None
@@ -194,4 +245,4 @@ async def capabilities(request: Request, user: User | None = Depends(get_optiona
         md_skill["directory"] = str(settings.md_skills_dir)
         files["storage_dir"] = str(settings.file_storage_dir)
         connectors["allowed_targets"] = settings.connector_allowed_targets
-    return success_response(request, {"stage": derive_stage(registry), "features": _available_features(registry), "ports": ports, "md_skill": md_skill, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled}, "files": files, "connectors": connectors})
+    return success_response(request, {"stage": derive_stage(registry), "features": _available_features(registry, assembled_plugins), "ports": ports, "sandbox": _sandbox_capability(registry, assembled_plugins, settings), "audit_export": _audit_export_capability(assembled_plugins, settings), "a2a": _a2a_capability(assembled_plugins, settings), "md_skill": md_skill, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled}, "files": files, "connectors": connectors})
