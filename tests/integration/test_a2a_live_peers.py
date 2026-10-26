@@ -194,13 +194,18 @@ def _make_handler(state: _StubState, *, mode: str, delay: float, size: int):
 
 @contextmanager
 def _serve_stub(
-    *, mode: str = "ok", delay: float = 0.0, size: int = 0, tls: tuple[str, str] | None = None
+    *, mode: str = "ok", delay: float = 0.0, size: int = 0, tls: tuple[str, str] | None = None, client_ca: str | None = None
 ) -> Iterator[tuple[int, _StubState]]:
     state = _StubState()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _make_handler(state, mode=mode, delay=delay, size=size))
     if tls is not None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certfile=tls[0], keyfile=tls[1])
+        if client_ca is not None:
+            # 在 stub 上模拟"部署层 mTLS 终止"：要求客户端出示 CA 签发的证书
+            # （应用层拿不到对端证书，入站真 mTLS 属部署层职责，见 §12.5）
+            context.load_verify_locations(cafile=client_ca)
+            context.verify_mode = ssl.CERT_REQUIRED
         server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -247,6 +252,78 @@ def _self_signed_cert(tmp_path: Path) -> tuple[str, str]:
         )
     )
     return str(cert_path), str(key_path)
+
+
+def _federation_certs(tmp_path: Path) -> dict[str, str]:
+    """联邦/mTLS 用证书材料：CA1 + CA2、服务端证书（SAN 127.0.0.1，CA1 签发）、
+    两把客户端证书（分别由 CA1/CA2 签发，对应好/坏两种出站身份）。"""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    def _pem_cert(certificate) -> str:
+        return certificate.public_bytes(serialization.Encoding.PEM).decode()
+
+    def _pem_key(key) -> str:
+        return key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+
+    def _ca(common_name: str):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+        now = datetime.now(timezone.utc)
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256())
+        )
+        return certificate, key
+
+    def _leaf(common_name: str, ca_cert, ca_key, *, san_loopback: bool) -> tuple[str, str]:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+        now = datetime.now(timezone.utc)
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(ca_cert.subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5))
+            .not_valid_after(now + timedelta(days=1))
+        )
+        if san_loopback:
+            builder = builder.add_extension(
+                x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                critical=False,
+            )
+        certificate = builder.sign(ca_key, hashes.SHA256())
+        return _pem_cert(certificate), _pem_key(key)
+
+    ca1_cert, ca1_key = _ca("live-ca-1")
+    ca2_cert, ca2_key = _ca("live-ca-2")
+    server_cert, server_key = _leaf("live-mtls-server", ca1_cert, ca1_key, san_loopback=True)
+    client_good_cert, client_good_key = _leaf("live-client-good", ca1_cert, ca1_key, san_loopback=False)
+    client_bad_cert, client_bad_key = _leaf("live-client-bad", ca2_cert, ca2_key, san_loopback=False)
+    return {
+        "server_cert": server_cert,
+        "server_key": server_key,
+        "ca_bundle": _pem_cert(ca1_cert),
+        "client_good_cert": client_good_cert,
+        "client_good_key": client_good_key,
+        "client_bad_cert": client_bad_cert,
+        "client_bad_key": client_bad_key,
+    }
 
 
 # ---------------------------------------------------------------- DB 与实例装配
@@ -340,11 +417,52 @@ def live(tmp_path_factory) -> Iterator[dict[str, Any]]:
         cert, key = _self_signed_cert(tmp_path)
         stub_tls, _ = stack.enter_context(_serve_stub(mode="ok", tls=(cert, key)))
 
-        # B 实例**不配任何远端 peer**：它必须靠本地 skill.executor 执行 A 送来的技能版本。
-        # 这样一旦出站载荷被原样转发（含 sender 命名空间的 peer id），B 会立刻 503 而不是
-        # "碰巧也能跑"——用例因此能锁住"对端执行"而非"对端再路由"。
+        # mTLS（出站）与联邦共享密钥的凭据材料：测试进程用与子进程相同的
+        # SECRET_STORE_KEY 加密（LocalSecretProvider），子进程装配时解密
+        certs = _federation_certs(tmp_path)
+        server_cert_path = tmp_path / "mtls-server.crt"
+        server_key_path = tmp_path / "mtls-server.key"
+        ca_bundle_path = tmp_path / "mtls-ca.pem"
+        server_cert_path.write_text(certs["server_cert"], encoding="utf-8")
+        server_key_path.write_text(certs["server_key"], encoding="utf-8")
+        ca_bundle_path.write_text(certs["ca_bundle"], encoding="utf-8")
+        stub_mtls, _ = stack.enter_context(
+            _serve_stub(mode="ok", tls=(str(server_cert_path), str(server_key_path)), client_ca=str(ca_bundle_path))
+        )
+        from app.builtin_plugins.secret_provider import LocalSecretProvider
+
+        secret_provider = LocalSecretProvider()
+        federated_secret = "live-federation-shared-secret"
+        ct_fed_secret = secret_provider.encrypt(federated_secret)
+        ct_cert_good = secret_provider.encrypt(certs["client_good_cert"])
+        ct_key_good = secret_provider.encrypt(certs["client_good_key"])
+        ct_cert_bad = secret_provider.encrypt(certs["client_bad_cert"])
+        ct_key_bad = secret_provider.encrypt(certs["client_bad_key"])
+        ct_ca_bundle = secret_provider.encrypt(certs["ca_bundle"])
+
+        caller_port = _free_port()
+
+        # B 实例默认不配远端 peer（锁"对端执行"），但开启联邦入站：对端 "a-fed"
+        # 可用共享密钥（service account）直打 B 的 /a2a/invoke；b_env 的 peer 配置
+        # 仅为满足白名单校验，B 不向它出站。
         peer_b_port = _free_port()
-        stack.enter_context(_serve_app(peer_b_port, base_env))
+        b_env = {
+            **base_env,
+            "A2A_FEDERATION_ENABLED": "true",
+            "A2A_REMOTE_PEERS": json.dumps(
+                [
+                    {
+                        "id": "a-fed",
+                        "base_url": f"http://127.0.0.1:{caller_port}",
+                        "auth_secret_name": ct_fed_secret,
+                        "tenant_id": str(seeded["tenant_id"]),
+                        "inbound_federation": True,
+                    }
+                ]
+            ),
+            "A2A_ALLOWED_PEERS": json.dumps(["a-fed"]),
+        }
+        stack.enter_context(_serve_app(peer_b_port, b_env))
 
         peers = [
             _peer("b", peer_b_port),
@@ -354,8 +472,21 @@ def live(tmp_path_factory) -> Iterator[dict[str, Any]]:
             _peer("slow", stub_slow, timeout=0.4),
             _peer("big", stub_big),
             _peer("tls", stub_tls, scheme="https"),
+            {
+                "id": "mtls",
+                "base_url": f"https://127.0.0.1:{stub_mtls}",
+                "client_cert_secret_name": ct_cert_good,
+                "client_key_secret_name": ct_key_good,
+                "ca_bundle_secret_name": ct_ca_bundle,
+            },
+            {
+                "id": "mtls-bad",
+                "base_url": f"https://127.0.0.1:{stub_mtls}",
+                "client_cert_secret_name": ct_cert_bad,
+                "client_key_secret_name": ct_key_bad,
+                "ca_bundle_secret_name": ct_ca_bundle,
+            },
         ]
-        caller_port = _free_port()
         stack.enter_context(_serve_app(caller_port, {**base_env, **_peers_env(peers)}))
 
         login = httpx.post(
@@ -371,6 +502,7 @@ def live(tmp_path_factory) -> Iterator[dict[str, Any]]:
             "caller": f"http://127.0.0.1:{caller_port}",
             "peer_b": f"http://127.0.0.1:{peer_b_port}",
             "token": token,
+            "federated_secret": federated_secret,
             "session": seeded["session"],
             "tenant_id": seeded["tenant_id"],
             "skill_version_id": seeded["skill_version_id"],
@@ -532,3 +664,49 @@ def test_circuit_opens_after_threshold_and_stops_calling(live):
         (503, "AI_A2A_PEER_UNAVAILABLE"),
         (503, "AI_PLUGIN_CIRCUIT_OPEN"),
     ], codes
+
+
+# ---------------------------------------------------------------- v1.4 M4：出站 mTLS 与联邦入站
+
+
+def test_remote_mtls_success_and_bad_client_cert_rejected(live):
+    """出站 mTLS：CA1 签发的客户端证书通过双向认证；CA2 签发的证书在握手期失败 → 503。
+
+    服务端 stub 要求客户端证书（部署层 mTLS 终止的等价物）；客户端材料经
+    secret.provider 密文配置（client_cert/key/ca_bundle_secret_name）。
+    """
+    good = _remote(live["caller"], live["token"], "mtls", arguments={})
+
+    assert good.status_code == 200, good.text
+    assert good.json()["data"]["status"] == "SUCCEEDED", good.text
+    assert good.json()["data"]["data"] == {"echo": True}
+
+    bad = _remote(live["caller"], live["token"], "mtls-bad", arguments={})
+
+    assert bad.status_code == 503, bad.text
+    assert bad.json()["code"] == "AI_A2A_PEER_UNAVAILABLE"
+
+
+def test_federated_service_account_executes_skill_and_audits(live):
+    """联邦入站（方案 B）：对端用共享密钥直打 B 的 /a2a/invoke，技能真实执行，
+    审计行 actor 为 NULL（外键安全）且归属写进 detail（principal_type/caller_peer_id）。"""
+    response = _invoke(
+        live["peer_b"],
+        live["federated_secret"],
+        route="local",
+        skill_version_id=str(live["skill_version_id"]),
+        arguments={},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "SUCCEEDED", response.text
+    assert response.json()["data"]["data"] == {"instructions": "live-echo instructions"}, "B 没有真的执行技能"
+
+    with live["session"]() as db:
+        rows = db.scalars(
+            select(AuditLog).where(AuditLog.tenant_id == live["tenant_id"], AuditLog.action == "A2A_INVOKED")
+        ).all()
+    fed_rows = [row for row in rows if (row.detail or {}).get("caller_peer_id") == "a-fed"]
+    assert fed_rows, f"联邦调用没有落 A2A_INVOKED 审计：{[(row.action, row.detail) for row in rows]}"
+    assert fed_rows[-1].actor_user_id is None, "联邦主体不是本地用户：actor 不得写合成 UUID（zr_user 外键）"
+    assert fed_rows[-1].detail["principal_type"] == "federated_peer"

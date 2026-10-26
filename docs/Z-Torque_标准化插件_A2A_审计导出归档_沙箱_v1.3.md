@@ -26,6 +26,7 @@
 > - v1.3.3（2026-10-26）——标准插件可移植性落地：`app/plugin_sdk/` 公开契约包、沙箱实现下沉、方案 b 表归属、entry_points 发现、结构化 `config_schema`、`api_version` 校验，见 §12.7。
 > - **v1.3.4（2026-10-26）——登记能力语义变更**：未注入 `sandbox.driver` 时 `MdSkillRuntime` 由「内核默认实现」改为拒绝执行 `AI_CAPABILITY_UNAVAILABLE`(503)，在 §十 变更与兼容表中注明属**升级收紧**（对齐《内核契约 v1》§3 optional 缺失语义），非能力回退。
 > - **v1.3.8（2026-10-26）——Port 协议与 ORM 解耦（标准插件遗留一期）**：`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py` 的模型 import 移入 `TYPE_CHECKING`，import Port 协议不再连带拉起 `app.models`，单插件「零内核依赖」收口；新增子进程探针机器断言，见 §12.7。
+> - **v1.4（2026-10-26）——M4 收口：sidecar 容器隔离 + A2A 联邦身份**：`sandbox.driver` 新增 docker CLI 容器实现（`sandbox_isolation_mode=container`，同 Port 同契约、社区默认 process 零变化）；A2A 联邦入站方案 B（对端 service account 共享密钥）+ 出站 per-peer mTLS；入站真 mTLS 如实登记为部署层职责，见 §4.10 / §6.5 / §12.4 / §12.5。
 
 ---
 
@@ -433,6 +434,18 @@ rlimit 触发判定：子进程被信号杀死且 `returncode` 为 `-SIGKILL`/`-
 - [ ] capabilities 含 `isolation_level`，Windows 不虚报
 - [ ] `sandbox_allowed_roots` 生效（越界拒绝 + 单测）
 
+### 4.10 sidecar 容器隔离（v1.4 M4，已落地）
+
+**形态**：`sandbox.driver` Port 的第二个实现 `ContainerSandboxDriver`（`app/builtin_plugins/sandbox_driver/container.py`），技术 = **docker CLI 子进程**（零新 Python 依赖；`sandbox_docker_binary` 兼容 podman 等同参数面 CLI）。`contribute()` 按 `sandbox_isolation_mode`（`process`（默认）| `container`）分支选择——社区默认 process，行为零变化。
+
+**容器参数面**：`--rm -i --network none --read-only --security-opt no-new-privileges --memory --cpus --pids-limit`；白名单根只读挂载（`{root}:{root}:ro`）、workdir 同路径可写挂载（后挂覆盖父只读）；`-w {cwd}`；镜像内 `python -I` 执行脚本；stdin JSON 参数 / stdout JSON 结果。
+
+**与 process 实现共享的语义**：cwd 白名单（`enforce_cwd_policy`，越界 `AI_SANDBOX_DENIED` 403）、错误码分类（超时 `AI_SKILL_TIMEOUT` 504、输出超限/非零退出/非 JSON `AI_SKILL_FAILED` 500）；**容器新增**：退出码 137/139（资源限制已显式配置）→ `AI_SANDBOX_RESOURCE_EXCEEDED` 429；脚本必须落在白名单根内（容器内只挂载白名单根，外部脚本不可见，spawn 前拒绝）。
+
+**fail-closed 边界**：Windows 装配期直接 `AssemblyError`（容器运行时不承诺脚本级隔离等价性）；docker CLI/守护进程不可用 → 装配期 `AssemblyError`（`docker version` 探测）；镜像不预拉 → 运行期 125/127 归 `AI_SKILL_FAILED`。
+
+**capabilities**：registry label = `builtin_container_sandbox(image=...)` 含 "container" → `isolation_level=container`（main.py 既有判定，零改动）；观测事件仍为 `sandbox.execution`，容器实现的 payload 用 `isolation="container"` 替代 `rlimit_enabled`（键集合固定，机器断言）。
+
 ---
 
 ## 五、插件二：`audit_export_archive`（审计导出与归档）
@@ -691,11 +704,19 @@ class A2AGatewayPlugin:
 
 ### 6.5 入站身份（M0-1 + M0-5，v1 仅方案 A）
 
-| 方案 | 机制 | v1 |
+| 方案 | 机制 | v1 / v1.4 |
 |------|------|-----|
-| **A. 本域 JWT（采用）** | 调用方携带本域 JWT → `identity_provider.authenticate(db, token)` → `authz.has_all(db, ctx, ["a2a.invoke"])` | **唯一支持** |
-| B. 对端共享密钥 → service account | 需扩展 identity 适配 | 不在 v1 |
-| C. mTLS | 证书体系 | 不在 v1 |
+| **A. 本域 JWT（采用）** | 调用方携带本域 JWT → `identity_provider.authenticate(db, token)` → `authz.has_all(db, ctx, ["a2a.invoke"])` | **支持**（默认通道） |
+| **B. 对端共享密钥 → service account（v1.4 采用）** | 对端以共享密钥（`auth_secret_name` 同源，凭据即身份）作 Bearer 直打本域 A2A；`a2a_federation_enabled=true` 时先试联邦、未命中静默回落本域 JWT | **支持**（`FederatedPrincipalRegistry`，见下） |
+| C. mTLS | 证书体系 | **部署层职责**（uvicorn 不向 ASGI 应用暴露客户端证书，应用层无法实现；出站方向 v1.4 已支持 per-peer mTLS） |
+
+**方案 B 实现约束（v1.4）**：
+
+- 联邦对端 = peer 配置 `inbound_federation=true` + `auth_secret_name` + `tenant_id`（**显式声明租户**，装配期查 `sdk.list_tenant_ids()` 校验存在性，不做启发式）；
+- 共享密钥经 secret.provider 在**装配期**预解密（明文只在本进程内存，不落库/不进日志/不进审计）；解不开 / tenant 不存在 / 开关开启却零主体 → `AssemblyError`；
+- 命中 → `SecurityContext(tenant_id=配置声明, user_id=None)`——**联邦主体不是本地用户**：合成 UUID 会撞 `zr_audit_log.actor_user_id` 的 `zr_user` 外键，归属走审计 `detail.principal_type`（local_jwt/federated_peer）与 `detail.caller_peer_id`；
+- 凭据即授权（service account 语义）：命中即视为已授权 `a2a.invoke`，不走本地角色体系；技能级 `required_permissions` 由内核 permission_checker default-deny（`user_id=None` + 非空权限集 → 拒绝）；
+- `match` 用 `hmac.compare_digest` 恒定时间比较；未命中**不写审计**（静默回落本域 JWT，避免双留痕）。
 
 实现约束：
 
@@ -713,6 +734,7 @@ class A2AGatewayPlugin:
 - 深度：入站读 `X-A2A-Depth`（缺省 0，非整数 → `AI_A2A_DENIED`）；出站写 `depth+1`；超限 → `AI_A2A_DEPTH_EXCEEDED`。
 - 扇出：`asyncio.Semaphore(max_fanout)`；超限排队或拒绝，不静默丢。
 - 出站：强制 https（回环可 http）、`allowed_peers` 白名单、`allow_redirects=False`、响应体上限、每次出站前 `sdk.require_permission("network.outbound")`。
+- **出站 mTLS（v1.4）**：peer 配置 `client_cert_secret_name` / `client_key_secret_name`（必须成对）与 `ca_bundle_secret_name`（可独立），材料经 secret.provider 解密 → owner-only（0600）临时文件 → 预构建 `SSLContext`（`load_cert_chain` + CA）以 `verify=` 传 httpx，用完即删（密钥不驻留磁盘）。实测本机 httpx 版本下 `cert=(certfile, keyfile)` 形式握手失败（`ReadError`），SSLContext 是可靠路径。材料解不开/非法 → `AI_A2A_PEER_UNAVAILABLE`(503)；PEM 不进日志/观测事件。
 - **出站载荷语义（v1.3.7 明确）**：出站载荷描述「对端要做什么」，不是「我是怎么路由的」。
   - 调用方给了 `params.skill_version_id` → 出站改写为 `route=local` + 该版本 id，对端直接经 `skill.executor` 执行（`peer` 仅作观测字段保留）。
   - 未给版本（只有 `params.skill` 名）→ 保持 `route=remote` 原样转发，由对端的 peer 表继续路由。**v1 没有「技能名 → 版本」解析**（插件 DB 边界只允许 identity/discovery 查询），所以这条路径无法钉死要执行什么，跨实例场景请显式传 `skill_version_id`。
@@ -1098,17 +1120,23 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 | `A2A_IDENTITY_PROPAGATION` | `user_id_header` | 出站身份传播方式 | `none` / `user_id_header` / `full_context_token` |
 | `A2A_MAX_RESPONSE_BYTES` | `1 MB` | 入站响应上限 | 超限按失败计，参与熔断 |
 | `A2A_CIRCUIT_FAILURE_THRESHOLD` / `A2A_CIRCUIT_COOLDOWN_SECONDS` | `5` / `30` | 熔断阈值与冷却 | |
+| `A2A_FEDERATION_ENABLED` | `false` | 联邦入站总开关（v1.4） | 开启后 `inbound_federation` peer 可用共享密钥入站；开启却零主体 → 装配失败 |
+| `SANDBOX_ISOLATION_MODE` | `process` | 沙箱隔离形态（v1.4） | `process`（默认）/ `container`；Windows 选 container → 装配失败 |
+| `SANDBOX_CONTAINER_IMAGE` | `python:3.11-slim` | 容器模式镜像 | 需预拉取；运行期不自动 pull |
+| `SANDBOX_CONTAINER_MEMORY` / `SANDBOX_CONTAINER_CPUS` / `SANDBOX_CONTAINER_PIDS_LIMIT` | `512m` / `1.0` / `128` | 容器资源上限 | docker --memory/--cpus/--pids-limit |
+| `SANDBOX_DOCKER_BINARY` | `docker` | 容器 CLI 二进制 | 兼容 podman 等同参数面实现；装配期探测不可用即失败 |
 
 ### 12.5 已知限制（本批如实登记）
 
 1. **FSIZE 命中依赖 errno 兜底**：Linux 上 CPython 启动即把 `SIGXFSZ` 置为 `SIG_IGN`，子进程超 `RLIMIT_FSIZE` 不会"被信号杀死"，而是 `write` 返回 `EFBIG` 后以非 0 退出。因此判定为「信号退出码 **或** rlimit 已开启且 stderr 出现内核 errno 文案（`[Errno 27]` / `[Errno 11]`）」。脚本若自行捕获 `OSError` 并正常退出，父进程侧无法判定配额命中。
 2. **Windows 沙箱 fail-closed**：无 rlimit / 无进程组，脚本执行直接拒绝（返回能力位 false），不做"降级放行"。
 3. **导出任务已支持多副本（v1.3.6）**：执行权由 `zr_audit_export_job` 的行级租约仲裁（§5.9），重启恢复只回收「无主 / 本实例 / 租约已过期」的行，不再误杀其他副本的在途任务。残留限制：租约依赖各副本时钟同源（NTP 漂移超过 TTL 会误判失联）；`PENDING` 任务不做跨副本排队，只在提交副本执行。
-4. **未落地**：sidecar 容器隔离（M4）、`object.store.list`（契约 §7 后再动）。远端 A2A 真实联调已于 v1.3.7 落地（§13.5），对端不再只是 `MockTransport` 替身。
+4. **M4 已落地（v1.4）**：容器沙箱（§4.10）与出站 mTLS / 联邦入站方案 B（§6.5）已实现并真联调；仍未落地：`object.store.list`（契约 §7 后再动）。
 5. **迁移链漂移已收敛，但只在 `TIMESTAMP`/UUID 两族上做过归一**：干净库（SQLite / PostgreSQL）`upgrade head` 后 `compare_metadata` 均为 0 条差异，`alembic check` 可作为门禁。比较策略在 `app/db/alembic_support.compare_type`：UUID 族（`GUID` / `Uuid` / `CHAR(36)` / `VARCHAR(36)` / PG 原生 `uuid`）视为等价，时间戳族仍严格比较 tz 语义。若后续新增列再出现「迁移写 `sa.DateTime()`、模型写 `DateTime(timezone=True)`」这类错配，门禁会立刻报出来。
 6. **`--sql` 离线模式的边界**：`alembic upgrade head --sql` 现在能生成可执行脚本（含历史迁移里两处反射式增量修正的静态退化分支），且已在空 PG 库上实测「执行脚本 → `alembic current` = head → 零漂移」。但离线脚本前提是「从空库一路升到 head」；拿它去补一个半旧的库不适用，增量场景请直连数据库 `upgrade head`。
 7. **`process.spawn` 不构成安全边界**：该权限码只在 `sandbox_driver` manifest 里**登记**，内核没有 spawn 拦截点（插件用 `asyncio.create_subprocess_exec` 自建子进程），因此它既不限制子进程数量，也不阻止插件以任意参数起进程。真正的能力边界由 `sandbox_driver/process.py` 自身实现保证（cwd 白名单 / `-I` / 最小 env / rlimit / `killpg` / 输出上限 / fail-closed）；**验收与对外文案不得以「已拦截」表述**，只能说「已登记 + 插件内自证实现」。真正的运行时强制点要等企业 sidecar / M0-4。
 8. **A2A 无「技能名 → 版本」解析**：`params.skill` 只是名字，插件 DB 边界不允许按名查库，因此跨实例调用必须显式传 `skill_version_id`（§6.6 出站载荷语义）；只传名字的 `route=remote` 由对端自行路由，两个本实例之间不存在这条路径。
+9. **入站真 mTLS 不在应用层（v1.4 如实登记）**：uvicorn 不向 ASGI 应用暴露对端证书，应用内无法校验客户端证书——入站 mTLS 由部署层（反向代理/Caddy/nginx）终止后转发，应用层联邦身份只有方案 B（共享密钥 service account）。出站方向已支持 per-peer mTLS（§6.6）。联邦主体的 `user_id` 恒为 `None`（不是本地用户，合成 UUID 会撞审计 actor 外键），归属走审计 `detail`；其技能级 `required_permissions` 一律 default-deny， federation 主体默认无本地授权。容器沙箱 live 冒烟（`ZTORQUE_SANDBOX_CONTAINER_LIVE=1`）只在「有 docker 守护进程的 POSIX 主机」可跑；CI 与 zt-test 容器内无 docker，不默认执行。
 
 ### 12.6 维护说明
 
@@ -1204,7 +1232,8 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 
 ---
 
-**版本**：v1.3.8（2026-10-26，Port 协议与 ORM 解耦：`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py` 模型 import 移入 `TYPE_CHECKING`，import Port 协议不再拉起 `app.models`，单插件「零内核依赖」收口，见 §12.7）
+**版本**：v1.4（2026-10-26，M4 收口：sidecar 容器隔离（`SANDBOX_ISOLATION_MODE=container`，docker CLI 子进程，同 Port 同契约）+ A2A 联邦身份（方案 B service account 入站 + per-peer 出站 mTLS；入站真 mTLS 登记为部署层职责），见 §4.10 / §6.5 / §12.4 / §12.5）
+**上一版**：v1.3.8（2026-10-26，Port 协议与 ORM 解耦：`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py` 模型 import 移入 `TYPE_CHECKING`，import Port 协议不再拉起 `app.models`，单插件「零内核依赖」收口，见 §12.7）
 **上一版**：v1.3.7（2026-10-26，A2A 远端真联调收口（§13.5）：统一封装解包 + 出站载荷语义修正（`skill_version_id` → `route=local`），8 条真链路用例）
 **上一版**：v1.3.6（2026-10-26，多副本租约（§5.9 + 迁移 `c7a1e4b90d23`）与 ruff 门禁登记）
 **上一版**：v1.3.5（2026-10-26，D 组：`observability.sink` 接线登记 `audit_export.job` / `a2a.outbound` 两个事件及 payload 白名单；`process.spawn` 明确「仅登记、无运行时强制点」）

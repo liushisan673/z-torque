@@ -130,6 +130,16 @@ class Settings(BaseSettings):
     sandbox_rlimit_enabled: bool = True
     sandbox_max_processes: int = 64
     sandbox_max_file_bytes: int = 16 * 1024 * 1024
+    # ---- v1.4 M4 sidecar（§4.10）----
+    # 隔离形态：process = 进程内受限执行（默认，社区行为零变化）；container = docker CLI 容器执行
+    sandbox_isolation_mode: str = 'process'
+    # 容器模式参数；镜像需预拉取（运行期不自动 pull，缺失按 AI_SKILL_FAILED 处理）
+    sandbox_container_image: str = 'python:3.11-slim'
+    sandbox_container_memory: str = '512m'
+    sandbox_container_cpus: float = 1.0
+    sandbox_container_pids_limit: int = 128
+    # 容器 CLI 二进制（默认 docker；兼容 podman 等同参数面实现，也是测试注入点）
+    sandbox_docker_binary: str = 'docker'
 
     # ---- v1.3 M2 审计导出与归档（§5.4）----
     # Profile 选择：main.py 显式传给 assemble()，禁止在 assemble() 内隐式读环境变量
@@ -175,6 +185,10 @@ class Settings(BaseSettings):
     a2a_max_response_bytes: int = 1_000_000
     a2a_circuit_failure_threshold: int = 5
     a2a_circuit_cooldown_seconds: float = 30.0
+    # ---- v1.4 M4 联邦身份（§6.5）----
+    # 联邦入站总开关：开启后声明 inbound_federation 的 peer 可用共享密钥（service account）入站；
+    # 入站真 mTLS 属部署层职责（uvicorn 不向 ASGI 应用暴露客户端证书），见 §12.5
+    a2a_federation_enabled: bool = False
 
     @property
     def resolved_sandbox_roots(self) -> list[str]:
@@ -247,6 +261,15 @@ class Settings(BaseSettings):
             raise ValueError('A2A_MAX_FANOUT must be >= 1')
         if self.sandbox_max_processes < 1 or self.sandbox_max_file_bytes < 1:
             raise ValueError('sandbox resource limits must be positive')
+        if self.sandbox_isolation_mode not in ('process', 'container'):
+            raise ValueError("SANDBOX_ISOLATION_MODE must be 'process' or 'container'")
+        if self.sandbox_isolation_mode == 'container':
+            if not self.sandbox_container_image.strip():
+                raise ValueError('SANDBOX_CONTAINER_IMAGE is required in container mode')
+            if not self.sandbox_container_memory.strip() or self.sandbox_container_cpus <= 0 or self.sandbox_container_pids_limit < 1:
+                raise ValueError('sandbox container limits must be positive')
+            if not self.sandbox_docker_binary.strip():
+                raise ValueError('SANDBOX_DOCKER_BINARY is required in container mode')
 
 
 @lru_cache

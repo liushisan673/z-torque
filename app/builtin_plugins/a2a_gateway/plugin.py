@@ -12,6 +12,7 @@ from typing import Any
 
 from app.builtin_plugins.a2a_gateway.config import A2AConfig
 from app.builtin_plugins.a2a_gateway.discovery import AgentDiscovery
+from app.builtin_plugins.a2a_gateway.federated import FederatedPrincipalRegistry
 from app.builtin_plugins.a2a_gateway.gateway import A2AGateway
 from app.builtin_plugins.a2a_gateway.identity import InboundIdentity
 from app.builtin_plugins.a2a_gateway.peers import PeerRegistry
@@ -49,7 +50,7 @@ class A2AGatewayPlugin:
                 "a2a_remote_peers": {
                     "type": "string",
                     "default": "[]",
-                    "description": "JSON 数组字符串：[{id, base_url, auth_secret_name}]",
+                    "description": "JSON 数组字符串：[{id, base_url, auth_secret_name, timeout_seconds, tenant_id, inbound_federation, client_cert_secret_name, client_key_secret_name, ca_bundle_secret_name}]",
                 },
                 "a2a_allowed_peers": {
                     "type": "array",
@@ -93,6 +94,11 @@ class A2AGatewayPlugin:
                     "default": 30.0,
                     "description": "对端熔断冷却时间（秒）",
                 },
+                "a2a_federation_enabled": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "联邦入站总开关：开启后 inbound_federation peer 可用共享密钥（service account）入站；入站真 mTLS 属部署层职责",
+                },
             },
             "additionalProperties": False,
         },
@@ -106,7 +112,10 @@ class A2AGatewayPlugin:
         if gateway is None:
             # skill.executor 已由 Module requires_ports 保证存在；此处兜底防装配顺序漂移
             raise AssemblyError("plugin a2a_gateway requires skill.executor implementation in assembly context")
-        identity = InboundIdentity(sdk)
+        # 联邦入站（方案 B）：开关关闭时返回 None（零行为变化）；开启时装配期预解密
+        # 共享密钥并校验租户存在性，失败即 AssemblyError
+        federated = FederatedPrincipalRegistry.from_config(sdk, config)
+        identity = InboundIdentity(sdk, federated=federated)
         discovery = AgentDiscovery(sdk)
         peers = PeerRegistry(sdk, config, guard=guard)
         a2a_gateway = A2AGateway(

@@ -1,7 +1,7 @@
 # Z-Torque Community M1 — 项目记忆（会话交接）
 
-**更新**：2026-10-26　**状态**：本地开发中，**工作区未提交**（用户本人提交，禁止代提交/重置）
-**最新文档**：`docs/Z-Torque_标准化插件_A2A_审计导出归档_沙箱_v1.3.md`（v1.3.8，§12 验证 / §13 缺陷修订）
+**更新**：2026-10-26　**状态**：本地开发中，**已提交并推送 GitHub**（master = `2e7b7a1`，github 远端；2026-10-26 一次性授权代提交，后续改动仍默认由用户本人提交，禁止代重置）
+**最新文档**：`docs/Z-Torque_标准化插件_A2A_审计导出归档_沙箱_v1.3.md`（v1.4，M4 收口；§12 验证 / §13 缺陷修订）
 
 ---
 
@@ -39,11 +39,11 @@ AI Runtime 内核（M0–M3 阶段成果）+ 轻量控制台。核心架构是�
 | M1 `sandbox_driver`（md_skill 沙箱加固） | ✅ 完成 | cwd 白名单、`-I` 独立解释器、最小 env、rlimit、进程组 killpg、输出上限、fail-closed |
 | M2 `audit_export_archive` | ⚠️ 代码完成 | 导出/归档/脱敏/清理/下载留痕齐备；**仅单副本语义**（`AUDIT_EXPORT_MAX_CONCURRENCY=1`） |
 | M3 `a2a_gateway` | ✅ 完成 | 协议/深度扇出/熔断/白名单/发现投影齐备；**远端已真联调**（`tests/integration/test_a2a_live_peers.py`，uvicorn 子进程 + 真 TCP/TLS，`ZTORQUE_A2A_LIVE=1` 打开），真联调修掉「统一封装不解包」「出站载荷把路由信息当执行指令」两个缺陷 |
-| M4 | ❌ 未启动 | sidecar 隔离、联邦身份(mTLS)（归档密钥轮换已单独完成，见 §8 P2） |
+| M4 | ✅ 完成（v1.4，2026-10-26） | sidecar 容器隔离（`SANDBOX_ISOLATION_MODE=container`，docker CLI 子进程，同 Port 同契约、社区默认 process 零变化）+ A2A 联邦身份（方案 B service account 入站 + per-peer 出站 mTLS）；入站真 mTLS 登记为部署层职责（uvicorn 不向 ASGI 暴露客户端证书）。未做：`object.store.list` |
 
-**测试**：全集 **491** 项（阶段 2/3 新增 36 项：发现 11、配置契约 15、manifest 契约 4、单插件隔离 6；D 组新增 12 项观测接线用例；E 组新增 5 项租约用例；F 组新增 2 项出站语义单测；归档对象对账新增 14 项；归档密钥轮换新增 7 项）。**另有 8 项 A2A 真联调用例**（`tests/integration/test_a2a_live_peers.py`）默认 skip，`ZTORQUE_A2A_LIVE=1` 才跑（约 12~20s，起 uvicorn 子进程 + 真 TCP/TLS 对端）。**2026-10-26 三平台实测（F 组后）**：Windows+SQLite `470 passed / 11 skipped`（含 8 项 live skip）；Linux+SQLite（`zt-test` 容器）`471 passed / 10 skipped`；Linux+PostgreSQL 16（`zt_suite` 临时库）`471 passed / 10 skipped`；live 8 项在 Windows 与 Linux 容器内均 `8 passed`。**2026-10-26 对账脚本落地后三平台复跑**：Windows+SQLite `484 passed / 11 skipped`；Linux+SQLite `485 passed / 10 skipped`；Linux+PG16 `485 passed / 10 skipped`（Linux 多出 1 项为仅 POSIX 的沙箱用例）。**2026-10-26 密钥轮换落地后三平台复跑**：Windows+SQLite `491 passed / 11 skipped`；Linux+SQLite `492 passed / 10 skipped`；Linux+PG16 `492 passed / 10 skipped`；`ruff check app scripts tests` 全绿。**2026-10-26 Port 协议解耦后三平台复跑（新增 1 项子进程探针）**：Windows+SQLite `492 passed / 11 skipped`；Linux+SQLite `493 passed / 10 skipped`；Linux+PG16 `493 passed / 10 skipped`。skip 恒为「未设 `ZTORQUE_MIGRATION_CHECK_URL`」+「Windows-only 沙箱用例」+ 「未开 `ZTORQUE_A2A_LIVE`」三类，不是失败。
+**测试**：全集 **491** 项（阶段 2/3 新增 36 项：发现 11、配置契约 15、manifest 契约 4、单插件隔离 6；D 组新增 12 项观测接线用例；E 组新增 5 项租约用例；F 组新增 2 项出站语义单测；归档对象对账新增 14 项；归档密钥轮换新增 7 项）。**另有 8 项 A2A 真联调用例**（`tests/integration/test_a2a_live_peers.py`）默认 skip，`ZTORQUE_A2A_LIVE=1` 才跑（约 12~20s，起 uvicorn 子进程 + 真 TCP/TLS 对端）。**2026-10-26 三平台实测（F 组后）**：Windows+SQLite `470 passed / 11 skipped`（含 8 项 live skip）；Linux+SQLite（`zt-test` 容器）`471 passed / 10 skipped`；Linux+PostgreSQL 16（`zt_suite` 临时库）`471 passed / 10 skipped`；live 8 项在 Windows 与 Linux 容器内均 `8 passed`。**2026-10-26 对账脚本落地后三平台复跑**：Windows+SQLite `484 passed / 11 skipped`；Linux+SQLite `485 passed / 10 skipped`；Linux+PG16 `485 passed / 10 skipped`（Linux 多出 1 项为仅 POSIX 的沙箱用例）。**2026-10-26 密钥轮换落地后三平台复跑**：Windows+SQLite `491 passed / 11 skipped`；Linux+SQLite `492 passed / 10 skipped`；Linux+PG16 `492 passed / 10 skipped`；`ruff check app scripts tests` 全绿。**2026-10-26 Port 协议解耦后三平台复跑（新增 1 项子进程探针）**：Windows+SQLite `492 passed / 11 skipped`；Linux+SQLite `493 passed / 10 skipped`；Linux+PG16 `493 passed / 10 skipped`。**2026-10-26 M4 落地后三平台复跑**：Windows+SQLite `507 passed / 23 skipped`；Linux+SQLite `513 passed / 17 skipped`；Linux+PG16 `513 passed / 17 skipped`（A2A live 10 条全过：8 旧 + 出站 mTLS 双向认证 + 联邦入站真执行）。skip 恒为「未设 `ZTORQUE_MIGRATION_CHECK_URL`」+「Windows-only 沙箱用例」+「未开 `ZTORQUE_A2A_LIVE`」+「未开 `ZTORQUE_SANDBOX_CONTAINER_LIVE`（且 Windows 恒 skip）」四类，不是失败。
 **迁移**（A 组 2026-10-26 实测）：`zt_clean` 上 `alembic upgrade head` → `alembic check` 输出 `No new upgrade operations detected`、`scripts/check_migration_drift.py` `total=0`；`upgrade head --sql` 生成的 1018 行离线脚本在空库 `zt_ddl` 执行后同样 `total=0`；`zt_mig` 先 `upgrade head` 再跑 `tests/integration/test_alembic_migrations.py` → `3 passed`。存量 PG / 干净 SQLite 两处此前已零漂移。
-**CI**：`.github/workflows/ci.yml` 已建（见 §6.1），各 job 命令在本地容器/干净副本里逐条跑通；**尚未在真实 GitHub runner 上触发过**。
+**CI**：`.github/workflows/ci.yml` 已建（见 §6.1）。**2026-10-26 首个真实 GitHub run 全绿**（run #1，push 触发，公开仓库 `liushisan673/z-torque`，7 job 全 success：pytest-sqlite 含 POSIX guard / pytest-postgres / migrations / plugin-conformance / console / python-static / pytest-windows）。
 **标准插件**（2026-10-26）：三插件（`sandbox_driver` / `audit_export_archive` / `a2a_gateway`）已按「可整目录搬到企业版」解耦 —— 越界 `app.kernel.*`/`app.models.*` import 从 **20 处降到 0**，由红线测试机器校验；沙箱执行实现已从内核下沉到插件，内核不再保留任何可执行实现。
 
 ## 4. 关键约定（改代码前必读）
@@ -90,9 +90,12 @@ AI Runtime 内核（M0–M3 阶段成果）+ 轻量控制台。核心架构是�
 # Windows 全量
 .\.venv\Scripts\python.exe -m pytest tests -q
 
-# A2A 真联调（默认 skip；起 uvicorn 子进程 + 真 TCP/TLS 对端，约 12~20s）
+# A2A 真联调（默认 skip；起 uvicorn 子进程 + 真 TCP/TLS 对端，约 12~20s；v1.4 含 mTLS/联邦 2 条新用例）
 $env:ZTORQUE_A2A_LIVE="1"; .\.venv\Scripts\python.exe -m pytest tests/integration/test_a2a_live_peers.py -q
 docker exec -e ZTORQUE_A2A_LIVE=1 zt-test bash -lc "cd /w && python -m pytest tests/integration/test_a2a_live_peers.py -q"
+
+# 沙箱容器隔离真 docker 冒烟（v1.4；仅在「有 docker 的 POSIX 主机」可跑，Windows 恒 skip）
+$env:ZTORQUE_SANDBOX_CONTAINER_LIVE="1"; .\.venv\Scripts\python.exe -m pytest tests/integration/test_sandbox_container_live.py -q
 
 # 容器（Linux 验证）：zt-test（代码挂载 /w，已 pip install -e .[test]）、zt-pg（PG16，密码 pass），同 zt-net 网络
 docker exec -e ZTORQUE_TEST_DATABASE_URL=sqlite:////tmp/zt_linux.db zt-test python -m pytest tests -q -p no:cacheprovider
@@ -113,6 +116,8 @@ docker exec -e DATABASE_URL=... zt-test sh -c "alembic upgrade head && alembic c
 ```
 
 > `zt-pg` 未映射宿主端口，只能在 `zt-net` 内互访。需要从宿主机（psql / GUI 客户端）连的时候另起一个映射了端口的实例 `zt-pg-gate`（`postgres:16-alpine`，`-p 55432:5432`，密码 `pass`）；A 组离线 DDL 复验的三个库 `zt_clean`/`zt_ddl`/`zt_mig` 就建在它上面。
+
+> **git 与远端**：`git` 不在 PATH，用 GitHub Desktop 内置 git（`$env:LOCALAPPDATA\GitHubDesktop\app-3.6.4\resources\app\git\cmd\git.exe`，credential.helper=manager）。远端：`origin` = Gitee（SSH）、`github` = `https://github.com/liushisan673/z-torque.git`（公开仓库）。GitHub 直连会被 reset：**推送必须带代理** `-c http.proxy=http://127.0.0.1:12000`（系统代理，git 不自动读取；gitee SSH 不受影响）。`data/logs/*`、`data/audit-archive/*` 已入 .gitignore。
 
 容器若不存在，重建：
 
@@ -166,13 +171,13 @@ docker exec zt-test pip install -q -e ".[test]"
 | compileall | 通过（`compileall_exit=0`） |
 | workflow 自身 | `yaml.safe_load` 通过、job 注册齐全（含 `plugin-conformance`）、纯 ASCII、`rhysd/actionlint` 0 findings |
 
-**未在真实 GitHub runner 上验证**：checkout/setup-python/setup-node/upload-artifact 的缓存与权限行为、托管 PG service 的 5432 端口与 health-check 过程、`windows-latest` 镜像与本地 Windows 的差异、ubuntu 上 `psql` 的 apt 兜底分支。
+**真实 runner 验证（2026-10-26，run #1 全绿）**：托管 PG service 的 5432 连通与 health-check、`windows-latest` 镜像行为（POSIX 用例按预期 skip、guard 不误报）、checkout/setup-python/setup-node/upload-artifact 流程均已在真实 GitHub runner 上落地验证通过。
 
 > 本机跑 Linux 等价验证时可用一次性容器（`--rm`，代码只读挂载后 `cp` 到 `/w`），不必依赖 §6 的常驻 `zt-test`/`zt-pg`；`git status` 不受影响。若本机 shell 带 IDE 注入的 `PYTHONPATH`（sitecustomize shim），在临时目录跑测试可能被 safe-delete 守卫打断，模拟 runner 时用 `$env:PYTHONPATH=""`。
 
 ## 7. 工作区状态（重要）
 
-`git status` 有 **188 项改动未提交**（144 改 / 42 新增 / 2 删除），全部是有效工作产物，**禁止** `git checkout/reset/clean/stash` 破坏。其中上百个 `M` 是 E 组 ruff `--fix` 的 `I001`（import 排序）/`F401`（未用导入）自动改动，**不改变行为**；看 diff 时先排除它们。A 组产生的临时文件 `offline_ddl.sql` 已删除，不要重新生成到仓库根（用 `--sql > %TEMP%` 或容器内路径）。关键新增：
+`git status` 曾有 **188 项改动未提交**（2026-10-24 快照：144 改 / 42 新增 / 2 删除，全部有效工作产物）。**2026-10-26 更新**：主体已由用户提交并推送 GitHub（master = `2e7b7a1`，含 Port 协议解耦、.gitignore 补 `data/logs/*` 与 `data/audit-archive/*`、取消跟踪运行日志）；当前未提交仅剩本文件的会话内更新。**始终禁止** `git checkout/reset/clean/stash` 破坏工作区。其中上百个 `M` 是 E 组 ruff `--fix` 的 `I001`（import 排序）/`F401`（未用导入）自动改动，**不改变行为**；看 diff 时先排除它们。A 组产生的临时文件 `offline_ddl.sql` 已删除，不要重新生成到仓库根（用 `--sql > %TEMP%` 或容器内路径）。关键新增：
 
 ```
 app/kernel/audit/{reader.py,categories.py}       app/plugin_sdk/{__init__,contract,audit,errors,context,db,ports,observability}.py
@@ -201,7 +206,7 @@ tests/integration/test_a2a_live_peers.py          （F 组：A2A 真联调，默
 - ~~定部署形态 / 导出任务租约~~ ✅ 2026-10-26（E 组）：`zr_audit_export_job` 加 `lease_owner` / `lease_expires_at` / `attempts`（迁移 `c7a1e4b90d23`），抢占=条件 UPDATE 的 `rowcount`，续租在分片边界，丢租抛错中止，恢复只回收「无主/本实例/已过期」，终态释放。多副本可放心起；残留限制两条（租约依赖时钟同源；PENDING 不跨副本排队）见 v1.3 §12.5 第 3 条。
 
 **P1**
-- ~~建 CI~~ ✅ 2026-10-24：`.github/workflows/ci.yml`（见 §6.1）。**剩余**：**A4** 推到远端后确认首个真实 run（`pytest-sqlite` / `pytest-postgres` / `migrations` / `plugin-conformance` 四个 ubuntu job 全绿，`pytest-windows` 允许 POSIX 用例 skip）。
+- ~~建 CI~~ ✅ 2026-10-24：`.github/workflows/ci.yml`（见 §6.1）。~~**A4** 推到远端后确认首个真实 run~~ ✅ 2026-10-26：已推送 `github` 远端（master，commit `2e7b7a1`），首个真实 run 全绿（7 job 全 success，见 §3）。
 - ~~ruff 门禁~~ ✅ 2026-10-26（E 组）：`[tool.ruff.lint]` 显式 `select = F,E4,E7,E9,I,B,ASYNC` + 八条带原因的 `ignore`，版本钉在 `[project.optional-dependencies].lint`；CI `python-static` 改为 `ruff check` + `compileall`；一次性清掉 169 项（161 项 `I001`/`F401` 自动，8 项手工）。
 - ~~**A 组：漂移门禁 + Linux 全量 + 离线 DDL**~~ ✅ 2026-10-26：`zt_clean` 与 `zt_ddl` 双库 `total=0`、`alembic check` 无新操作；Linux+SQLite / Linux+PG16 各 `451 passed, 2 skipped`；`zt_mig` PG 迁移用例 `3 passed`（数字见 §3 与 §6.1）。连带修掉 `check_migration_drift.py` 漏 import 插件模型的假阳性，见 §5.18。
 - ~~**E 组：文档收口**~~ ✅ 2026-10-26：A 组实测数字回填 §3/§6.1；`check_migration_drift.py` 修复登记 §5.18；沙箱语义变更（未注入 `sandbox.driver` → 503）登记在 v1.3 §十「变更与兼容」+《内核契约 v1》§3 脚注，明确属**升级收紧而非能力回退**。
@@ -215,7 +220,7 @@ tests/integration/test_a2a_live_peers.py          （F 组：A2A 真联调，默
 - ~~**标准插件遗留（阶段 2 之后，独立一期）**~~ ✅ 2026-10-26：三个 Port 协议模块（`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py`）的模型 import 移入 `TYPE_CHECKING`（`from __future__ import annotations`，运行时 duck typing），import Port 协议不再连带拉起 `app.models`，单插件「零内核依赖」收口。机器探针 `tests/integration/test_plugin_minimal_assembly.py::test_port_protocols_do_not_pull_app_models`（子进程断言 `app.models` 不在 `sys.modules`）；冻结契约文件（`ports/{__init__,model_selector,specs}.py`）未动。v1.3 §12.7 已销项（v1.3.8）。
 
 **P2**
-- M4：sidecar 隔离、联邦身份（mTLS）。
+- ~~M4：sidecar 隔离、联邦身份（mTLS）~~ ✅ 2026-10-26（v1.4）：①`ContainerSandboxDriver`（`sandbox_driver/container.py`，docker CLI 子进程，`--network none --read-only --security-opt no-new-privileges` + 资源上限，Windows/无 docker 装配期 fail-closed，label 含 container → capabilities 如实 `isolation_level=container`）；②A2A 联邦入站方案 B（`a2a_gateway/federated.py`：`A2A_FEDERATION_ENABLED` + peer `inbound_federation/tenant_id/auth_secret_name`，装配期预解密 + 租户存在性校验，命中凭据即授权 `a2a.invoke`，`user_id=None` 不撞审计外键，归属走 `detail.principal_type/caller_peer_id`）；③出站 per-peer mTLS（`client_cert/key/ca_bundle_secret_name` → SSLContext 传 httpx `verify=`——实测 `cert=(files)` 形式握手失败，PEM 临时文件 0600 用完即删）。口径见 v1.3 文档 §4.10/§6.5/§12.4/§12.5。**未做**：`object.store.list`（契约 §7 后再动）；容器 live 冒烟需有 docker 的 POSIX 主机手动开 `ZTORQUE_SANDBOX_CONTAINER_LIVE=1`。
 - ~~归档密钥轮换~~ ✅ 2026-10-26：`audit_export_archive/keys.py` 新增 `ArchiveKeyRing`（**写恒用 current，读按 current → previous 降级**），配置加 `AUDIT_ARCHIVE_PREVIOUS_SECRET_REF`（只读，`Settings` 与插件 `validate()` 双入口校验：仅加密开启时允许、不得与 current 同引用）；索引侧记密钥归属——`zr_audit_archive_batch.objects[].key_id` + manifest `key_id` + 审计 detail，全部只存指纹（`sha256(派生密钥)[:16]`，不可反推），密钥材料不进索引/manifest/日志；解包全环失败抛 `AI_AUDIT_ARCHIVE_KEY_MISSING`（502，已注册错误码表 + 控制台文案），不静默跳过。脚本 `scripts/rotate_audit_archive_key.py` 三档：登记（`--new-secret-file`/`--new-secret-stdin`，加密 + 回读自检 + 打印待粘贴 env）/ 只读核对（默认）/ `--retire-old`（真读对象存储 + 真解密，只有「每个加密对象都能只用当前密钥解开」才放行），退出码 0/3/2。**不新增迁移**（key_id 落在既有 JSON 列），不动 `app/kernel/ports/*`。口径见 v1.3 §12.9；`tests/unit/test_audit_archive_key_rotation.py` 7 条。**未做**：存量对象不自动重加密（保持旧密钥加密直到过期清理）；多副本滚动需先把新密钥登记为所有副本的 previous。
 - ~~归档孤儿对象对账~~ ✅ 2026-10-26：`scripts/reconcile_audit_archive_objects.py`（默认 dry-run 零写入，`--apply` 只删孤儿对象）。索引源 = `zr_audit_export_job` + `zr_audit_export_shard` + `zr_audit_archive_batch.objects`；三类输出 orphan（有键无有效任务行，含 FAILED 残留）/ dangling（SUCCEEDED 行指向的对象/ manifest 不存在）/ invalid（前缀、租户、任务、叶子不合规）。判定口径与安全边界见 v1.3 §12.8；`tests/unit/test_reconcile_audit_archive_objects.py` 14 条。**未做**：`--apply` 不删索引行（残留分片行留人工裁决）；失败批次已落盘未登记的 `part-*` 无法枚举（契约无 `list`）。
 - 文档回填：v1.3 §5.8 / §6.8 验收前置项。~~`process.spawn` 需注明「仅登记不强制」~~ ✅ 2026-10-26（D3）：v1.3 §2.1 表格、§3.3 实现约定、§12.5 限制第 7 条三处写死「仅登记 / 无运行时强制点 / 不得说成已拦截」。

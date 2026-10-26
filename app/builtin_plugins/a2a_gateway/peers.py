@@ -16,6 +16,8 @@ payload 白名单刻意不含 token、header 原文与请求/响应 body——�
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
 import time
 from typing import Any
 from urllib.parse import urljoin
@@ -98,21 +100,63 @@ class PeerRegistry:
             self._guard.record(f"{_BREAKER_PREFIX}{peer_id}", succeeded=succeeded)
 
     # ---- 出站 ----
-    def _auth_headers(self, peer: PeerConfig) -> dict[str, str]:
-        if not peer.auth_secret_name:
-            return {}
+    def _decrypt_material(self, peer_id: str, secret_name: str) -> str:
+        """解密对端凭据材料（可带 `secret://` 前缀）；失败/空一律按对端不可用，不回显细节。"""
         provider = self._sdk.registry.try_get("secret.provider")
         if provider is None:
             raise ApiError("AI_CAPABILITY_UNAVAILABLE", "secret.provider is not assembled", 503)
-        name = peer.auth_secret_name
-        ciphertext = name[len("secret://") :] if name.startswith("secret://") else name
+        ciphertext = secret_name[len("secret://") :] if secret_name.startswith("secret://") else secret_name
         try:
             plaintext = provider.decrypt(ciphertext)
         except Exception as exc:  # noqa: BLE001 - 解密失败按对端不可用处理，不回显实现细节
-            raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} credential cannot be decrypted", 503) from exc
+            raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer_id!r} credential cannot be decrypted", 503) from exc
         if not plaintext:
-            raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} credential is empty", 503)
+            raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer_id!r} credential is empty", 503)
+        return plaintext
+
+    def _auth_headers(self, peer: PeerConfig) -> dict[str, str]:
+        if not peer.auth_secret_name:
+            return {}
+        plaintext = self._decrypt_material(peer.peer_id, peer.auth_secret_name)
         return {"Authorization": f"Bearer {plaintext}"}
+
+    def _mtls_client_options(self, peer: PeerConfig) -> tuple[dict[str, Any], list[str]]:
+        """准备 per-peer mTLS 材料供 httpx 使用，返回 (client 选项, 待清理临时文件路径)。
+
+        httpx/ssl 只接受**文件路径**（`load_cert_chain(cert, key)` 与 CA bundle），因此解密
+        后的 PEM 先写入 owner-only（0600）临时文件；调用方用完必须清理（密钥材料不驻留磁盘）。
+        实测本机 httpx 版本下 `cert=(certfile, keyfile)` 形式握手失败（`ReadError`），
+        **预构建 SSLContext 传 `verify=`** 是可靠路径——故统一在此构建 SSLContext。
+        解密失败 → `AI_A2A_PEER_UNAVAILABLE`（503，与 `_auth_headers` 同语义）。
+        """
+        if not peer.mtls_enabled and not peer.ca_bundle_secret_name:
+            return {}, []
+        import ssl
+
+        files: list[str] = []
+        try:
+            if peer.ca_bundle_secret_name:
+                ca_pem = self._decrypt_material(peer.peer_id, peer.ca_bundle_secret_name)
+                ca_path = _write_secret_temp(ca_pem)
+                files.append(ca_path)
+                context = ssl.create_default_context(cafile=ca_path)
+            else:
+                context = ssl.create_default_context()
+            if peer.mtls_enabled:
+                cert_pem = self._decrypt_material(peer.peer_id, peer.client_cert_secret_name)
+                key_pem = self._decrypt_material(peer.peer_id, peer.client_key_secret_name)
+                cert_path = _write_secret_temp(cert_pem)
+                files.append(cert_path)
+                key_path = _write_secret_temp(key_pem)
+                files.append(key_path)
+                context.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            return {"verify": context}, files
+        except ApiError:
+            _remove_temp_files(files)
+            raise
+        except Exception as exc:  # noqa: BLE001 - TLS 材料非法按对端不可用处理
+            _remove_temp_files(files)
+            raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} mTLS material is invalid", 503) from exc
 
     async def invoke(
         self,
@@ -176,32 +220,37 @@ class PeerRegistry:
         }
         url = urljoin(peer.base_url + "/", _INVOKE_PATH.lstrip("/"))
         timeout = peer.timeout_seconds or self._config.default_timeout_seconds
+        # mTLS 材料（如有）先落盘为 owner-only 临时文件；无论成败用完即删（密钥不驻留磁盘）
+        mtls_options, mtls_files = self._mtls_client_options(peer)
         try:
-            if self._client is not None:
-                response = await self._client.post(url, json=payload, headers=headers, timeout=timeout)
-                raw = response.content
-                status_code = response.status_code
-            else:
-                async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
-                    async with client.stream("POST", url, json=payload, headers=headers) as response:
-                        status_code = response.status_code
-                        chunks: list[bytes] = []
-                        size = 0
-                        async for chunk in response.aiter_bytes():
-                            size += len(chunk)
-                            if size > self._config.max_response_bytes:
-                                raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} response exceeds max_response_bytes", 503)
-                            chunks.append(chunk)
-                        raw = b"".join(chunks)
-        except ApiError:
-            self.record_breaker(peer.peer_id, succeeded=False)
-            raise
-        except httpx.TimeoutException as exc:
-            self.record_breaker(peer.peer_id, succeeded=False)
-            raise ApiError("AI_A2A_TIMEOUT", f"peer {peer.peer_id!r} timed out after {timeout}s", 504) from exc
-        except Exception as exc:  # noqa: BLE001 - 连接级失败统一映射为对端不可用
-            self.record_breaker(peer.peer_id, succeeded=False)
-            raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} is unreachable: {exc}", 503) from exc
+            try:
+                if self._client is not None:
+                    response = await self._client.post(url, json=payload, headers=headers, timeout=timeout)
+                    raw = response.content
+                    status_code = response.status_code
+                else:
+                    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout, **mtls_options) as client:
+                        async with client.stream("POST", url, json=payload, headers=headers) as response:
+                            status_code = response.status_code
+                            chunks: list[bytes] = []
+                            size = 0
+                            async for chunk in response.aiter_bytes():
+                                size += len(chunk)
+                                if size > self._config.max_response_bytes:
+                                    raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} response exceeds max_response_bytes", 503)
+                                chunks.append(chunk)
+                            raw = b"".join(chunks)
+            except ApiError:
+                self.record_breaker(peer.peer_id, succeeded=False)
+                raise
+            except httpx.TimeoutException as exc:
+                self.record_breaker(peer.peer_id, succeeded=False)
+                raise ApiError("AI_A2A_TIMEOUT", f"peer {peer.peer_id!r} timed out after {timeout}s", 504) from exc
+            except Exception as exc:  # noqa: BLE001 - 连接级失败统一映射为对端不可用
+                self.record_breaker(peer.peer_id, succeeded=False)
+                raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} is unreachable: {exc}", 503) from exc
+        finally:
+            _remove_temp_files(mtls_files)
         if len(raw) > self._config.max_response_bytes:
             self.record_breaker(peer.peer_id, succeeded=False)
             raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} response exceeds max_response_bytes", 503)
@@ -239,3 +288,28 @@ def _self_headers(headers: dict[str, str]) -> dict[str, str]:
     """过滤掉调用方可伪造的入站标记头（只允许信令头透传）。"""
     banned = {"x-user-id", "authorization", "host", "content-length"}
     return {key: value for key, value in headers.items() if key.lower() not in banned}
+
+
+def _write_secret_temp(pem: str) -> str:
+    """PEM 材料写入 owner-only（0600）临时文件；httpx/ssl 只接受文件路径。"""
+    fd, path = tempfile.mkstemp(prefix="zt-a2a-mtls-", suffix=".pem")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(pem)
+        os.chmod(path, 0o600)
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:  # pragma: no cover - 清理失败不值得掩盖原异常
+            pass
+        raise
+    return path
+
+
+def _remove_temp_files(paths: list[str]) -> None:
+    """清理 mTLS 临时材料；单个删除失败不掩盖主流程异常。"""
+    for path in paths:
+        try:
+            os.unlink(path)
+        except OSError:  # pragma: no cover - 文件已消失/被占用等，属清理阶段噪音
+            pass

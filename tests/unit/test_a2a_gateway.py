@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -24,6 +26,7 @@ from sqlalchemy import select
 from app.builtin_plugins.a2a_gateway import peers as peers_module
 from app.builtin_plugins.a2a_gateway.config import A2AConfig, PeerConfig
 from app.builtin_plugins.a2a_gateway.discovery import AgentDiscovery
+from app.builtin_plugins.a2a_gateway.federated import FederatedPrincipalRegistry
 from app.builtin_plugins.a2a_gateway.gateway import A2AGateway
 from app.builtin_plugins.a2a_gateway.identity import InboundIdentity
 from app.builtin_plugins.a2a_gateway.peers import (
@@ -50,7 +53,7 @@ from app.db.session import SessionLocal
 from app.kernel.plugin_guard import CIRCUIT_OPEN_CODE, PluginGuardRegistry
 from app.kernel.security_context import SecurityContext
 from app.models import Agent, AgentVersion, AuditLog, Tenant
-from tests.support.fakes import FakeRegistry, FakeSdk
+from tests.support.fakes import FakeRegistry, FakeSdk, FakeSecretProvider
 
 INVOKE_URL = "https://peer.test/api/z-torque/a2a/invoke"
 
@@ -237,11 +240,12 @@ def test_authenticate_returns_frozen_context_with_trace():
     )
     sdk = FakeSdk(registry=FakeRegistry({"identity.provider": identity, "authz.provider": _AuthzProvider(allowed=True)}))
 
-    ctx = InboundIdentity(sdk).authenticate("good-token", trace_id="outer")
+    principal = InboundIdentity(sdk).authenticate("good-token", trace_id="outer")
 
-    assert ctx == SecurityContext(tenant_id=tenant_id, user_id=user_id, session_id=session_id, trace_id="outer")
+    assert principal.principal_type == "local_jwt"
+    assert principal.ctx == SecurityContext(tenant_id=tenant_id, user_id=user_id, session_id=session_id, trace_id="outer")
     with pytest.raises(Exception):
-        ctx.user_id = uuid4()  # frozen dataclass：执行期身份不可漂移
+        principal.ctx.user_id = uuid4()  # frozen dataclass：执行期身份不可漂移
 
 
 def test_missing_provider_ports_fail_closed_with_503():
@@ -824,3 +828,292 @@ async def test_flat_response_is_not_unwrapped():
 
     assert result["status"] == "SUCCEEDED"
     assert result["data"]["status"] == "nested-field"
+
+
+# ---------------------------------------------------------------- 联邦入站（v1.4 §6.5 方案 B）
+
+
+def _federated_config(tenant_id, *, enabled: bool = True, peer_secret: str = "cipher-1") -> A2AConfig:
+    return _config(
+        federation_enabled=enabled,
+        remote_peers=(
+            PeerConfig(
+                peer_id="beta",
+                base_url="https://peer.test",
+                auth_secret_name=peer_secret,
+                tenant_id=str(tenant_id),
+                inbound_federation=True,
+            ),
+        ),
+    )
+
+
+def _federated_registry(sdk, config) -> FederatedPrincipalRegistry:
+    registry = FederatedPrincipalRegistry.from_config(sdk, config)
+    assert registry is not None
+    return registry
+
+
+def test_federation_disabled_builds_nothing():
+    """开关关闭 → from_config 返回 None，不触碰 secret.provider（零行为变化）。"""
+    secret = FakeSecretProvider({"cipher-1": "shared-secret"})
+    FakeSdk(registry=FakeRegistry({"secret.provider": secret}))
+
+    assert FederatedPrincipalRegistry.from_config(FakeSdk(), _federated_config(uuid4(), enabled=False)) is None
+    assert secret.decrypt_calls == 0
+
+
+def test_federation_enabled_without_principals_is_assembly_error():
+    """开启联邦却不声明任何 inbound_federation peer = 配置矛盾，装配期拒绝。"""
+    sdk = FakeSdk(registry=FakeRegistry({"secret.provider": FakeSecretProvider()}))
+    config = _config(federation_enabled=True)
+
+    with pytest.raises(Exception):
+        FederatedPrincipalRegistry.from_config(sdk, config)
+
+
+def test_federation_bad_secret_or_unknown_tenant_fail_at_assembly():
+    """密钥解不开 / tenant 不存在都是身份事实不完整，必须装配期 fail fast。"""
+    tenant_id, _user_id = _tenant()
+    bad_secret_sdk = FakeSdk(registry=FakeRegistry({"secret.provider": FakeSecretProvider({})}))
+    with pytest.raises(Exception):
+        FederatedPrincipalRegistry.from_config(bad_secret_sdk, _federated_config(tenant_id, peer_secret="cipher-missing"))
+
+    empty_secret_sdk = FakeSdk(registry=FakeRegistry({"secret.provider": FakeSecretProvider({"cipher-1": ""})}))
+    with pytest.raises(Exception):
+        FederatedPrincipalRegistry.from_config(empty_secret_sdk, _federated_config(tenant_id))
+
+    missing_tenant_sdk = FakeSdk(registry=FakeRegistry({"secret.provider": FakeSecretProvider({"cipher-1": "s"})}))
+    with pytest.raises(Exception):
+        FederatedPrincipalRegistry.from_config(missing_tenant_sdk, _federated_config(uuid4()))
+
+
+def test_federated_secret_grants_a2a_invoke_without_local_authz():
+    """命中共享密钥 → 联邦主体（tenant=配置声明、user_id=None），不触本地身份/角色体系。"""
+    tenant_id, user_id = _tenant()
+    identity = _IdentityProvider(ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id))
+    authz = _AuthzProvider(allowed=True)
+    sdk = FakeSdk(
+        registry=FakeRegistry(
+            {
+                "secret.provider": FakeSecretProvider({"cipher-1": "shared-secret-xyz"}),
+                "identity.provider": identity,
+                "authz.provider": authz,
+            }
+        )
+    )
+    config = _federated_config(tenant_id)
+    registry = _federated_registry(sdk, config)
+    inbound = InboundIdentity(sdk, federated=registry)
+
+    principal = inbound.authenticate("shared-secret-xyz", trace_id="trace-fed")
+
+    assert principal.ctx.tenant_id == tenant_id
+    assert principal.ctx.user_id is None, "联邦主体不是本地用户：合成 UUID 会撞 zr_audit_log 的 actor 外键"
+    assert principal.principal_type == "federated_peer"
+    assert principal.peer_id == "beta"
+    assert identity.calls == [], "联邦命中不得再走本域 JWT"
+    assert authz.calls == [], "凭据即授权（service account 语义），不走本地角色体系"
+
+
+@pytest.mark.asyncio
+async def test_gateway_federated_call_executes_and_audits_without_actor_fk():
+    """网关级联邦入站：真实执行技能、审计行 actor 为 NULL（外键安全）、归属进 detail。"""
+    skill_gateway = _SkillGateway(_Result(status="SUCCEEDED", data={"echo": 1}))
+    tenant_id, _user_id = _tenant()
+    sdk = FakeSdk(
+        settings=SimpleNamespace(),
+        registry=FakeRegistry({"secret.provider": FakeSecretProvider({"cipher-1": "shared-secret-xyz"})}),
+        permissions=("db.query", "network.outbound"),
+    )
+    cfg = _federated_config(tenant_id)
+    federated = FederatedPrincipalRegistry.from_config(sdk, cfg)
+    gateway = A2AGateway(
+        sdk,
+        cfg,
+        identity=InboundIdentity(sdk, federated=federated),
+        discovery=AgentDiscovery(sdk),
+        peers=PeerRegistry(sdk, cfg, guard=PluginGuardRegistry(failure_threshold=5, cooldown_seconds=30.0)),
+        skill_gateway=skill_gateway,
+    )
+
+    response = await gateway.invoke(headers={"Authorization": "Bearer shared-secret-xyz"}, payload=_local_payload(arguments={}))
+
+    assert response["status"] == "SUCCEEDED"
+    assert skill_gateway.calls[0]["ctx"].user_id is None
+    with SessionLocal() as db:
+        rows = db.scalars(select(AuditLog).where(AuditLog.tenant_id == tenant_id, AuditLog.action == "A2A_INVOKED")).all()
+    assert len(rows) == 1
+    assert rows[0].actor_user_id is None, "审计 actor 不得写合成 UUID（zr_user 外键）"
+    assert rows[0].detail["principal_type"] == "federated_peer"
+    assert rows[0].detail["caller_peer_id"] == "beta"
+
+
+def test_federated_miss_falls_back_to_local_jwt_without_double_audit():
+    """密钥不符 → 静默回落本域 JWT（联邦侧不留痕）；本域拒绝只写一条 local_jwt 审计。"""
+    tenant_id, user_id = _tenant()
+    identity = _IdentityProvider(ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id))
+    authz = _AuthzProvider(allowed=False)
+    sdk = FakeSdk(
+        registry=FakeRegistry(
+            {
+                "secret.provider": FakeSecretProvider({"cipher-1": "shared-secret-xyz"}),
+                "identity.provider": identity,
+                "authz.provider": authz,
+            }
+        )
+    )
+    inbound = InboundIdentity(sdk, federated=_federated_registry(sdk, _federated_config(tenant_id)))
+
+    with pytest.raises(ApiError) as excinfo:
+        inbound.authenticate("not-the-secret", trace_id="trace-1")
+
+    assert excinfo.value.code == "AI_A2A_DENIED"
+    rows = _denial_rows(tenant_id)
+    assert len(rows) == 1, "联邦未命中必须静默回落，不得先写一条联邦拒绝"
+    assert rows[0].detail["principal_type"] == "local_jwt"
+
+
+def test_federated_missing_token_denied_as_local_jwt():
+    tenant_id, user_id = _tenant()
+    identity = _IdentityProvider(ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id))
+    sdk = FakeSdk(
+        registry=FakeRegistry(
+            {
+                "secret.provider": FakeSecretProvider({"cipher-1": "shared-secret-xyz"}),
+                "identity.provider": identity,
+            }
+        )
+    )
+    inbound = InboundIdentity(sdk, federated=_federated_registry(sdk, _federated_config(tenant_id)))
+
+    with pytest.raises(ApiError):
+        inbound.authenticate(None)
+
+    assert identity.calls == []
+
+
+# ---------------------------------------------------------------- 出站 mTLS（v1.4 §6.5）
+
+
+def test_peer_mtls_config_pairing_is_validated():
+    """客户端证书与私钥必须成对声明；inbound_federation 必须给密钥与合法租户。"""
+    with pytest.raises(ValueError):
+        _config(
+            remote_peers=(PeerConfig(peer_id="beta", base_url="https://peer.test", client_cert_secret_name="c1"),),
+        ).validate()
+    with pytest.raises(ValueError):
+        _config(
+            remote_peers=(
+                PeerConfig(peer_id="beta", base_url="https://peer.test", inbound_federation=True, tenant_id="not-a-uuid"),
+            ),
+        ).validate()
+    # 合法组合：cert+key 成对 + ca 独立
+    _config(
+        remote_peers=(
+            PeerConfig(
+                peer_id="beta",
+                base_url="https://peer.test",
+                client_cert_secret_name="c1",
+                client_key_secret_name="k1",
+                ca_bundle_secret_name="ca1",
+            ),
+        ),
+    ).validate()
+
+
+def _test_tls_material() -> dict[str, str]:
+    """生成一份真实（自签）TLS 材料供单测用：_mtls_client_options 会真解析 PEM。"""
+    from datetime import datetime, timedelta, timezone
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    def _pem_key(key) -> str:
+        return key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        ).decode()
+
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "unit-ca")])
+    now = datetime.now(timezone.utc)
+    ca_cert = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, hashes.SHA256())
+    )
+    client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client_cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "unit-client")]))
+        .issuer_name(ca_cert.subject)
+        .public_key(client_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1))
+        .sign(ca_key, hashes.SHA256())
+    )
+    return {
+        "cert": client_cert.public_bytes(serialization.Encoding.PEM).decode(),
+        "key": _pem_key(client_key),
+        "ca": ca_cert.public_bytes(serialization.Encoding.PEM).decode(),
+    }
+
+
+def test_mtls_material_decrypted_to_owner_only_temp_files_and_cleaned():
+    """mTLS 材料解密 → SSLContext 构建（0600 临时文件）→ 请求后清理（密钥不驻留磁盘）。"""
+    client = _Client(response=_Response(200, b'{"status":"SUCCEEDED"}'))
+    material = _test_tls_material()
+    sdk = FakeSdk(
+        settings=SimpleNamespace(),
+        registry=FakeRegistry(
+            {
+                "secret.provider": FakeSecretProvider(
+                    {"cert-1": material["cert"], "key-1": material["key"], "ca-1": material["ca"]}
+                ),
+            }
+        ),
+    )
+    config = _config()
+    guard = PluginGuardRegistry(failure_threshold=2, cooldown_seconds=30.0)
+    registry = PeerRegistry(sdk, config, guard=guard, client=client)
+    peer = PeerConfig(
+        peer_id="beta",
+        base_url="https://peer.test",
+        client_cert_secret_name="cert-1",
+        client_key_secret_name="key-1",
+        ca_bundle_secret_name="ca-1",
+    )
+
+    body = asyncio.run(registry.invoke(peer, {"id": "1"}))
+
+    assert body["status"] == "SUCCEEDED"
+    leftover = list(Path(tempfile.gettempdir()).glob("zt-a2a-mtls-*.pem"))
+    assert leftover == [], "mTLS 临时材料必须在请求后清理"
+
+
+def test_mtls_material_decrypt_failure_is_peer_unavailable():
+    """证书/私钥解不开 → AI_A2A_PEER_UNAVAILABLE（对齐凭据语义），不发起出站。"""
+    client = _Client(response=_Response(200, b'{"status":"SUCCEEDED"}'))
+    sdk = FakeSdk(
+        settings=SimpleNamespace(),
+        registry=FakeRegistry({"secret.provider": FakeSecretProvider({})}),
+    )
+    registry = PeerRegistry(sdk, _config(), guard=PluginGuardRegistry(failure_threshold=2, cooldown_seconds=30.0), client=client)
+    peer = PeerConfig(peer_id="beta", base_url="https://peer.test", client_cert_secret_name="cert-1", client_key_secret_name="key-1")
+
+    with pytest.raises(ApiError) as excinfo:
+        asyncio.run(registry.invoke(peer, {"id": "1"}))
+
+    assert excinfo.value.code == "AI_A2A_PEER_UNAVAILABLE"
+    assert client.calls == []

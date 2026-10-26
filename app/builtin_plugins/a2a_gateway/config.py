@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
+from uuid import UUID
 
 IDENTITY_NONE = "none"
 IDENTITY_USER_HEADER = "user_id_header"
@@ -18,17 +19,33 @@ IDENTITY_MODES = (IDENTITY_NONE, IDENTITY_USER_HEADER, IDENTITY_FULL_CONTEXT)
 
 @dataclass(frozen=True)
 class PeerConfig:
-    """远端 peer：`auth_secret_name` 指向可 decrypt 的密钥材料，不是 `secret://`。"""
+    """远端 peer：`auth_secret_name` 指向可 decrypt 的密钥材料，不是 `secret://`。
+
+    v1.4 M4 扩展：
+    - 联邦入站（方案 B）：`inbound_federation=true` 时该 peer 的共享密钥同时用于
+      入站 service account 认证（与出站 Bearer 对称），`tenant_id` 声明主体归属租户；
+    - 出站 mTLS：`client_cert_secret_name` / `client_key_secret_name` 成对出现，
+      `ca_bundle_secret_name` 可独立配置（校验对端服务端证书）。
+    """
 
     peer_id: str
     base_url: str
     auth_secret_name: str = ""
     timeout_seconds: float | None = None
+    tenant_id: str = ""
+    inbound_federation: bool = False
+    client_cert_secret_name: str = ""
+    client_key_secret_name: str = ""
+    ca_bundle_secret_name: str = ""
 
     @property
     def is_loopback(self) -> bool:
         host = (urlparse(self.base_url).hostname or "").lower()
         return host in ("127.0.0.1", "::1", "localhost")
+
+    @property
+    def mtls_enabled(self) -> bool:
+        return bool(self.client_cert_secret_name and self.client_key_secret_name)
 
 
 @dataclass(frozen=True)
@@ -44,6 +61,7 @@ class A2AConfig:
     allowed_peers: frozenset[str] = frozenset()
     circuit_failure_threshold: int = 5
     circuit_cooldown_seconds: float = 30.0
+    federation_enabled: bool = False
 
     @classmethod
     def from_settings(cls, settings: Any) -> "A2AConfig":
@@ -60,6 +78,11 @@ class A2AConfig:
                     base_url=base_url.rstrip("/"),
                     auth_secret_name=str(raw.get("auth_secret_name") or raw.get("token_ref") or ""),
                     timeout_seconds=float(timeout) if timeout not in (None, "") else None,
+                    tenant_id=str(raw.get("tenant_id") or "").strip(),
+                    inbound_federation=bool(raw.get("inbound_federation") or False),
+                    client_cert_secret_name=str(raw.get("client_cert_secret_name") or "").strip(),
+                    client_key_secret_name=str(raw.get("client_key_secret_name") or "").strip(),
+                    ca_bundle_secret_name=str(raw.get("ca_bundle_secret_name") or "").strip(),
                 )
             )
         return cls(
@@ -74,6 +97,7 @@ class A2AConfig:
             allowed_peers=frozenset(str(item).strip() for item in (getattr(settings, "a2a_allowed_peers", []) or []) if str(item).strip()),
             circuit_failure_threshold=int(getattr(settings, "a2a_circuit_failure_threshold", 5)),
             circuit_cooldown_seconds=float(getattr(settings, "a2a_circuit_cooldown_seconds", 30.0)),
+            federation_enabled=bool(getattr(settings, "a2a_federation_enabled", False)),
         )
 
     def peer(self, peer_id: str) -> PeerConfig | None:
@@ -114,3 +138,14 @@ class A2AConfig:
                 raise ValueError(f"a2a peer {peer.peer_id!r} base_url must use https (only loopback may use http)")
             if not parsed.netloc:
                 raise ValueError(f"a2a peer {peer.peer_id!r} base_url is not a valid URL")
+            # 联邦入站（方案 B）：共享密钥与租户事实缺一不可（tenant 存在性由插件装配期查库校验）
+            if peer.inbound_federation:
+                if not peer.auth_secret_name:
+                    raise ValueError(f"a2a peer {peer.peer_id!r} inbound_federation requires auth_secret_name")
+                try:
+                    UUID(peer.tenant_id)
+                except ValueError as exc:
+                    raise ValueError(f"a2a peer {peer.peer_id!r} inbound_federation requires a valid tenant_id UUID") from exc
+            # 出站 mTLS：客户端证书与私钥必须成对声明；CA bundle 可独立
+            if bool(peer.client_cert_secret_name) != bool(peer.client_key_secret_name):
+                raise ValueError(f"a2a peer {peer.peer_id!r} mTLS requires client_cert_secret_name and client_key_secret_name together")

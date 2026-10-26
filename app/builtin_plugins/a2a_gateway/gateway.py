@@ -18,7 +18,7 @@ from app.builtin_plugins.a2a_gateway.config import (
     A2AConfig,
 )
 from app.builtin_plugins.a2a_gateway.discovery import AgentDiscovery
-from app.builtin_plugins.a2a_gateway.identity import InboundIdentity
+from app.builtin_plugins.a2a_gateway.identity import InboundIdentity, InboundPrincipal
 from app.builtin_plugins.a2a_gateway.peers import PeerRegistry
 from app.builtin_plugins.a2a_gateway.protocol import (
     A2A_DEPTH_HEADER,
@@ -93,7 +93,8 @@ class A2AGateway:
         if self._guard is not None:
             self._guard.check(_BREAKER)
         token = _bearer(headers)
-        ctx = self.identity.authenticate(token, trace_id=trace_id)
+        principal = self.identity.authenticate(token, trace_id=trace_id)
+        ctx = principal.ctx
         request = parse_request(payload)
         depth = parse_depth(headers, max_depth=self._config.max_depth)
         try:
@@ -102,12 +103,12 @@ class A2AGateway:
             else:
                 response = await self._invoke_local(request, ctx=ctx, depth=depth)
         except ApiError as exc:
-            self._record(ctx, action="A2A_DENIED" if exc.code in _DENIED_CODES else "A2A_FAILED", summary=exc.message, code=exc.code, depth=depth, peer=request.peer)
+            self._record(principal, action="A2A_DENIED" if exc.code in _DENIED_CODES else "A2A_FAILED", summary=exc.message, code=exc.code, depth=depth, peer=request.peer)
             if self._guard is not None:
                 self._guard.record(_BREAKER, succeeded=False)
             raise
         self._record(
-            ctx,
+            principal,
             action="A2A_INVOKED" if response.get("status") == STATUS_SUCCEEDED else "A2A_FAILED",
             summary=f"a2a {request.route} call {response.get('status')}",
             code=(response.get("error") or {}).get("code"),
@@ -212,10 +213,14 @@ class A2AGateway:
         return {}
 
     # ---- 审计 ----
-    def _record(self, ctx: SecurityContext, *, action: str, summary: str, code: str | None, depth: int, peer: str | None) -> None:
-        detail = {"depth": depth, "error_code": code}
+    def _record(self, principal: InboundPrincipal, *, action: str, summary: str, code: str | None, depth: int, peer: str | None) -> None:
+        ctx = principal.ctx
+        detail = {"depth": depth, "error_code": code, "principal_type": principal.principal_type}
         if peer:
             detail["peer"] = peer
+        if principal.peer_id:
+            # 联邦主体归属（ctx.user_id 恒为 None，不走 actor 外键）
+            detail["caller_peer_id"] = principal.peer_id
         # 经 SDK 独立事务留痕（插件不 import 内核审计实现）
         self._sdk.record_audit(
             tenant_id=ctx.tenant_id,
