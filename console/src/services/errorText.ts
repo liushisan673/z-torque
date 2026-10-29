@@ -74,6 +74,7 @@ const CODE_TEXT: Record<string, string> = {
   AI_AUDIT_EXPORT_TOO_LARGE: "导出范围超过单任务行数上限，请缩小时间范围后重试",
   AI_AUDIT_EXPORT_FAILED: "审计导出失败，请稍后重试",
   AI_AUDIT_ARCHIVE_FAILED: "审计归档失败，请检查对象存储与密钥配置",
+  AI_AUDIT_ARCHIVE_BUSY: "已有归档批次正在执行，请等待其结束后重试",
   AI_AUDIT_ARCHIVE_KEY_MISSING: "归档对象需要已下线的密钥才能解开，请恢复上一把密钥或先完成密钥轮换",
   // ---- A2A（v1.3 M3）----
   AI_A2A_DISABLED: "A2A 能力未启用（A2A_ENABLED=false）",

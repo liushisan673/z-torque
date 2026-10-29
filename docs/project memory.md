@@ -43,7 +43,7 @@ AI Runtime 内核（M0–M3 阶段成果）+ 轻量控制台。核心架构是�
 
 **测试**：全集 **491** 项（阶段 2/3 新增 36 项：发现 11、配置契约 15、manifest 契约 4、单插件隔离 6；D 组新增 12 项观测接线用例；E 组新增 5 项租约用例；F 组新增 2 项出站语义单测；归档对象对账新增 14 项；归档密钥轮换新增 7 项）。**另有 8 项 A2A 真联调用例**（`tests/integration/test_a2a_live_peers.py`）默认 skip，`ZTORQUE_A2A_LIVE=1` 才跑（约 12~20s，起 uvicorn 子进程 + 真 TCP/TLS 对端）。**2026-10-26 三平台实测（F 组后）**：Windows+SQLite `470 passed / 11 skipped`（含 8 项 live skip）；Linux+SQLite（`zt-test` 容器）`471 passed / 10 skipped`；Linux+PostgreSQL 16（`zt_suite` 临时库）`471 passed / 10 skipped`；live 8 项在 Windows 与 Linux 容器内均 `8 passed`。**2026-10-26 对账脚本落地后三平台复跑**：Windows+SQLite `484 passed / 11 skipped`；Linux+SQLite `485 passed / 10 skipped`；Linux+PG16 `485 passed / 10 skipped`（Linux 多出 1 项为仅 POSIX 的沙箱用例）。**2026-10-26 密钥轮换落地后三平台复跑**：Windows+SQLite `491 passed / 11 skipped`；Linux+SQLite `492 passed / 10 skipped`；Linux+PG16 `492 passed / 10 skipped`；`ruff check app scripts tests` 全绿。**2026-10-26 Port 协议解耦后三平台复跑（新增 1 项子进程探针）**：Windows+SQLite `492 passed / 11 skipped`；Linux+SQLite `493 passed / 10 skipped`；Linux+PG16 `493 passed / 10 skipped`。**2026-10-26 M4 落地后三平台复跑**：Windows+SQLite `507 passed / 23 skipped`；Linux+SQLite `513 passed / 17 skipped`；Linux+PG16 `513 passed / 17 skipped`（A2A live 10 条全过：8 旧 + 出站 mTLS 双向认证 + 联邦入站真执行）。skip 恒为「未设 `ZTORQUE_MIGRATION_CHECK_URL`」+「Windows-only 沙箱用例」+「未开 `ZTORQUE_A2A_LIVE`」+「未开 `ZTORQUE_SANDBOX_CONTAINER_LIVE`（且 Windows 恒 skip）」四类，不是失败。
 **迁移**（A 组 2026-10-26 实测）：`zt_clean` 上 `alembic upgrade head` → `alembic check` 输出 `No new upgrade operations detected`、`scripts/check_migration_drift.py` `total=0`；`upgrade head --sql` 生成的 1018 行离线脚本在空库 `zt_ddl` 执行后同样 `total=0`；`zt_mig` 先 `upgrade head` 再跑 `tests/integration/test_alembic_migrations.py` → `3 passed`。存量 PG / 干净 SQLite 两处此前已零漂移。
-**CI**：`.github/workflows/ci.yml` 已建（见 §6.1）。**2026-10-26 首个真实 GitHub run 全绿**（run #1，push 触发，公开仓库 `liushisan673/z-torque`，7 job 全 success：pytest-sqlite 含 POSIX guard / pytest-postgres / migrations / plugin-conformance / console / python-static / pytest-windows）。
+**CI**：`.github/workflows/ci.yml` 已建（见 §6.1）。**2026-10-26 真实 GitHub run 全绿**：run #1（`2e7b7a1`，Port 协议解耦）与 run #2（`a1dd72a`，M4 收口）均 7 job 全 success（公开仓库 `liushisan673/z-torque`：pytest-sqlite 含 POSIX guard / pytest-postgres / migrations / plugin-conformance / console / python-static / pytest-windows）。
 **标准插件**（2026-10-26）：三插件（`sandbox_driver` / `audit_export_archive` / `a2a_gateway`）已按「可整目录搬到企业版」解耦 —— 越界 `app.kernel.*`/`app.models.*` import 从 **20 处降到 0**，由红线测试机器校验；沙箱执行实现已从内核下沉到插件，内核不再保留任何可执行实现。
 
 ## 4. 关键约定（改代码前必读）
@@ -53,7 +53,7 @@ AI Runtime 内核（M0–M3 阶段成果）+ 轻量控制台。核心架构是�
 3. 插件**运行时不建表、无 DDL 权**：DDL 只由内核统一 Alembic 链执行。**方案 b（2026-10-26 定稿）**：插件私有表的**模型与迁移文件跟随插件目录**（`audit_export_archive/{models.py,migrations/}`），但必须注册进同一条链——`alembic.ini::version_locations` 加该目录，`alembic/env.py` 显式 import 模型注册 `Base.metadata`。
 4. 插件路由常注册；未装配 → `503 AI_PLUGIN_NOT_ASSEMBLED`。
 5. 高危操作必须 `require_permission` + 写审计，两者不可拆开。
-6. 装配档位 `ASSEMBLY_PROFILE`：`community`（默认）/ `enterprise`（三插件才启用）。
+6. 装配档位 `ASSEMBLY_PROFILE`：`community`（默认）/ `enterprise`（社区 + `audit_export_archive` + `a2a`；`sandbox_driver` 在 `execution` 模块里，社区档就有）。需要"社区版按需选配"时用追加写法 `<基础档>+<Module|插件>[,...]`（如 `community+audit_export_archive,a2a`）：只追加不覆盖，条目不存在或重复选配基础档已有插件都拒绝启动（`resolve_profile`），两个内置档展开结果不变。
 7. `SANDBOX_ALLOWED_ROOTS` 显式空数组 → 装配失败（不允许「空配置 = 全放开」）。
 8. 错误码集中在 `app/core/errors.py` + `app/kernel/audit/categories.py`；前端文案在 `console/src/services/errorText.ts`。
 9. 代码风格：中文注释/文档字符串、类型标注齐全、不用 `as any`。

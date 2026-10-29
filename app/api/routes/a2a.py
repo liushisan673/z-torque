@@ -11,6 +11,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
@@ -25,6 +28,18 @@ SERVICE_A2A_GATEWAY = "a2a_gateway"
 
 router = APIRouter(prefix="/a2a", tags=["a2a"])
 
+# 上游 peer 写入的链路头（网关出站用同名头，路由层不 import 插件包故按字面量约定）
+_A2A_TRACE_HEADER = "x-a2a-trace"
+_ALLOWED_TRACE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def _inbound_trace_id(request: Request) -> str | None:
+    """跨跳链路 id：优先沿用上游 X-A2A-Trace（格式受限，避免把任意串塞进审计列）。"""
+    hop = (request.headers.get(_A2A_TRACE_HEADER) or "").strip()
+    if hop and _ALLOWED_TRACE_RE.fullmatch(hop):
+        return hop
+    return trace_id_from(request)
+
 
 def _gateway(request: Request):
     gateway = getattr(request.app.state, SERVICE_A2A_GATEWAY, None)
@@ -38,11 +53,20 @@ def _gateway(request: Request):
 @router.post("/invoke", summary="A2A 入站调用")
 async def a2a_invoke(request: Request):
     gateway = _gateway(request)
+    # 入站体积闸门：边读边计数，越界立即停止读取（不先把整个 body 读进内存再判长度）
+    limit = int(getattr(gateway, "max_request_bytes", 1_000_000))
+    buffer = bytearray()
+    async for chunk in request.stream():
+        buffer.extend(chunk)
+        if len(buffer) > limit:
+            raise ApiError("AI_A2A_DENIED", f"A2A payload exceeds {limit} bytes", 403)
+    raw = bytes(buffer)
     try:
-        payload = await request.json()
+        payload = json.loads(raw or b"{}")
     except ValueError as exc:
         raise ApiError("AI_A2A_DENIED", "A2A payload must be valid JSON", 403) from exc
-    result = await gateway.invoke(headers=request.headers, payload=payload, trace_id=trace_id_from(request))
+    # 跨跳链路：沿用上游 X-A2A-Trace，否则每次跨实例调用都会断链、审计里看不到完整路径
+    result = await gateway.invoke(headers=request.headers, payload=payload, trace_id=_inbound_trace_id(request))
     return success_response(request, result)
 
 

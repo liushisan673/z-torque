@@ -174,6 +174,62 @@ async def test_output_limit_and_nonzero_exit_and_bad_json(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_endless_output_is_killed_at_cap_instead_of_buffered(tmp_path):
+    """上限必须边读边判：无限输出要在上限处立刻终止，而不是读满内存或挂到超时。"""
+    import time
+
+    root = tmp_path / "skill"
+    root.mkdir()
+    script = _script(
+        root,
+        "flood.py",
+        """
+        import sys
+        while True:
+            sys.stdout.write("x" * 4096)
+        """,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(ApiError) as excinfo:
+        await run_isolated_process(
+            script_path=script,
+            arguments={},
+            cwd=root,
+            timeout_seconds=20,
+            max_output_bytes=64 * 1024,
+            allowed_roots=[str(root)],
+        )
+    elapsed = time.monotonic() - started
+
+    assert "output exceeded" in excinfo.value.message
+    assert elapsed < 10, f"超限必须在流式读取阶段终止子进程（实际 {elapsed:.1f}s，接近超时说明仍在全量缓冲）"
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_sigkill_without_rlimit_is_not_reported_as_quota(tmp_path):
+    """rlimit 关闭时被 SIGKILL 只能是脚本失败：裸信号不是"配额耗尽"的证据。"""
+    root = tmp_path / "skill"
+    root.mkdir()
+    script = _script(root, "killed.py", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)")
+
+    with pytest.raises(ApiError) as excinfo:
+        await run_isolated_process(
+            script_path=script,
+            arguments={},
+            cwd=root,
+            timeout_seconds=10,
+            max_output_bytes=4096,
+            allowed_roots=[str(root)],
+            rlimit_enabled=False,
+        )
+
+    assert excinfo.value.code == "AI_SKILL_FAILED"
+    assert excinfo.value.status_code == 500
+
+
+@pytest.mark.asyncio
 async def test_sandbox_meta_never_contains_script_body_or_arguments(tmp_path, monkeypatch):
     root = tmp_path / "skill"
     root.mkdir()

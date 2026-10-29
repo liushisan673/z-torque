@@ -25,7 +25,7 @@ from app.services.function_calling import ToolMapping, map_tool_calls
 from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
 
-MAX_ROUNDS = 5
+MAX_ROUNDS = 8
 MAX_TOOL_CALLS_PER_ROUND = 8
 MAX_TOOL_RESULT_CHARS = 20_000
 

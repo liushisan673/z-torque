@@ -88,12 +88,47 @@ class A2AGateway:
         if not self._config.enabled:
             raise ApiError("AI_A2A_DISABLED", "A2A gateway is disabled (A2A_ENABLED=false)", 503)
 
+    @property
+    def max_request_bytes(self) -> int:
+        """入站请求体上限（路由层在 json 解析前使用）。"""
+        return self._config.max_request_bytes
+
     async def invoke(self, *, headers: Mapping[str, str], payload: Any, trace_id: str | None = None) -> dict[str, Any]:
         self.require_enabled()
+        principal = await self._authenticate(headers, trace_id=trace_id)
+        return await self._run(principal, headers=headers, payload=payload)
+
+    async def invoke_many(self, *, headers: Mapping[str, str], payloads: list[Any], trace_id: str | None = None) -> list[Any]:
+        """扇出：`asyncio.Semaphore(max_fanout)` 限并发，超限排队而非静默丢弃。"""
+        self.require_enabled()
+        if not payloads:
+            return []
+        # 入站身份只校验一次（同步 DB + JWT 校验走线程）：此前每个子调用都会重新认证一次
+        principal = await self._authenticate(headers, trace_id=trace_id)
+
+        async def _one(item: Any) -> Any:
+            async with self._semaphore:
+                request_id = str(item.get("id") or "") if isinstance(item, dict) else ""
+                try:
+                    return await self._run(principal, headers=headers, payload=item)
+                except ApiError as exc:
+                    # 扇出中单个子调用失败不放大为整体失败：按条返回 DENIED/FAILED
+                    return build_response(request_id=request_id, status=STATUS_DENIED, error_code=exc.code, error_message=exc.message)
+
+        return list(await asyncio.gather(*(_one(item) for item in payloads)))
+
+    async def _authenticate(self, headers: Mapping[str, str], *, trace_id: str | None = None) -> Any:
+        # 认证是一次同步 DB 查询（可能的 JWT 解码），留在事件循环里会阻塞所有并发请求
+        return await asyncio.to_thread(self.identity.authenticate, _bearer(headers), trace_id=trace_id)
+
+    async def _run(self, principal: Any, *, headers: Mapping[str, str], payload: Any) -> dict[str, Any]:
         if self._guard is not None:
-            self._guard.check(_BREAKER)
-        token = _bearer(headers)
-        principal = self.identity.authenticate(token, trace_id=trace_id)
+            # 组件级熔断按插件自己的 A2A_CIRCUIT_* 生效（此前只有全局 PLUGIN_BREAKER_* 起作用）
+            self._guard.check(
+                _BREAKER,
+                failure_threshold=self._config.circuit_failure_threshold,
+                cooldown_seconds=self._config.circuit_cooldown_seconds,
+            )
         ctx = principal.ctx
         request = parse_request(payload)
         depth = parse_depth(headers, max_depth=self._config.max_depth)
@@ -103,11 +138,25 @@ class A2AGateway:
             else:
                 response = await self._invoke_local(request, ctx=ctx, depth=depth)
         except ApiError as exc:
-            self._record(principal, action="A2A_DENIED" if exc.code in _DENIED_CODES else "A2A_FAILED", summary=exc.message, code=exc.code, depth=depth, peer=request.peer)
+            await asyncio.to_thread(
+                self._record,
+                principal,
+                action="A2A_DENIED" if exc.code in _DENIED_CODES else "A2A_FAILED",
+                summary=exc.message,
+                code=exc.code,
+                depth=depth,
+                peer=request.peer,
+            )
             if self._guard is not None:
-                self._guard.record(_BREAKER, succeeded=False)
+                self._guard.record(
+                    _BREAKER,
+                    succeeded=False,
+                    failure_threshold=self._config.circuit_failure_threshold,
+                    cooldown_seconds=self._config.circuit_cooldown_seconds,
+                )
             raise
-        self._record(
+        await asyncio.to_thread(
+            self._record,
             principal,
             action="A2A_INVOKED" if response.get("status") == STATUS_SUCCEEDED else "A2A_FAILED",
             summary=f"a2a {request.route} call {response.get('status')}",
@@ -116,27 +165,13 @@ class A2AGateway:
             peer=request.peer,
         )
         if self._guard is not None:
-            self._guard.record(_BREAKER, succeeded=response.get("status") == STATUS_SUCCEEDED)
+            self._guard.record(
+                _BREAKER,
+                succeeded=response.get("status") == STATUS_SUCCEEDED,
+                failure_threshold=self._config.circuit_failure_threshold,
+                cooldown_seconds=self._config.circuit_cooldown_seconds,
+            )
         return response
-
-    async def invoke_many(self, *, headers: Mapping[str, str], payloads: list[Any], trace_id: str | None = None) -> list[Any]:
-        """扇出：`asyncio.Semaphore(max_fanout)` 限并发，超限排队而非静默丢弃。"""
-        self.require_enabled()
-        if not payloads:
-            return []
-        # 入站身份只校验一次：扇出的每个子调用共享同一调用方上下文
-        self.identity.authenticate(_bearer(headers), trace_id=trace_id)
-
-        async def _one(item: Any) -> Any:
-            async with self._semaphore:
-                request_id = str(item.get("id") or "") if isinstance(item, dict) else ""
-                try:
-                    return await self.invoke(headers=headers, payload=item, trace_id=trace_id)
-                except ApiError as exc:
-                    # 扇出中单个子调用失败不放大为整体失败：按条返回 DENIED/FAILED
-                    return build_response(request_id=request_id, status=STATUS_DENIED, error_code=exc.code, error_message=exc.message)
-
-        return list(await asyncio.gather(*(_one(item) for item in payloads)))
 
     # ---- 本地 ----
     async def _invoke_local(self, request: A2ARequest, *, ctx: SecurityContext, depth: int) -> dict[str, Any]:

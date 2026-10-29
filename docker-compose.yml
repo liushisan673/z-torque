@@ -1,0 +1,37 @@
+# Z-Torque 演示/验收一键环境：docker compose up -d
+# 用法（在仓库根目录）：
+#   powershell -ExecutionPolicy Bypass -File scripts\run_demo.ps1
+name: z-torque-demo
+
+services:
+  z-torque:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: z-torque:0.1.0
+    container_name: z-torque-demo
+    restart: unless-stopped
+    # 演示环境变量（模型密钥、装配档位、管理员口令）全部来自 .env.demo，不写进镜像
+    env_file:
+      - .env.demo
+    environment:
+      # 单端口同源托管：后端在 / 上提供 console/dist，前端与 API 同源
+      SERVE_CONSOLE: "true"
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8000"
+      DATABASE_URL: sqlite:///./data/z_torque.db
+    ports:
+      # 宿主端口可用 DEMO_PORT 覆盖（如 8080:8000），容器内固定 8000
+      - "${DEMO_PORT:-8000}:8000"
+    volumes:
+      # 数据库必须放在容器卷里：SQLite 在 Docker Desktop 的 Windows 绑定挂载上
+      # （9p/gRPC-FUSE）开 WAL 会直接报 "disk I/O error"，这不是配置问题而是文件系统能力问题。
+      - zt_data:/app/data
+      # 宿主机既存演示数据（data/z_torque.db + secrets + files）只读挂进来，
+      # 首次启动且卷内无库时由 entrypoint 整份导入；卷已有数据则不覆盖。
+      - ./data:/seed:ro
+    stop_grace_period: 20s
+
+volumes:
+  zt_data:
+

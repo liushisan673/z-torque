@@ -17,11 +17,13 @@
 
 from __future__ import annotations
 
+from functools import partial
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_current_user
 from app.core.errors import ApiError
@@ -101,18 +103,22 @@ async def create_export(
         raise ApiError("AI_PARAM_INVALID", "start_time must be earlier than end_time", 400)
     actions = payload.resolved_actions()
     target_actor = payload.actor_user_id if scope_all else user.id
-    job = service.create_job(
-        tenant_id=user.tenant_id,
-        actor_user_id=user.id,
-        filters={
-            "actions": list(actions) if actions is not None else None,
-            "actor_user_id": str(target_actor) if target_actor is not None else None,
-            "resource_type": payload.resource_type,
-            "start_time": iso_utc(payload.start_time),
-            "end_time": iso_utc(payload.end_time),
-        },
-        export_format=payload.format,
-        trace_id=trace_id_from(request),
+    # 服务层是同步 DB + 同步对象存储；直接 await 会把整个事件循环卡在这条请求上
+    job = await run_in_threadpool(
+        partial(
+            service.create_job,
+            tenant_id=user.tenant_id,
+            actor_user_id=user.id,
+            filters={
+                "actions": list(actions) if actions is not None else None,
+                "actor_user_id": str(target_actor) if target_actor is not None else None,
+                "resource_type": payload.resource_type,
+                "start_time": iso_utc(payload.start_time),
+                "end_time": iso_utc(payload.end_time),
+            },
+            export_format=payload.format,
+            trace_id=trace_id_from(request),
+        )
     )
     return success_response(request, job)
 
@@ -126,7 +132,8 @@ async def list_exports(
 ):
     service = _export_service(request)
     _require_permission(db, user, "audit.read", trace_id=trace_id_from(request))
-    return success_response(request, {"items": service.list_jobs(tenant_id=user.tenant_id, limit=limit)})
+    items = await run_in_threadpool(partial(service.list_jobs, tenant_id=user.tenant_id, limit=limit))
+    return success_response(request, {"items": items})
 
 
 @router.get("/{job_id}", summary="导出任务状态")
@@ -138,7 +145,8 @@ async def get_export(
 ):
     service = _export_service(request)
     _require_permission(db, user, "audit.read", trace_id=trace_id_from(request))
-    return success_response(request, service.get_job(tenant_id=user.tenant_id, job_id=job_id))
+    job = await run_in_threadpool(partial(service.get_job, tenant_id=user.tenant_id, job_id=job_id))
+    return success_response(request, job)
 
 
 @router.get("/{job_id}/shards/{seq}/download", summary="下载导出分片")
@@ -151,7 +159,9 @@ async def download_shard(
 ):
     service = _export_service(request)
     _require_permission(db, user, "audit.export", trace_id=trace_id_from(request))
-    path, filename = service.open_shard(tenant_id=user.tenant_id, job_id=job_id, seq=seq, actor_user_id=user.id)
+    path, filename = await run_in_threadpool(
+        partial(service.open_shard, tenant_id=user.tenant_id, job_id=job_id, seq=seq, actor_user_id=user.id)
+    )
     return FileResponse(path, media_type="application/octet-stream", filename=filename)
 
 
@@ -164,11 +174,15 @@ async def trigger_archive(
 ):
     service = _archive_service(request)
     _require_permission(db, user, "audit.archive", trace_id=trace_id_from(request))
-    run = service.trigger(
-        tenant_id=user.tenant_id,
-        actor_user_id=user.id,
-        lookback_hours=payload.lookback_hours,
-        trigger_source="MANUAL",
+    # 归档是"读审计 + 写对象"的同步长流程：必须离开事件循环，否则一次归档阻塞全部请求
+    run = await run_in_threadpool(
+        partial(
+            service.trigger,
+            tenant_id=user.tenant_id,
+            actor_user_id=user.id,
+            lookback_hours=payload.lookback_hours,
+            trigger_source="MANUAL",
+        )
     )
     return success_response(request, run)
 
@@ -182,4 +196,5 @@ async def list_archive_runs(
 ):
     service = _archive_service(request)
     _require_permission(db, user, "audit.read", trace_id=trace_id_from(request))
-    return success_response(request, {"items": service.list_runs(tenant_id=user.tenant_id, limit=limit)})
+    items = await run_in_threadpool(partial(service.list_runs, tenant_id=user.tenant_id, limit=limit))
+    return success_response(request, {"items": items})

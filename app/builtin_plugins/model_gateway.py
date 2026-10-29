@@ -10,8 +10,10 @@ OpenAICompatibleGateway：OpenAI 兼容 /chat/completions（非流式 + SSE 流�
 MockModelGateway：未配置外部模型时的确定性显式降级（capabilities 可见，勿用于生产）。
 """
 
+import hashlib
 import json
 import logging
+import re
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -59,18 +61,29 @@ class OpenAICompatibleGateway(ModelGateway):
     async def generate(self, request: ModelRequest) -> ModelResponse:
         payload = self._thinking_ready_payload(request)
         payload['stream'] = False
-        try:
-            response = await self.client.post(f'{self.base_url}/chat/completions', headers={'Authorization': f'Bearer {self.api_key}'}, json=payload, timeout=request.timeout_seconds)
-            response.raise_for_status()
-            return self._normalize(response.json())
-        except httpx.TimeoutException as exc:
-            raise ModelGatewayError('AI_MODEL_TIMEOUT', 'model request timed out') from exc
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            code = 'AI_MODEL_RATE_LIMITED' if status == 429 else ('AI_MODEL_AUTH_ERROR' if status in (401, 403) else 'AI_MODEL_UPSTREAM_ERROR')
-            raise ModelGatewayError(code, _UPSTREAM_ERROR) from exc
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-            raise ModelGatewayError('AI_MODEL_RESPONSE_INVALID', 'model response is invalid') from exc
+        last_invalid: Exception | None = None
+        # 上游偶发输出非法 tool_call arguments（实测 deepseek-flash 间歇性返回乱码 JSON），
+        # 解析失败换次重试（HTTP 层错误不重试）；3 次仍失败才判定 AI_MODEL_RESPONSE_INVALID
+        for attempt in range(3):
+            try:
+                response = await self.client.post(f'{self.base_url}/chat/completions', headers={'Authorization': f'Bearer {self.api_key}'}, json=payload, timeout=request.timeout_seconds)
+                response.raise_for_status()
+                normalized = self._normalize(response.json())
+                restored = self._restore_tool_calls(normalized.tool_calls, self._tool_shapes(request.tools))
+                if restored is not normalized.tool_calls:
+                    normalized = ModelResponse(normalized.content, restored, normalized.finish_reason, normalized.provider_request_id, normalized.usage, normalized.reasoning_content)
+                return normalized
+            except httpx.TimeoutException as exc:
+                raise ModelGatewayError('AI_MODEL_TIMEOUT', 'model request timed out') from exc
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                code = 'AI_MODEL_RATE_LIMITED' if status == 429 else ('AI_MODEL_AUTH_ERROR' if status in (401, 403) else 'AI_MODEL_UPSTREAM_ERROR')
+                raise ModelGatewayError(code, _UPSTREAM_ERROR) from exc
+            except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                last_invalid = exc
+                logger.warning("model response invalid (attempt %d/3): %r", attempt + 1, exc)
+                continue
+        raise ModelGatewayError('AI_MODEL_RESPONSE_INVALID', 'model response is invalid') from last_invalid
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[str]:
         payload = self._thinking_ready_payload(request)
@@ -98,6 +111,7 @@ class OpenAICompatibleGateway(ModelGateway):
             code = 'AI_MODEL_RATE_LIMITED' if status == 429 else ('AI_MODEL_AUTH_ERROR' if status in (401, 403) else 'AI_MODEL_UPSTREAM_ERROR')
             raise ModelGatewayError(code, _UPSTREAM_ERROR) from exc
         except httpx.HTTPError as exc:
+            logger.warning("model http error: %r", exc)
             raise ModelGatewayError('AI_MODEL_UPSTREAM_ERROR', _UPSTREAM_ERROR) from exc
 
     async def stream_response(self, request: ModelRequest) -> AsyncIterator[dict[str, Any]]:
@@ -176,8 +190,10 @@ class OpenAICompatibleGateway(ModelGateway):
             code = 'AI_MODEL_RATE_LIMITED' if status == 429 else ('AI_MODEL_AUTH_ERROR' if status in (401, 403) else 'AI_MODEL_UPSTREAM_ERROR')
             raise ModelGatewayError(code, _UPSTREAM_ERROR) from exc
         except httpx.HTTPError as exc:
+            logger.warning("model http error: %r", exc)
             raise ModelGatewayError('AI_MODEL_UPSTREAM_ERROR', _UPSTREAM_ERROR) from exc
         parsed_calls: list[ModelToolCall] = []
+        restore = self._tool_shapes(request.tools)
         for index in sorted(calls):
             slot = calls[index]
             if not slot['name']:
@@ -189,18 +205,90 @@ class OpenAICompatibleGateway(ModelGateway):
             if not isinstance(arguments, dict):
                 raise ModelGatewayError('AI_MODEL_RESPONSE_INVALID', 'model stream response is invalid')
             parsed_calls.append(ModelToolCall(slot['id'] or f'call_{index}', slot['name'], arguments))
+        parsed_calls = self._restore_tool_calls(parsed_calls, restore)
         yield {'type': 'final', 'response': ModelResponse(''.join(content_parts), parsed_calls, finish_reason, provider_id, usage, ''.join(reasoning_parts) or None)}
 
     def _payload(self, request: ModelRequest) -> dict[str, Any]:
+        # 工具形状适配（响应侧 _restore_tool_calls 按同一映射还原，对调用方透明）：
+        # 1) 工具名 ASCII 化：上游要求 tools[].function.name 匹配 ^[a-zA-Z0-9_-]+$（实测 DeepSeek
+        #    对中文工具名返回 400 invalid_request_error），对不合规名字生成确定性别名；
+        # 2) __body__ 扁平化：平台 REST POST 工具用 __body__ 单属性嵌套对象承载请求体，实测上游
+        #    模型对该嵌套 schema 会间歇性输出非法 arguments JSON（bisect 验证与 required/enum 无关，
+        #    扁平 schema 稳定合法），对模型改呈扁平 schema，工具调用回来后再包回 __body__。
+        # 注意：必须基于原始 request.tools 构造新 dict，不能原地改写——否则入参被污染，
+        # 响应侧再算形状映射时已看不到真实名与嵌套结构，还原会失效。
+        shapes = self._tool_shapes(request.tools)
         payload: dict[str, Any] = {'model': request.model or self.default_model, 'messages': [self._message(m) for m in request.messages], 'stream': request.stream}
         if request.tools:
-            payload['tools'] = request.tools
+            payload['tools'] = [self._adapt_tool(t, shapes) for t in request.tools]
             payload['tool_choice'] = request.tool_choice
         if request.temperature is not None:
             payload['temperature'] = request.temperature
         if request.max_tokens is not None:
             payload['max_tokens'] = request.max_tokens
+        if shapes:
+            for message in payload['messages']:
+                for call in message.get('tool_calls') or []:
+                    function = call.get('function') or {}
+                    shape = shapes.get(function.get('name'))
+                    if not shape:
+                        continue
+                    if shape['alias']:
+                        function['name'] = shape['alias']
+                    if shape['flat'] and isinstance(function.get('arguments'), str):
+                        try:
+                            arguments = json.loads(function['arguments'])
+                        except ValueError:
+                            continue
+                        if isinstance(arguments, dict) and set(arguments) == {'__body__'}:
+                            function['arguments'] = json.dumps(arguments['__body__'], ensure_ascii=False)
         return payload
+
+    @staticmethod
+    def _adapt_tool(tool: dict[str, Any], shapes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        function = dict(((tool or {}).get('function')) or {})
+        shape = shapes.get(function.get('name'))
+        if not shape:
+            return tool
+        if shape['alias']:
+            function['name'] = shape['alias']
+        if shape['flat']:
+            function['parameters'] = shape['params']['properties']['__body__']
+        return {**tool, 'function': function}
+
+    _TOOL_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+    @classmethod
+    def _tool_shapes(cls, tools: Any) -> dict[str, dict[str, Any]]:
+        shapes: dict[str, dict[str, Any]] = {}
+        for tool in tools or []:
+            function = ((tool or {}).get('function') or {})
+            name = function.get('name')
+            if not name:
+                continue
+            name = str(name)
+            params = function.get('parameters') or {}
+            properties = params.get('properties') or {}
+            shapes[name] = {
+                'alias': None if cls._TOOL_NAME_PATTERN.match(name) else f"tool_{hashlib.sha1(name.encode('utf-8')).hexdigest()[:12]}",
+                'flat': set(properties) == {'__body__'} and properties.get('__body__', {}).get('type') == 'object',
+                'params': params,
+            }
+        return shapes
+
+    def _restore_tool_calls(self, calls: list, shapes: dict[str, dict[str, Any]]) -> list:
+        if not shapes:
+            return calls
+        inverse = {shape['alias']: name for name, shape in shapes.items() if shape['alias']}
+        restored: list = []
+        for call in calls:
+            name = inverse.get(call.name, call.name)
+            shape = shapes.get(name)
+            arguments = call.arguments
+            if shape and shape['flat'] and isinstance(arguments, dict) and '__body__' not in arguments:
+                arguments = {'__body__': arguments}
+            restored.append(call if (arguments is call.arguments and name == call.name) else ModelToolCall(call.id, name, arguments))
+        return restored
 
     @staticmethod
     def _message(message: ModelMessage) -> dict[str, Any]:

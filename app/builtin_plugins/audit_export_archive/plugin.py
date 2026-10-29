@@ -59,6 +59,36 @@ class AuditExportArchivePlugin:
                     "default": 90,
                     "description": "热窗口保留天数",
                 },
+                "audit_export_max_object_bytes": {
+                    "type": "integer",
+                    "default": 536870912,
+                    "description": "单对象（分片/manifest）大小上限，存储侧兜底",
+                },
+                "audit_export_lease_ttl_seconds": {
+                    "type": "number",
+                    "default": 60,
+                    "description": "任务执行权租约 TTL（秒），到期视为持有者失联",
+                },
+                "audit_export_lease_renew_interval_seconds": {
+                    "type": "number",
+                    "default": 20,
+                    "description": "租约续租间隔（秒），须小于 TTL",
+                },
+                "audit_export_instance_id": {
+                    "type": "string",
+                    "default": "",
+                    "description": "副本标识；留空按 host:pid:rand 生成",
+                },
+                "audit_export_purge_interval_seconds": {
+                    "type": "number",
+                    "default": 3600,
+                    "description": "热窗口过期清理周期（秒），<=0 关闭",
+                },
+                "audit_export_purge_batch_limit": {
+                    "type": "integer",
+                    "default": 100,
+                    "description": "单轮清理最多处理的到期任务数",
+                },
                 "audit_export_formats": {
                     "type": "array",
                     "items": {"type": "string", "enum": ["jsonl", "csv"]},
@@ -75,6 +105,11 @@ class AuditExportArchivePlugin:
                     "enum": ["standard", "strict"],
                     "default": "standard",
                     "description": "脱敏档位；strict 下主体 id 走 HMAC",
+                },
+                "audit_export_redaction_key": {
+                    "type": "string",
+                    "default": "",
+                    "description": "strict 档位的 HMAC 密钥（仅进程内使用）",
                 },
                 "audit_archive_prefix": {
                     "type": "string",

@@ -8,10 +8,13 @@ declare global {
   }
 }
 
+// 默认同源：后端托管 console/dist 时（单端口交付）直接请求当前 origin。
+// 开发期由 console/.env.development 的 VITE_API_BASE 覆盖为后端绝对地址；
+// 前端与后端分域部署时同样用 VITE_API_BASE / window.__API_BASE__ 覆盖。
 const BASE =
   (typeof window !== "undefined" && window.__API_BASE__) ||
   (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_BASE) ||
-  "http://127.0.0.1:8000";
+  "";
 
 export class ApiRequestError extends Error {
   readonly code: string;

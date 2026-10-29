@@ -7,8 +7,10 @@
 
 容器层隔离面：
 - ``--network none``：容器内无网络；
-- ``--read-only`` + ``no-new-privileges``：根文件系统只读、禁止提权；
+- ``--read-only`` + ``no-new-privileges`` + ``--cap-drop ALL``：根文件系统只读、禁止提权、丢弃全部 capability；
+- ``--tmpfs /tmp``：只读根 fs 下仍给 Python 一个可写临时目录（否则 tempfile 直接失败）；
 - ``--memory`` / ``--cpus`` / ``--pids-limit``：资源上限（对齐 rlimit 语义，命中 → 资源超限）；
+- ``--cidfile``：记录容器 id，超时/输出超限时按 id `docker kill`，避免只杀 CLI 而容器继续跑；
 - cwd 白名单语义不变：spawn 前先 ``enforce_cwd_policy``，越界拒绝；
 - Windows 无容器运行时语义：装配期直接拒绝（fail-closed），运行期兜底同样拒绝。
 
@@ -21,19 +23,26 @@ import asyncio
 import json
 import os
 import subprocess
+import tempfile
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from app.builtin_plugins.sandbox_driver.process import _terminate_process_tree, enforce_cwd_policy
+from app.builtin_plugins.sandbox_driver.process import (
+    _communicate_capped,
+    _terminate_process_tree,
+    enforce_cwd_policy,
+)
 from app.core.errors import ApiError
 from app.plugin_sdk import AssemblyError, SandboxDriver
 from app.plugin_sdk.observability import emit_event
 
-# docker 退出码语义：137 = SIGKILL（容器 OOM 或被杀）、139 = SIGSEGV；在资源限制已显式
-# 配置的前提下归为"资源超限"而非泛化脚本失败。125/126/127 = daemon/命令层错误 → 脚本失败。
-_CONTAINER_RESOURCE_EXIT_CODES = (137, 139)
+# docker 退出码语义：137 = SIGKILL（容器被 OOM killer 或显式 kill）；在资源限制已显式
+# 配置的前提下归为"资源超限"而非泛化脚本失败。139 = SIGSEGV 属脚本自身崩溃（不是配额），
+# 125/126/127 = daemon/命令层错误 → 同样归为脚本失败。
+_CONTAINER_RESOURCE_EXIT_CODES = (137,)
 
 
 class ContainerSandboxDriver(SandboxDriver):
@@ -147,6 +156,35 @@ def _resolve_container_paths(script_path: Path, cwd: Path, allowed_roots: Sequen
     raise ApiError("AI_SANDBOX_DENIED", "sandbox script must reside under allowed roots for container execution", 403)
 
 
+def _new_cidfile() -> Path:
+    """容器 id 文件路径（docker 要求文件不存在，故只生成路径不创建文件）。"""
+    return Path(tempfile.gettempdir()) / f"zt-sandbox-{uuid.uuid4().hex}.cid"
+
+
+async def _kill_container(docker_binary: str, cid_file: Path) -> None:
+    """按 cidfile 里的容器 id 强杀容器（best-effort，清理路径不得抛出）。"""
+    try:
+        container_id = cid_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if not container_id:
+        return
+    try:
+        killer = await asyncio.create_subprocess_exec(
+            docker_binary,
+            "kill",
+            container_id,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(killer.wait(), timeout=10)
+    except (OSError, asyncio.TimeoutError):  # pragma: no cover - 清理路径尽力而为
+        pass
+    finally:
+        cid_file.unlink(missing_ok=True)
+
+
 async def run_containerized_process(
     *,
     script_path: Path,
@@ -169,6 +207,7 @@ async def run_containerized_process(
     resolved_roots = list(allowed_roots or [])
     enforce_cwd_policy(cwd, resolved_roots)
     script, workdir = _resolve_container_paths(script_path, cwd, resolved_roots)
+    cid_file = _new_cidfile()
     command = [
         docker_binary,
         "run",
@@ -179,6 +218,12 @@ async def run_containerized_process(
         "--read-only",
         "--security-opt",
         "no-new-privileges",
+        "--cap-drop",
+        "ALL",
+        "--tmpfs",
+        "/tmp:rw,nosuid,size=64m",
+        "--cidfile",
+        str(cid_file),
         "--memory",
         memory,
         "--cpus",
@@ -198,18 +243,31 @@ async def run_containerized_process(
         spawn_kwargs["start_new_session"] = True
     started = time.monotonic()
     process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **spawn_kwargs)
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(json.dumps(arguments).encode()), timeout=timeout_seconds)
-    except asyncio.TimeoutError:
+
+    async def _terminate() -> None:
+        # 先杀 CLI 进程组，再按 cidfile 杀容器：只杀 CLI 时容器可能继续运行
         await _terminate_process_tree(process)
-        _emit_container_meta(outcome="timeout", script_path=script, duration_ms=int((time.monotonic() - started) * 1000), exit_code=None, stdout_bytes=0, stderr_bytes=0, timed_out=True, emit=emit)
-        raise ApiError("AI_SKILL_TIMEOUT", "MD-Skill script timed out", 504)
+        await _kill_container(docker_binary, cid_file)
+
+    try:
+        stdout, stderr, output_exceeded, timed_out = await _communicate_capped(
+            process=process,
+            payload=json.dumps(arguments).encode(),
+            max_output_bytes=max_output_bytes,
+            timeout_seconds=timeout_seconds,
+            terminate=_terminate,
+        )
+    finally:
+        cid_file.unlink(missing_ok=True)
     duration_ms = int((time.monotonic() - started) * 1000)
-    if len(stdout) > max_output_bytes or len(stderr) > max_output_bytes:
+    if timed_out:
+        _emit_container_meta(outcome="timeout", script_path=script, duration_ms=duration_ms, exit_code=None, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=True, emit=emit)
+        raise ApiError("AI_SKILL_TIMEOUT", "MD-Skill script timed out", 504)
+    if output_exceeded:
         _emit_container_meta(outcome="output_exceeded", script_path=script, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, emit=emit)
         raise ApiError("AI_SKILL_FAILED", "MD-Skill script output exceeded limit", 500)
     if process.returncode != 0:
-        # 容器资源上限（OOM/SIGSEGV）必须归为"资源超限"；daemon/命令层错误与业务失败归"脚本失败"
+        # 容器资源上限（OOM/SIGKILL）必须归为"资源超限"；daemon/命令层错误与业务失败归"脚本失败"
         resource_killed = process.returncode in _CONTAINER_RESOURCE_EXIT_CODES
         _emit_container_meta(outcome="resource_exceeded" if resource_killed else "failed", script_path=script, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, emit=emit)
         if resource_killed:
@@ -221,6 +279,7 @@ async def run_containerized_process(
         _emit_container_meta(outcome="invalid_output", script_path=script, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, emit=emit)
         raise ApiError("AI_SKILL_FAILED", "MD-Skill script output is not valid JSON", 500) from exc
     if not isinstance(payload, dict):
+        _emit_container_meta(outcome="invalid_output", script_path=script, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, emit=emit)
         raise ApiError("AI_SKILL_FAILED", "MD-Skill script output must be a JSON object", 500)
     _emit_container_meta(outcome="ok", script_path=script, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, emit=emit)
     return payload

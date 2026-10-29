@@ -82,7 +82,12 @@ class A2AGatewayPlugin:
                 "a2a_max_response_bytes": {
                     "type": "integer",
                     "default": 1000000,
-                    "description": "响应体上限，超限即失败",
+                    "description": "出站响应体上限，超限即失败",
+                },
+                "a2a_max_request_bytes": {
+                    "type": "integer",
+                    "default": 1000000,
+                    "description": "入站请求体上限，超限按 AI_A2A_DENIED 拒绝（与信封结构错误同码）",
                 },
                 "a2a_circuit_failure_threshold": {
                     "type": "integer",

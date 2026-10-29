@@ -390,6 +390,25 @@ async def test_peer_breaker_opens_after_threshold():
     assert len(client.calls) == 2, "熔断打开后必须快速失败，不得继续打到对端"
 
 
+@pytest.mark.asyncio
+async def test_peer_breaker_uses_plugin_config_not_global_default():
+    """A2A_CIRCUIT_FAILURE_THRESHOLD 必须真的生效（全局 PLUGIN_BREAKER_* 只是兜底默认）。"""
+    client = _Client(response=_Response(500, b"{}"))
+    sdk = FakeSdk(settings=SimpleNamespace(), registry=FakeRegistry({}), permissions=("db.query", "network.outbound"))
+    guard = PluginGuardRegistry(failure_threshold=10, cooldown_seconds=30.0)
+    registry = PeerRegistry(sdk, _config(circuit_failure_threshold=1), guard=guard, client=client)
+    peer = PeerConfig(peer_id="beta", base_url="https://peer.test")
+
+    with pytest.raises(ApiError) as first:
+        await registry.invoke(peer, {"id": "1"})
+    assert first.value.code != CIRCUIT_OPEN_CODE
+
+    with pytest.raises(ApiError) as second:
+        await registry.invoke(peer, {"id": "1"})
+    assert second.value.code == CIRCUIT_OPEN_CODE, "配置阈值 1 必须覆盖全局阈值 10"
+    assert len(client.calls) == 1, "熔断打开后不得继续打到对端"
+
+
 # ---------------------------------------------------------------- 网关编排
 
 

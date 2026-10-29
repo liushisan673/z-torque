@@ -26,11 +26,20 @@ def _parse_xlsx(path: Path) -> str:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError("XLSX parser unavailable") from exc
-    workbook = load_workbook(path, read_only=True, data_only=True)
-    rows = []
-    for sheet in workbook.worksheets[:20]:
-        rows.extend("\t".join("" if value is None else str(value) for value in row[:100]) for row in list(sheet.iter_rows(values_only=True))[:10000])
-    return "\n".join(rows)
+    # 存储层文件名为无扩展名 UUID，openpyxl 会按文件名后缀拒收（InvalidFileException）；
+    # 传二进制流则按内容（ZIP 头）校验，与落盘命名无关。
+    with path.open("rb") as handle:
+        workbook = load_workbook(handle, read_only=True, data_only=True)
+        try:
+            rows = []
+            for sheet in workbook.worksheets[:20]:
+                rows.extend(
+                    "\t".join("" if value is None else str(value) for value in row[:100])
+                    for row in list(sheet.iter_rows(values_only=True))[:10000]
+                )
+            return "\n".join(rows)
+        finally:
+            workbook.close()
 
 
 def parse_file(path: Path, suffix: str, max_chars: int) -> str:

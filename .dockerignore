@@ -1,0 +1,32 @@
+# 构建上下文裁剪：镜像里只允许出现运行所需的内容。
+# .env 必须排除——本机 .env 含真实模型密钥，绝不能进镜像层。
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+*.egg-info
+.git
+.gitignore
+.github
+.idea
+.trae
+.codebuddy
+.vscode
+data
+tests
+docs
+*.db
+*.db-shm
+*.db-wal
+*.db.bak*
+.env
+.env.plugins
+.env.demo
+node_modules
+console/node_modules
+console/dist
+console/.vite
+console/data
+console/README.md
+answer.md

@@ -69,7 +69,8 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
     try:
         item.extracted_text = parse_file(target, suffix, settings.file_max_extracted_text)
         item.status = "PARSED"
-    except (OSError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 - 解析器的第三方异常类型不可控，解析失败一律降级为 PARSE_FAILED，不阻断上传
+        logger.warning("file parse failed: id=%s suffix=%s err=%s", file_id, suffix, exc, exc_info=True)
         item.status = "PARSE_FAILED"
         item.parse_error = str(exc)[:500]
     db.add(item)

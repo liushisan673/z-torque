@@ -115,10 +115,18 @@ async def test_streamable_http_omits_authorization_without_token():
 
 @pytest.mark.asyncio
 async def test_streamable_http_rejects_plain_http_remote():
-    # 非回环目标强制 https：纯 http 远端拒绝
+    # 非回环目标强制 https：纯 http 远端拒绝（除非连接器声明 allow_private_network）
     connector = StreamableHttpMcpConnector("http://mcp.example.test/mcp", allowed_hosts=["mcp.example.test"], transport=McpTransport())
-    with pytest.raises(McpTransportError, match="not allowed"):
+    with pytest.raises(McpTransportError, match="allow_private_network"):
         await connector.negotiate()
+    await connector.close()
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_allows_plain_http_when_private_allowed():
+    # allow_private_network 放行白名单内目标的 http 明文形式（对齐 REST target_policy 语义）
+    connector = StreamableHttpMcpConnector("http://mcp.example.test/mcp", allowed_hosts=["mcp.example.test"], transport=McpTransport(), allow_private_network=True)
+    assert connector.allow_private_network is True
     await connector.close()
 
 
@@ -126,6 +134,6 @@ async def test_streamable_http_rejects_plain_http_remote():
 async def test_streamable_http_rejects_host_not_in_whitelist():
     # https 远端必须在 allowed_hosts 白名单内
     connector = StreamableHttpMcpConnector("https://evil.example.test/mcp", allowed_hosts=["mcp.example.test"], transport=McpTransport())
-    with pytest.raises(McpTransportError, match="not allowed"):
+    with pytest.raises(McpTransportError, match="whitelist"):
         await connector.negotiate()
     await connector.close()

@@ -14,6 +14,21 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 New-Item -ItemType Directory -Force -Path "data\logs" | Out-Null
 
+# 插件运行开关：由 scripts\zt_plugins.py 生成（装配 ≠ 启用），不存在则跳过
+$pluginsEnv = Join-Path $root ".env.plugins"
+if (Test-Path $pluginsEnv) {
+    Get-Content $pluginsEnv -Encoding UTF8 | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
+            $idx = $line.IndexOf("=")
+            $key = $line.Substring(0, $idx).Trim()
+            $value = $line.Substring($idx + 1).Trim()
+            Set-Item -Path "Env:$key" -Value $value
+        }
+    }
+    Write-Host "=== 已注入插件运行开关：.env.plugins ==="
+}
+
 $log = Join-Path $root ("data\logs\backend-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 Write-Host "=== Z-Torque backend ==="
 Write-Host "=== log file: $log ==="

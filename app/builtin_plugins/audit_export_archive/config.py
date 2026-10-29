@@ -44,7 +44,8 @@ class AuditExportConfig:
     hot_retention_days: int
     archive_encryption_enabled: bool
     archive_schedule_hours: float
-    export_formats: tuple[str, ...] = ("jsonl", "csv")
+    # 与 Settings / config_schema 的声明默认值保持一致（仅 jsonl；csv 需显式放开）
+    export_formats: tuple[str, ...] = ("jsonl",)
     exclude_own_actions: bool = True
     redaction_profile: str = REDACTION_STANDARD
     redaction_key: str = ""
@@ -62,11 +63,17 @@ class AuditExportConfig:
     lease_renew_interval_seconds: float = 20.0
     # 实例标识：留空则由 host:pid:rand 自动生成（多副本务必保持唯一）
     instance_id: str = ""
+    # ---- 热窗口维护（过期清理）----
+    # 清理周期秒数：<=0 关闭定时清理（冷启动/测试场景），生产默认每小时一次。
+    # 没有这个定时器时 `purge_expired` 只能被测试直接调用，热区对象会无限期堆积。
+    purge_interval_seconds: float = 3600.0
+    # 单轮清理最多处理多少条到期任务（避免一次大扫拖住维护线程）
+    purge_batch_limit: int = 100
 
     @classmethod
     def from_settings(cls, settings: Any) -> "AuditExportConfig":
         raw_prefix = str(getattr(settings, "audit_archive_prefix", ARCHIVE_PREFIX) or "").strip().strip("/")
-        raw_formats = getattr(settings, "audit_export_formats", None) or ["jsonl", "csv"]
+        raw_formats = getattr(settings, "audit_export_formats", None) or ["jsonl"]
         if isinstance(raw_formats, str):
             raw_formats = [item.strip() for item in raw_formats.split(",") if item.strip()]
         return cls(
@@ -88,6 +95,10 @@ class AuditExportConfig:
             lease_ttl_seconds=float(getattr(settings, "audit_export_lease_ttl_seconds", 60.0)),
             lease_renew_interval_seconds=float(getattr(settings, "audit_export_lease_renew_interval_seconds", 20.0)),
             instance_id=str(getattr(settings, "audit_export_instance_id", "") or "").strip(),
+            # 与 schema 声明保持一致：此前该 Settings 项从未被消费，改 env 实际不生效
+            max_object_bytes=int(getattr(settings, "audit_export_max_object_bytes", 512 * 1024 * 1024)),
+            purge_interval_seconds=float(getattr(settings, "audit_export_purge_interval_seconds", 3600.0)),
+            purge_batch_limit=int(getattr(settings, "audit_export_purge_batch_limit", 100)),
         )
 
     def validate(self) -> None:
@@ -127,3 +138,9 @@ class AuditExportConfig:
             raise ValueError("audit_export_lease_ttl_seconds must be >= 5")
         if not 0 < self.lease_renew_interval_seconds < self.lease_ttl_seconds:
             raise ValueError("audit_export_lease_renew_interval_seconds must be within (0, audit_export_lease_ttl_seconds)")
+        if self.max_object_bytes < 1:
+            raise ValueError("audit_export_max_object_bytes must be positive")
+        if self.purge_interval_seconds < 0:
+            raise ValueError("audit_export_purge_interval_seconds must be >= 0")
+        if self.purge_batch_limit < 1:
+            raise ValueError("audit_export_purge_batch_limit must be >= 1")

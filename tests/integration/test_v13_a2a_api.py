@@ -229,3 +229,39 @@ async def test_discovery_projection_hides_prompt_and_requires_permission(gateway
     assert "TOP SECRET PROMPT" not in response.text, "提示词属于本地资产，发现接口不得外泄"
     assert "temperature" not in response.text
     assert set(items[0]) == {"agent_id", "agent_version_id", "name", "description", "version", "capabilities"}
+
+
+@pytest.mark.asyncio
+async def test_invoke_rejects_oversized_payload_before_auth(gateway, seeded, monkeypatch):
+    """入站体积闸门：超限即拒，且不得先把整个 body 读进内存/解析。"""
+    monkeypatch.setattr(gateway, "_config", replace(gateway._config, max_request_bytes=1024))
+    async with await _client() as client:
+        token = await _login(client, seeded["caller"])
+        response = await client.post(
+            "/api/z-torque/a2a/invoke",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            content=b"{" + b" " * 4096 + b"}",
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "AI_A2A_DENIED"
+    assert "exceeds" in response.json()["message"]
+    # 体积闸门在认证之前：身份未确定时不落无法归属的审计行（与无 token 路径同口径）
+    assert _audit(seeded["tenant_id"], "A2A_DENIED") == []
+
+
+@pytest.mark.asyncio
+async def test_inbound_trace_header_is_adopted_when_local_request_id_missing(gateway, seeded):
+    """跨跳链路：上游 X-A2A-Trace 必须落进本地上下文与审计 trace_id。"""
+    async with await _client() as client:
+        token = await _login(client, seeded["caller"])
+        response = await client.post(
+            "/api/z-torque/a2a/invoke",
+            headers={"Authorization": f"Bearer {token}", "X-A2A-Trace": "trace-hop-42"},
+            json=_envelope(),
+        )
+
+    assert response.status_code == 404, response.text
+    rows = _audit(seeded["tenant_id"], "A2A_FAILED")
+    assert len(rows) == 1
+    assert rows[0].trace_id == "trace-hop-42"

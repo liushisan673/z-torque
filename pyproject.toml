@@ -15,6 +15,9 @@ dependencies = [
   "python-multipart==0.0.20",
   "httpx==0.28.1",
   "sqlglot==26.8.0",
+  # db_executor 在模块级 import pg8000（连接器数据库执行器的 postgres 驱动），
+  # 属于运行时硬依赖而非测试依赖，故放在核心依赖里
+  "pg8000==1.31.5",
   "jsonschema==4.23.0",
   "PyYAML==6.0.2",
   "uuid6==2025.0.1",
@@ -30,7 +33,7 @@ build-backend = "setuptools.build_meta"
 include = ["app*"]
 
 [project.optional-dependencies]
-test = ["pytest==8.3.4", "pytest-asyncio==0.25.3", "httpx==0.28.1", "pg8000==1.31.5"]
+test = ["pytest==8.3.4", "pytest-asyncio==0.25.3", "httpx==0.28.1"]
 # 静态门禁工具单独成组：CI 的 python-static job 用它，运行时不依赖
 lint = ["ruff==0.17.2"]
 

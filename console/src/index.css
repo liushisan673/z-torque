@@ -3815,7 +3815,7 @@ body {
 }
 .skill-bind-pick-card .pick-fields {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 .skill-bind-pick-card .pick-fields label {

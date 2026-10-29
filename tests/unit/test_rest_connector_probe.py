@@ -238,6 +238,16 @@ async def test_probe_falls_back_to_get_when_head_rejected(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_probe_treats_405_on_get_as_reachable(monkeypatch):
+    """仅支持 POST 的接口（如 Bocha /v1/web-search）：GET 405 仍证明远端可达，不能报检查失败。"""
+    _patch_client(monkeypatch, _transport(405))
+    result = await _probe_rest({"base_url": "https://api.bocha.cn/v1/web-search"}, None)
+    assert result["verdict"] == "method_not_allowed"
+    assert result["http_status"] == 405
+    assert result["method_used"] == "GET"
+
+
+@pytest.mark.asyncio
 async def test_probe_rejects_loopback_in_production(monkeypatch):
     from app.config import get_settings
     monkeypatch.setattr(get_settings(), "app_debug", False)

@@ -1,4 +1,5 @@
 from functools import lru_cache
+import os
 from pathlib import Path
 
 from pydantic import Field, SecretStr
@@ -8,13 +9,36 @@ _WEAK_ADMIN_PASSWORDS = {'admin123', 'admin', 'password', 'password123', '123456
 _MIN_ADMIN_PASSWORD_LENGTH = 12
 _MIN_JWT_SECRET_LENGTH = 32
 
+_ASSEMBLY_BASE_PROFILES = ('community', 'enterprise')
+
+
+def _valid_assembly_profile(value: str) -> bool:
+    """`community` / `enterprise`，或 `基础档+条目[,条目]` 的选配写法。
+
+    这里只挡形状错误；条目是否真的存在（Module 名 / 已发现插件名）由装配层
+    resolve_profile + expand_profile 校验并 fail-fast —— 两处各自维护一份
+    插件清单必然漂移，未知条目仍会拒绝启动。
+    """
+    raw = str(value or '').strip().lower()
+    if raw in _ASSEMBLY_BASE_PROFILES:
+        return True
+    base, sep, extra = raw.partition('+')
+    if not sep or base.strip() not in _ASSEMBLY_BASE_PROFILES:
+        return False
+    entries = [item.strip() for item in extra.split(',') if item.strip()]
+    return bool(entries) and all(item.isidentifier() and item.islower() for item in entries)
+
 
 def _plain_secret(value: SecretStr | str) -> str:
     return value.get_secret_value() if isinstance(value, SecretStr) else str(value)
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parents[1] / '.env'),
+        env_file_encoding='utf-8',
+        extra='ignore',
+    )
 
     app_name: str = 'Z-Torque'
     app_env: str = 'development'
@@ -34,7 +58,15 @@ class Settings(BaseSettings):
     file_storage_dir: Path = Path('./data/files')
     max_upload_size_mb: int = 50
     # 控制台跨域来源（逗号分隔）：生产必须显式配置控制台域名，默认仅本地 vite dev
-    cors_allow_origins: str = 'http://localhost:5173,http://127.0.0.1:5173'
+    cors_allow_origins: str = 'http://localhost:5174,http://127.0.0.1:5174'
+    # 控制台静态托管（单端口交付）：开启后后端在同一源上直接提供 console/dist，
+    # 前端与 API 同源即无需 CORS、也不需要 vite 第二个进程。默认关闭：
+    # 开发期仍走 vite dev server，测试/CI 不会因为本机存在 dist 而改变路由行为。
+    serve_console: bool = False
+    console_dist_dir: Path = Path('./console/dist')
+    # 出站代理（如 http://127.0.0.1:7897）：设置后后端所有 httpx 出站请求走此代理；
+    # 回环地址与 api.deepseek.com 保持在 NO_PROXY 直连
+    proxy_url: str = ''
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -144,7 +176,6 @@ class Settings(BaseSettings):
     # ---- v1.3 M2 审计导出与归档（§5.4）----
     # Profile 选择：main.py 显式传给 assemble()，禁止在 assemble() 内隐式读环境变量
     assembly_profile: str = 'community'
-    audit_export_dir: Path = Path('./data/audit-exports')
     audit_export_hot_retention_days: int = 90
     audit_export_max_rows: int = 100_000
     audit_export_max_concurrency: int = 1
@@ -161,7 +192,11 @@ class Settings(BaseSettings):
     audit_export_lease_ttl_seconds: float = 60.0
     audit_export_lease_renew_interval_seconds: float = 20.0
     audit_export_instance_id: str = ''
-    audit_archive_dir: Path = Path('./data/audit-archive')
+    # 热窗口过期清理定时器：<=0 关闭；单轮最多处理 purge_batch_limit 条到期任务
+    audit_export_purge_interval_seconds: float = 3600.0
+    audit_export_purge_batch_limit: int = 100
+    # 导出/归档对象键由 object.store 在自己的根目录下按 audit-export / audit-archive 前缀
+    # 布局，不再单独配置落盘根（此前的 AUDIT_EXPORT_DIR / AUDIT_ARCHIVE_DIR 从未被消费）
     audit_archive_prefix: str = 'audit-archive'
     audit_archive_encryption_enabled: bool = False
     # 密钥材料密文（secret.provider.encrypt 产物）；明文密钥不得出现在配置文件
@@ -183,6 +218,8 @@ class Settings(BaseSettings):
     # none / user_id_header / full_context_token（仅出站携带；入站一律重新认证）
     a2a_identity_propagation: str = 'user_id_header'
     a2a_max_response_bytes: int = 1_000_000
+    # 入站请求体上限：出站有 max_response_bytes 兜底，入站此前没有任何体积闸门
+    a2a_max_request_bytes: int = 1_000_000
     a2a_circuit_failure_threshold: int = 5
     a2a_circuit_cooldown_seconds: float = 30.0
     # ---- v1.4 M4 联邦身份（§6.5）----
@@ -239,6 +276,12 @@ class Settings(BaseSettings):
             raise ValueError('AUDIT_EXPORT_LEASE_TTL_SECONDS must be >= 5')
         if not 0 < self.audit_export_lease_renew_interval_seconds < self.audit_export_lease_ttl_seconds:
             raise ValueError('AUDIT_EXPORT_LEASE_RENEW_INTERVAL_SECONDS must be within (0, AUDIT_EXPORT_LEASE_TTL_SECONDS)')
+        if self.audit_export_max_object_bytes < 1:
+            raise ValueError('AUDIT_EXPORT_MAX_OBJECT_BYTES must be positive')
+        if self.audit_export_purge_interval_seconds < 0:
+            raise ValueError('AUDIT_EXPORT_PURGE_INTERVAL_SECONDS must be >= 0')
+        if self.audit_export_purge_batch_limit < 1:
+            raise ValueError('AUDIT_EXPORT_PURGE_BATCH_LIMIT must be >= 1')
         if self.audit_archive_schedule_hours <= 0:
             raise ValueError('AUDIT_ARCHIVE_SCHEDULE_HOURS must be positive')
         if self.audit_export_redaction_profile not in ('standard', 'strict'):
@@ -251,14 +294,19 @@ class Settings(BaseSettings):
             raise ValueError('AUDIT_ARCHIVE_PREVIOUS_SECRET_REF requires archive encryption to be enabled')
         if self.audit_archive_previous_secret_ref and self.audit_archive_previous_secret_ref == self.audit_archive_secret_ref:
             raise ValueError('AUDIT_ARCHIVE_PREVIOUS_SECRET_REF must differ from AUDIT_ARCHIVE_SECRET_REF')
-        if self.assembly_profile not in ('community', 'enterprise'):
-            raise ValueError("ASSEMBLY_PROFILE must be 'community' or 'enterprise'")
+        if not _valid_assembly_profile(self.assembly_profile):
+            raise ValueError(
+                "ASSEMBLY_PROFILE must be 'community', 'enterprise', "
+                "or '<profile>+<module|plugin>[,<module|plugin>...]'"
+            )
         if self.a2a_identity_propagation not in ('none', 'user_id_header', 'full_context_token'):
             raise ValueError('A2A_IDENTITY_PROPAGATION must be none / user_id_header / full_context_token')
         if not 1 <= self.a2a_max_depth <= 8:
             raise ValueError('A2A_MAX_DEPTH must be within 1..8')
         if self.a2a_max_fanout < 1:
             raise ValueError('A2A_MAX_FANOUT must be >= 1')
+        if self.a2a_max_request_bytes < 1024:
+            raise ValueError('A2A_MAX_REQUEST_BYTES must be >= 1024')
         if self.sandbox_max_processes < 1 or self.sandbox_max_file_bytes < 1:
             raise ValueError('sandbox resource limits must be positive')
         if self.sandbox_isolation_mode not in ('process', 'container'):
@@ -278,4 +326,18 @@ def get_settings() -> Settings:
     settings.validate_runtime()
     settings.secret_store_dir.mkdir(parents=True, exist_ok=True)
     settings.file_storage_dir.mkdir(parents=True, exist_ok=True)
+    # 出站代理：httpx 默认 trust_env，读 os.environ；在 Settings 装配时同步写入进程环境，
+    # 保证 MCP/REST 连接器等后续创建的客户端统一走代理（无需逐处传 proxy 参数）
+    if settings.proxy_url.strip():
+        os.environ['HTTP_PROXY'] = settings.proxy_url.strip()
+        os.environ['HTTPS_PROXY'] = settings.proxy_url.strip()
+    # 回环目标（本地 MCP/REST 端点）与模型 API 始终直连，不经过代理。
+    # 无条件执行：系统环境可能存在第三方软件写入的 HTTP_PROXY（实测 127.0.0.1:12000），
+    # 若不排除，本地连接器请求会被送进代理导致 AI_HTTP_REQUEST_FAILED。
+    # 与已有 NO_PROXY 合并（setdefault 会漏掉用户环境已有的列表）。
+    required = {'localhost', '127.0.0.1', '::1', 'api.deepseek.com'}
+    current = {h.strip() for h in os.environ.get('NO_PROXY', '').split(',') if h.strip()}
+    merged = ','.join(sorted(current | required))
+    os.environ['NO_PROXY'] = merged
+    os.environ['no_proxy'] = merged
     return settings

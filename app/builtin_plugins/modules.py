@@ -62,7 +62,15 @@ MODULE_REGISTRY: dict[str, ModuleSpec] = {
         name="a2a",
         description="Agent-to-Agent 发现、路由与会话（企业版）",
         plugins=("a2a_gateway",),
-        requires_ports=("skill.executor", "identity.provider", "authz.provider"),
+        # 与 a2a_gateway.manifest.requires 对齐：插件确实解析 secret.provider（peer 密钥/
+        # mTLS 材料）并向 observability.sink 发事件，模块层声明缺失会让"装配期缺省"漏检
+        requires_ports=(
+            "skill.executor",
+            "identity.provider",
+            "authz.provider",
+            "secret.provider",
+            "observability.sink",
+        ),
     ),
 }
 
@@ -92,12 +100,63 @@ PROFILE_REGISTRY: dict[str, tuple[str, ...]] = {
 }
 
 
+# 选配分隔符：`community+audit_export_archive,a2a` = 社区基础档 + 自选条目
+PROFILE_SELECT_SEP = "+"
+
+
+def _unknown_profile(name: str | None) -> AssemblyError:
+    return AssemblyError(f"unknown assembly profile: {name!r} (expect one of {sorted(PROFILE_REGISTRY)})")
+
+
 def resolve_profile(name: str | None) -> tuple[str, ...]:
-    """Profile 名 → 条目元组；未知名字引用即拒绝启动（不静默回退社区版）。"""
+    """Profile 名 → 条目元组；未知名字引用即拒绝启动（不静默回退社区版）。
+
+    支持「基础档 + 自选条目」的选配写法（契约 §4 三层结构不变，只是 Profile
+    条目追加）：`community+audit_export_archive,a2a` 表示在社区基础上装上
+    审计导出归档与 A2A —— 这正是"同一份安装包按需选配插件"的表达方式。
+
+    - 两个内置档（community / enterprise）的展开结果**逐字节不变**；
+    - 追加条目允许 Module 名或插件名，存在性由 expand_profile 用**运行时发现**
+      （内置 + entry_points）判定，写错即 AssemblyError，不静默忽略；
+    - 重复选配基础档已有的插件（无论写 Module 还是插件名）会被**拒绝**而非
+      静默忽略：同一插件装配两次会让后注册者顶掉先注册者，且现场会误以为
+      "选配生效了"，实际是基础档本来就有。
+    """
     key = (name or "community").strip().lower()
-    if key not in PROFILE_REGISTRY:
-        raise AssemblyError(f"unknown assembly profile: {name!r} (expect one of {sorted(PROFILE_REGISTRY)})")
-    return PROFILE_REGISTRY[key]
+    if PROFILE_SELECT_SEP not in key:
+        if key not in PROFILE_REGISTRY:
+            raise _unknown_profile(name)
+        return PROFILE_REGISTRY[key]
+
+    base_name, _, extra_raw = key.partition(PROFILE_SELECT_SEP)
+    base_name = base_name.strip()
+    if base_name not in PROFILE_REGISTRY:
+        raise _unknown_profile(name)
+    extras = tuple(item.strip() for item in extra_raw.split(",") if item.strip())
+    if not extras:
+        raise AssemblyError(f"assembly profile {name!r} has an empty selection list")
+    base = PROFILE_REGISTRY[base_name]
+    # 展开成插件名后比对：条目可能写 Module（`a2a`）也可能写插件（`a2a_gateway`），
+    # 只按字符串去重挡不住"模块已含该插件"的重复装配 —— 重复声明直接拒绝，
+    # 而不是静默忽略（否则现场会以为"选配生效了"，实际是基础档本来就有）。
+    chosen = {plugin for entry in base for plugin in _expand_entry(entry)}
+    selected: list[str] = []
+    for entry in extras:
+        plugins = _expand_entry(entry)
+        duplicated = [plugin for plugin in plugins if plugin in chosen]
+        if duplicated:
+            raise AssemblyError(
+                f"assembly profile {name!r} re-selects {duplicated} already provided by {base_name!r}"
+            )
+        selected.extend(plugins)
+        chosen.update(plugins)
+    return (*base, *selected)
+
+
+def _expand_entry(entry: str) -> tuple[str, ...]:
+    """单条 Profile 条目 → 插件名元组（Module 展开；插件名原样保留）。"""
+    spec = MODULE_REGISTRY.get(entry)
+    return spec.plugins if spec is not None else (entry,)
 
 
 _KNOWN_PLUGINS = {plugin_cls.manifest.name: plugin_cls for plugin_cls in BUILTIN_PLUGINS}

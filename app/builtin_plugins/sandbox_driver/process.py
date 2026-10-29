@@ -12,6 +12,7 @@
 - cwd 白名单：allowed_roots 非空时 cwd 越界 → AI_SANDBOX_DENIED；
 - 进程组终止：POSIX 以 start_new_session 建独立进程组，超时用 killpg(SIGKILL) 清理整棵树；
 - POSIX rlimit：CPU / FSIZE / NPROC，命中即 AI_SANDBOX_RESOURCE_EXCEEDED；
+- 输出上限：流式读取并累计，超限立即终止子进程（不做"先全量缓冲再判长度"，避免大输出打爆内存）；
 - observability.sink 元信息（脚本标识、耗时、退出码、字节数），不记录脚本内容与参数。
 """
 
@@ -22,7 +23,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ class ProcessSandboxDriver(SandboxDriver):
         *,
         allowed_roots: list[str] | Sequence[str] | None = None,
         rlimit_enabled: bool = False,
-        max_processes: int = 256,
+        max_processes: int = 64,
         max_file_bytes: int = 16 * 1024 * 1024,
     ) -> None:
         # rlimit 默认关闭以保持直构/单元测试语义不变；装配期由本插件按
@@ -101,6 +102,32 @@ def _apply_rlimit(*, cpu_seconds: int, max_file_bytes: int, max_processes: int) 
             continue
 
 
+def _force_stream_eof(process: asyncio.subprocess.Process) -> None:
+    """终止后主动给输出流喂 EOF。
+
+    Windows proactor 上，子进程被 TerminateProcess 之后，若 stdout 管道里仍有未消费的
+    数据（典型场景就是"输出超限/超时被我们杀掉"），transport 不会向后唤醒 `read()` 与
+    `wait()`：表现为 returncode 已是 1 但 `await process.wait()` 一直挂住。主动 feed_eof
+    让读端立刻收尾，避免清理阶段白等。
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(process, name, None)
+        if stream is None:  # pragma: no cover - 恒有管道
+            continue
+        try:
+            stream.feed_eof()
+        except (RuntimeError, ValueError):  # pragma: no cover - 流已关闭
+            pass
+
+
+async def _wait_exit(process: asyncio.subprocess.Process, *, timeout: float = 2.0) -> None:
+    """有界等待进程退出；平台缺陷导致 wait() 不唤醒时不超过 timeout 秒。"""
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+    except asyncio.TimeoutError:  # pragma: no cover - 见 _force_stream_eof 的说明
+        pass
+
+
 async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
     """超时清理：POSIX 杀整个进程组，Windows 仅杀直接子进程（v1 平台降级）。"""
     if process.returncode is not None:
@@ -115,10 +142,107 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
     else:
         # Windows 无可靠进程组终止：process.kill() 不保证孙进程退出，属已声明的平台限制
         process.kill()
+    _force_stream_eof(process)
+    await _wait_exit(process)
+
+
+_OUTPUT_CHUNK_BYTES = 64 * 1024
+
+
+async def _write_stdin(stream: asyncio.StreamWriter | None, payload: bytes) -> None:
+    """写入参数并关闭 stdin：脚本以 `sys.stdin.read()` 等待 EOF，不关闭会一直挂到超时。"""
+    if stream is None:  # pragma: no cover - create_subprocess 恒给管道
+        return
     try:
-        await asyncio.wait_for(process.wait(), timeout=5)
-    except asyncio.TimeoutError:  # pragma: no cover - 极端场景，避免清理阶段悬挂
+        stream.write(payload)
+        await stream.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        # 脚本未读 stdin 就退出：属正常竞争，不是执行失败
         pass
+    finally:
+        try:
+            stream.close()
+        except (RuntimeError, OSError):  # pragma: no cover - 已关闭
+            pass
+
+
+async def _pump_stream(stream: asyncio.StreamReader | None, limit: int, exceeded: asyncio.Event) -> tuple[bytes, bool]:
+    """流式读取单个输出流，累计不超过 limit 字节；越界即置位事件并返回部分内容。"""
+    if stream is None:  # pragma: no cover - create_subprocess 恒给管道
+        return b"", False
+    buffer = bytearray()
+    while True:
+        try:
+            chunk = await stream.read(_OUTPUT_CHUNK_BYTES)
+        except (ConnectionResetError, BrokenPipeError):  # pragma: no cover - 子进程被清理时
+            return bytes(buffer), False
+        if not chunk:
+            return bytes(buffer), False
+        remaining = limit - len(buffer)
+        if len(chunk) > remaining:
+            if remaining > 0:
+                buffer.extend(chunk[:remaining])
+            exceeded.set()
+            return bytes(buffer), True
+        buffer.extend(chunk)
+
+
+async def _communicate_capped(
+    *,
+    process: asyncio.subprocess.Process,
+    payload: bytes,
+    max_output_bytes: int,
+    timeout_seconds: float,
+    terminate: Callable[[], Awaitable[None]] | None = None,
+) -> tuple[bytes, bytes, bool, bool]:
+    """带输出上限的 communicate：返回 (stdout, stderr, output_exceeded, timed_out)。
+
+    与 `process.communicate()` 的语义差异：stdout/stderr 边读边计数，单个流一旦超过
+    `max_output_bytes` 立即触发 `terminate`（而非先把全部输出读进内存再判长度），
+    因此大输出不会造成父进程内存放大，也不会让子进程在写满管道后白白挂到超时。
+    """
+    captured: dict[str, tuple[bytes, bool]] = {"stdout": (b"", False), "stderr": (b"", False)}
+    exceeded = asyncio.Event()
+
+    async def _pump(name: str) -> None:
+        captured[name] = await _pump_stream(getattr(process, name), max_output_bytes, exceeded)
+
+    async def _watch() -> None:
+        await exceeded.wait()
+        await (terminate or partial(_terminate_process_tree, process))()
+
+    tasks = [
+        asyncio.create_task(_pump("stdout")),
+        asyncio.create_task(_pump("stderr")),
+        asyncio.create_task(_write_stdin(process.stdin, payload)),
+    ]
+    watcher = asyncio.create_task(_watch())
+    # 注意：不要把 process.wait() 放进 gather。Windows proactor 在"管道被写满后被杀"
+    # 的场景下不会唤醒 wait()（returncode 已有值但协程挂住），以读端 EOF 作为完成信号更可靠
+    waiter = asyncio.gather(*tasks, return_exceptions=True)
+    timed_out = False
+    try:
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=timeout_seconds)
+        if not exceeded.is_set():
+            # 正常结束才补退出码；被我们 kill 的路径见 _force_stream_eof（wait 可能不唤醒）
+            await _wait_exit(process)
+    except asyncio.TimeoutError:
+        timed_out = True
+        await (terminate or partial(_terminate_process_tree, process))()
+        try:
+            # 终止后让读端把已缓冲内容读完，超时/截断时仍能带上诊断字节数
+            await asyncio.wait_for(asyncio.shield(waiter), timeout=3)
+        except asyncio.TimeoutError:  # pragma: no cover - 管道被异常占住
+            for task in tasks:
+                task.cancel()
+            waiter.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+    stdout, stdout_exceeded = captured["stdout"]
+    stderr, stderr_exceeded = captured["stderr"]
+    return stdout, stderr, stdout_exceeded or stderr_exceeded, timed_out
 
 
 # Linux 上 CPython 启动时把 SIGXFSZ 置为 SIG_IGN（避免大文件写入直接终结解释器），
@@ -133,16 +257,18 @@ _RESOURCE_ERRNO_MARKERS: tuple[tuple[bytes, str], ...] = (
 def _resource_limit_hit(*, returncode: int | None, stderr: bytes, rlimit_enabled: bool) -> bool:
     """判定本次执行是否命中沙箱资源上限。
 
-    两条判据并存，缺一不可：
-    1. 退出码为负数（SIGKILL/SIGXCPU/SIGXFSZ）—— 由内核直接终结；
-    2. rlimit 开启且 stderr 出现内核 errno 文案 —— 子进程忽略/捕获了信号的情形。
+    判定前提是 rlimit 已开启：关闭时任何信号退出都只是普通执行失败，不能报成配额耗尽。
+    开启后两条判据并存：
+    1. SIGXCPU(-24) / SIGXFSZ(-25) —— 由内核按 rlimit 直接终结，语义唯一；
+    2. 裸 SIGKILL(-9) 或 errno 文案 —— 需 stderr 出现内核 errno（EFBIG/EAGAIN）才算命中，
+       因为 -9 也可能来自外部 kill 或 OOM killer，不能无条件归为沙箱配额。
 
     只匹配内核生成的 errno 文案，不匹配脚本自定义输出，避免把业务失败误报为配额。
     """
-    if returncode in (-9, -24, -25):
-        return True
     if not rlimit_enabled:
         return False
+    if returncode in (-24, -25):
+        return True
     return any(marker in stderr for marker, _ in _RESOURCE_ERRNO_MARKERS)
 
 
@@ -175,7 +301,7 @@ async def run_isolated_process(
     max_output_bytes: int,
     allowed_roots: Sequence[str] | None = None,
     rlimit_enabled: bool = False,
-    max_processes: int = 256,
+    max_processes: int = 64,
     max_file_bytes: int = 16 * 1024 * 1024,
     emit: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -194,14 +320,17 @@ async def run_isolated_process(
             )
     started = time.monotonic()
     process = await asyncio.create_subprocess_exec(sys.executable, "-I", str(script_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd), env=env, **spawn_kwargs)
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(json.dumps(arguments).encode()), timeout=timeout_seconds)
-    except asyncio.TimeoutError:
-        await _terminate_process_tree(process)
-        _emit_sandbox_meta(outcome="timeout", script_path=script_path, duration_ms=int((time.monotonic() - started) * 1000), exit_code=None, stdout_bytes=0, stderr_bytes=0, timed_out=True, rlimit_enabled=rlimit_enabled, emit=emit)
-        raise ApiError("AI_SKILL_TIMEOUT", "MD-Skill script timed out", 504)
+    stdout, stderr, output_exceeded, timed_out = await _communicate_capped(
+        process=process,
+        payload=json.dumps(arguments).encode(),
+        max_output_bytes=max_output_bytes,
+        timeout_seconds=timeout_seconds,
+    )
     duration_ms = int((time.monotonic() - started) * 1000)
-    if len(stdout) > max_output_bytes or len(stderr) > max_output_bytes:
+    if timed_out:
+        _emit_sandbox_meta(outcome="timeout", script_path=script_path, duration_ms=duration_ms, exit_code=None, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=True, rlimit_enabled=rlimit_enabled, emit=emit)
+        raise ApiError("AI_SKILL_TIMEOUT", "MD-Skill script timed out", 504)
+    if output_exceeded:
         _emit_sandbox_meta(outcome="output_exceeded", script_path=script_path, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, rlimit_enabled=rlimit_enabled, emit=emit)
         raise ApiError("AI_SKILL_FAILED", "MD-Skill script output exceeded limit", 500)
     if process.returncode != 0:
@@ -219,6 +348,7 @@ async def run_isolated_process(
         _emit_sandbox_meta(outcome="invalid_output", script_path=script_path, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, rlimit_enabled=rlimit_enabled, emit=emit)
         raise ApiError("AI_SKILL_FAILED", "MD-Skill script output is not valid JSON", 500) from exc
     if not isinstance(payload, dict):
+        _emit_sandbox_meta(outcome="invalid_output", script_path=script_path, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, rlimit_enabled=rlimit_enabled, emit=emit)
         raise ApiError("AI_SKILL_FAILED", "MD-Skill script output must be a JSON object", 500)
     _emit_sandbox_meta(outcome="ok", script_path=script_path, duration_ms=duration_ms, exit_code=process.returncode, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=False, rlimit_enabled=rlimit_enabled, emit=emit)
     return payload

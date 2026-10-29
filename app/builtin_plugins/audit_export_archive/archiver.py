@@ -10,8 +10,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
-from datetime import timedelta
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Any
 from uuid import UUID
@@ -46,7 +47,7 @@ from app.builtin_plugins.audit_export_archive.models import (
     STATUS_SUCCEEDED,
     AuditArchiveBatch,
 )
-from app.core.errors import ApiError
+from app.core.errors import AUDIT_ARCHIVE_BUSY, ApiError
 from app.core.ids import utc_now
 from app.plugin_sdk import AuditQuery
 
@@ -57,9 +58,20 @@ _BREAKER = "plugin.audit_export_archive"
 _ENCRYPTION_NONE = "none"
 _ENCRYPTION_AES_GCM = "aes-256-gcm"
 
+_LOGGER = logging.getLogger(__name__)
+
 
 class AuditArchiveService:
-    """归档批次：手动触发 + 定时调度（单实例，冷副本写对象存储）。"""
+    """归档批次：手动触发 + 定时调度（冷副本写对象存储）。
+
+    幂等与互斥（v1.4 补齐）：
+    - **窗口幂等**：定时窗口对齐到 UTC 天边界，同一窗口已有 SUCCEEDED 批次时直接复用，
+      多副本各自调度不会产出重复冷副本；
+    - **在途互斥**：同租户已有 PENDING/RUNNING 批次时拒绝新批次（409 `AI_AUDIT_ARCHIVE_BUSY`），
+      单进程内再用 `_trigger_lock` 串行化（定时器与手动触发不会并发进入）；
+    - **陈旧批次回收**：超过半个调度周期仍未终态的批次视为中断，落 FAILED 后放行新批次，
+      避免"崩溃一次就永久 BUSY"。
+    """
 
     def __init__(self, sdk: Any, config: AuditExportConfig, *, guard: Any = None) -> None:
         self._sdk = sdk
@@ -67,6 +79,8 @@ class AuditArchiveService:
         self._guard = guard
         self._timer: threading.Timer | None = None
         self._closed = False
+        # 同一进程内的定时器与手动触发必须串行：否则两次 _execute 会同时读同一窗口
+        self._trigger_lock = threading.Lock()
 
     # ---- 密钥 ----
     def _key_ring(self) -> ArchiveKeyRing | None:
@@ -89,28 +103,83 @@ class AuditArchiveService:
     ) -> dict[str, Any]:
         if self._guard is not None:
             self._guard.check(_BREAKER)
-        window_end = utc_now() - timedelta(days=self._config.hot_retention_days)
-        window_start = window_end - timedelta(hours=lookback_hours or self._config.archive_schedule_hours)
+        window_start, window_end = self._window(lookback_hours=lookback_hours, trigger_source=trigger_source)
         key_ring = self._key_ring()  # 密钥缺失在创建批次前即失败，避免留下空批次
+        with self._trigger_lock:
+            reused = self._reserve_window(tenant_id=tenant_id, window_start=window_start, window_end=window_end)
+            if reused is not None:
+                return reused
+            with self._sdk.session() as db:
+                batch = AuditArchiveBatch(
+                    tenant_id=tenant_id,
+                    created_by=actor_user_id,
+                    trigger_source=trigger_source,
+                    status=STATUS_PENDING,
+                    window_start=window_start,
+                    window_end=window_end,
+                    encryption=_ENCRYPTION_AES_GCM if key_ring is not None else _ENCRYPTION_NONE,
+                )
+                db.add(batch)
+                db.flush()
+                batch_id = batch.id
+            self._execute(batch_id=batch_id, tenant_id=tenant_id, actor_user_id=actor_user_id, key_ring=key_ring)
+            with self._sdk.session() as db:
+                saved = db.get(AuditArchiveBatch, batch_id)
+                if saved is None:  # pragma: no cover - 同实例内刚写入
+                    raise ApiError("AI_AUDIT_ARCHIVE_FAILED", "audit archive batch disappeared", 502)
+                return self._batch_dict(saved)
+
+    def _window(self, *, lookback_hours: float | None, trigger_source: str) -> tuple[datetime, datetime]:
+        """计算归档窗口。
+
+        定时窗口对齐到 UTC 天边界：`utc_now()` 带微秒，不对齐的话每次调度都是"新窗口"，
+        幂等复用永远命中不了，多副本必然各写一份冷副本。
+        """
+        window_end = utc_now() - timedelta(days=self._config.hot_retention_days)
+        if trigger_source == "SCHEDULE":
+            window_end = window_end.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_start = window_end - timedelta(hours=lookback_hours or self._config.archive_schedule_hours)
+        return window_start, window_end
+
+    def _reserve_window(self, *, tenant_id: UUID, window_start: Any, window_end: Any) -> dict[str, Any] | None:
+        """窗口幂等 + 在途互斥 + 陈旧批次回收；返回可复用的已完成批次（无则 None）。"""
+        now = utc_now()
+        stale_before = now - timedelta(hours=max(1.0, self._config.archive_schedule_hours / 2))
         with self._sdk.session() as db:
-            batch = AuditArchiveBatch(
-                tenant_id=tenant_id,
-                created_by=actor_user_id,
-                trigger_source=trigger_source,
-                status=STATUS_PENDING,
-                window_start=window_start,
-                window_end=window_end,
-                encryption=_ENCRYPTION_AES_GCM if key_ring is not None else _ENCRYPTION_NONE,
-            )
-            db.add(batch)
-            db.flush()
-            batch_id = batch.id
-        self._execute(batch_id=batch_id, tenant_id=tenant_id, actor_user_id=actor_user_id, key_ring=key_ring)
-        with self._sdk.session() as db:
-            saved = db.get(AuditArchiveBatch, batch_id)
-            if saved is None:  # pragma: no cover - 同实例内刚写入
-                raise ApiError("AI_AUDIT_ARCHIVE_FAILED", "audit archive batch disappeared", 502)
-            return self._batch_dict(saved)
+            stale = db.scalars(
+                select(AuditArchiveBatch).where(
+                    AuditArchiveBatch.tenant_id == tenant_id,
+                    AuditArchiveBatch.status.in_((STATUS_PENDING, STATUS_RUNNING)),
+                    AuditArchiveBatch.created_at < stale_before,
+                )
+            ).all()
+            for batch in stale:
+                batch.status = STATUS_FAILED
+                batch.error_code = "AI_AUDIT_ARCHIVE_FAILED"
+                batch.error_message = "archive batch interrupted before completion"
+                batch.finished_at = now
+            if stale:
+                db.flush()
+            inflight = db.scalars(
+                select(AuditArchiveBatch).where(
+                    AuditArchiveBatch.tenant_id == tenant_id,
+                    AuditArchiveBatch.status.in_((STATUS_PENDING, STATUS_RUNNING)),
+                ).limit(1)
+            ).first()
+            if inflight is not None:
+                raise ApiError(AUDIT_ARCHIVE_BUSY, "an audit archive batch is already running", 409)
+            done = db.scalars(
+                select(AuditArchiveBatch)
+                .where(
+                    AuditArchiveBatch.tenant_id == tenant_id,
+                    AuditArchiveBatch.window_start == window_start,
+                    AuditArchiveBatch.window_end == window_end,
+                    AuditArchiveBatch.status == STATUS_SUCCEEDED,
+                )
+                .order_by(AuditArchiveBatch.created_at.desc())
+                .limit(1)
+            ).first()
+            return self._batch_dict(done) if done is not None else None
 
     def list_runs(self, *, tenant_id: UUID, limit: int = 20) -> list[dict[str, Any]]:
         with self._sdk.session() as db:
@@ -218,22 +287,25 @@ class AuditArchiveService:
                 batch.finished_at = utc_now()
             if self._guard is not None:
                 self._guard.record(_BREAKER, succeeded=True)
-            self._sdk.record_audit(
-                tenant_id=tenant_id,
-                actor_user_id=actor_user_id,
-                action=_ACTION_ARCHIVED,
-                resource_type=_RESOURCE_TYPE,
-                resource_id=batch_id,
-                summary=f"audit archive completed ({row_count} rows, {len(objects)} objects)",
-                detail={
-                    "row_count": row_count,
-                    "objects": len(objects),
-                    "sha256_total": digest_total,
-                    "encryption": encryption,
-                    # 只记密钥指纹：审计日志里绝不出现密钥材料
-                    "key_id": key_id,
-                },
-            )
+            try:
+                self._sdk.record_audit(
+                    tenant_id=tenant_id,
+                    actor_user_id=actor_user_id,
+                    action=_ACTION_ARCHIVED,
+                    resource_type=_RESOURCE_TYPE,
+                    resource_id=batch_id,
+                    summary=f"audit archive completed ({row_count} rows, {len(objects)} objects)",
+                    detail={
+                        "row_count": row_count,
+                        "objects": len(objects),
+                        "sha256_total": digest_total,
+                        "encryption": encryption,
+                        # 只记密钥指纹：审计日志里绝不出现密钥材料
+                        "key_id": key_id,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - 批次已 SUCCEEDED，审计写入失败不得反把批次判失败
+                _LOGGER.warning("failed to record audit for archive batch %s", batch_id, exc_info=True)
         except ApiError as exc:
             self._fail(batch_id, tenant_id, actor_user_id, exc.code, exc.message)
         except Exception as exc:  # noqa: BLE001 - 归档失败必须落库，否则批次永久 RUNNING
@@ -250,15 +322,18 @@ class AuditArchiveService:
             batch.error_code = code
             batch.error_message = (message or code)[:1000]
             batch.finished_at = utc_now()
-        self._sdk.record_audit(
-            tenant_id=tenant_id,
-            actor_user_id=actor_user_id,
-            action=_ACTION_FAILED,
-            resource_type=_RESOURCE_TYPE,
-            resource_id=batch_id,
-            summary=message or "audit archive failed",
-            detail={"error_code": code},
-        )
+        try:
+            self._sdk.record_audit(
+                tenant_id=tenant_id,
+                actor_user_id=actor_user_id,
+                action=_ACTION_FAILED,
+                resource_type=_RESOURCE_TYPE,
+                resource_id=batch_id,
+                summary=message or "audit archive failed",
+                detail={"error_code": code},
+            )
+        except Exception:  # noqa: BLE001 - 批次已落 FAILED，审计写入失败不得掩盖原始失败原因
+            _LOGGER.warning("failed to record audit for archive batch %s", batch_id, exc_info=True)
 
     def _object_store(self) -> Any:
         store = self._sdk.registry.try_get("object.store")

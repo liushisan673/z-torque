@@ -15,6 +15,7 @@ payload 白名单刻意不含 token、header 原文与请求/响应 body——�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -93,11 +94,22 @@ class PeerRegistry:
 
     def check_breaker(self, peer_id: str) -> None:
         if self._guard is not None:
-            self._guard.check(f"{_BREAKER_PREFIX}{peer_id}")
+            # 按对端应用 A2A_CIRCUIT_* 配置：不传覆盖值时只有全局 PLUGIN_BREAKER_* 生效，
+            # 插件配置项就成了"只校验不生效"的死配置
+            self._guard.check(
+                f"{_BREAKER_PREFIX}{peer_id}",
+                failure_threshold=self._config.circuit_failure_threshold,
+                cooldown_seconds=self._config.circuit_cooldown_seconds,
+            )
 
     def record_breaker(self, peer_id: str, *, succeeded: bool) -> None:
         if self._guard is not None:
-            self._guard.record(f"{_BREAKER_PREFIX}{peer_id}", succeeded=succeeded)
+            self._guard.record(
+                f"{_BREAKER_PREFIX}{peer_id}",
+                succeeded=succeeded,
+                failure_threshold=self._config.circuit_failure_threshold,
+                cooldown_seconds=self._config.circuit_cooldown_seconds,
+            )
 
     # ---- 出站 ----
     def _decrypt_material(self, peer_id: str, secret_name: str) -> str:
@@ -220,12 +232,17 @@ class PeerRegistry:
         }
         url = urljoin(peer.base_url + "/", _INVOKE_PATH.lstrip("/"))
         timeout = peer.timeout_seconds or self._config.default_timeout_seconds
-        # mTLS 材料（如有）先落盘为 owner-only 临时文件；无论成败用完即删（密钥不驻留磁盘）
-        mtls_options, mtls_files = self._mtls_client_options(peer)
+        # mTLS 材料（如有）先落盘为 owner-only 临时文件；无论成败用完即删（密钥不驻留磁盘）。
+        # 写 PEM + 构建 SSLContext 是同步阻塞 IO（含磁盘与证书解析），不能压在事件循环上。
+        mtls_options, mtls_files = await asyncio.to_thread(self._mtls_client_options, peer)
         try:
             try:
                 if self._client is not None:
                     response = await self._client.post(url, json=payload, headers=headers, timeout=timeout)
+                    if getattr(response, "history", ()):
+                        # 注入的 client 无法在这里强制 follow_redirects=False，只能事后拒绝：
+                        # 跟随重定向会把请求体/Authorization 带到未白名单的主机
+                        raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} redirected the call", 503)
                     raw = response.content
                     status_code = response.status_code
                 else:

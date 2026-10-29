@@ -641,18 +641,18 @@
 
   <!-- ============================================================
        嵌入组件测试挂件（模拟真实宿主的「右下角客服挂件」形态）
-       ⚠ 登录态同步前提：本文件须通过 http://localhost:5173/chat.html 访问
+       ⚠ 登录态同步前提：本文件须通过 http://localhost:5174/chat.html 访问
        （同源副本已放 console/public/chat.html 由 Vite 服务）。用 file:// 双击打开时
        浏览器对跨站 iframe 做 localStorage 分区隔离，嵌入页将永远显示未登录。
        可用参数：agent_id（预选智能体）/ theme=dark / starters=问题1|问题2
        ============================================================ -->
   <div id="embed-file-warning" style="display:none;position:fixed;top:0;left:0;right:0;z-index:10000;
        background:#fef2f2;color:#dc2626;font-size:13px;padding:8px 16px;text-align:center;border-bottom:1px solid #fecaca;">
-    当前通过 file:// 打开，无法与平台同步登录态——请访问 <b>http://localhost:5173/chat.html</b>（需 Vite dev server 运行中）
+    当前通过 file:// 打开，无法与平台同步登录态——请访问 <b>http://localhost:5174/chat.html</b>（需 Vite dev server 运行中）
   </div>
   <div id="embed-widget" style="position:fixed;right:24px;bottom:24px;z-index:9999;display:none;">
     <iframe id="embed-frame"
-      src="http://localhost:5173/embed/chat?theme=light"
+      src="http://localhost:5174/embed/chat?theme=light"
       style="width:400px;height:640px;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 12px 32px rgba(15,23,42,.18);"
     ></iframe>
   </div>

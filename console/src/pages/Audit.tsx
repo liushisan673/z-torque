@@ -385,6 +385,7 @@ const ERROR_CODE_LABEL: Record<string, string> = {
   AI_AUDIT_EXPORT_TOO_LARGE: "导出范围超过行数上限",
   AI_AUDIT_EXPORT_FAILED: "审计导出失败",
   AI_AUDIT_ARCHIVE_FAILED: "审计归档失败",
+  AI_AUDIT_ARCHIVE_BUSY: "已有归档批次在执行",
   AI_AUDIT_ARCHIVE_KEY_MISSING: "归档对象缺少可用密钥",
   AI_A2A_DISABLED: "A2A 未启用",
   AI_A2A_DENIED: "A2A 调用被拒绝",
@@ -714,13 +715,38 @@ function AuditExportPanel({ canExport, canArchive, category, start, end }: {
   );
 }
 
+/** 导出/归档是否已装配：装配（后端能力面）≠ 授权（权限），两者同时满足才渲染入口。 */
+function useAuditExportCapability(): { export: boolean; archive: boolean } {
+  const [caps, setCaps] = useState({ export: false, archive: false });
+  useEffect(() => {
+    let cancelled = false;
+    request<{ audit_export?: { available?: boolean; archive?: boolean } }>("/api/z-torque/capabilities")
+      .then((data) => {
+        if (cancelled) return;
+        setCaps({
+          export: data?.audit_export?.available === true,
+          archive: data?.audit_export?.archive === true,
+        });
+      })
+      .catch(() => {
+        // 拉不到能力面就按"未装配"处理（fail-closed）：宁可少一个入口，
+        // 也不要留一个点下去 503 的按钮
+      });
+    return () => { cancelled = true; };
+  }, []);
+  return caps;
+}
+
 export function AuditPage() {
   const { user } = useAuth();
   // 权限范围：audit.read_all（admin）看全量；普通用户仅自己相关（后端同步强制收缩）
   const canReadAll = user?.permissions?.includes("audit.read_all") ?? false;
-  // 导出/归档是显式授权的高危动作（v1.3 §5.3）：无权限时不渲染入口，避免"点了才 403"
-  const canExport = user?.permissions?.includes("audit.export") ?? false;
-  const canArchive = user?.permissions?.includes("audit.archive") ?? false;
+  // 导出/归档是显式授权的高危动作（v1.3 §5.3）：无权限时不渲染入口，避免"点了才 403"。
+  // 还要看插件是否装配：未装 audit_export_archive 时后端 /audit-exports 返回 503，
+  // 入口必须随能力面一起消失，否则卸载插件后按钮还在、点了才报错。
+  const caps = useAuditExportCapability();
+  const canExport = (user?.permissions?.includes("audit.export") ?? false) && caps.export;
+  const canArchive = (user?.permissions?.includes("audit.archive") ?? false) && caps.archive;
 
   // 左右分栏宽度：拖拽把手调整右侧详情宽度，会话内保持，退出登录恢复默认
   const listPane = usePaneWidth("audit", "--audit-detail-w");

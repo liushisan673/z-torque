@@ -227,7 +227,7 @@ class SkillGateway:
             logger.warning("connector secret decryption failed", exc_info=True)
             return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_SECRET_INVALID", error_message="连接器凭证无法解密")
 
-    async def probe_mcp_http(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, secret_ref: str | None = None) -> dict:
+    async def probe_mcp_http(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, secret_ref: str | None = None, allow_private_network: bool = False, proxy: str | None = None) -> dict:
         """MCP HTTP 探测：initialize 握手 + tools/list，返回 tools/list 原始结果。
 
         供 API 层连接器测试/工具发现使用；传输实现经装配注入的 http_connector_factory
@@ -239,7 +239,7 @@ class SkillGateway:
         auth_token = self._resolve_secret_token(secret_ref)
         if isinstance(auth_token, ExecutionResult):
             raise ApiError(auth_token.error_code or "AI_CONNECTOR_SECRET_INVALID", auth_token.error_message or "连接器凭证无法解密", 503)
-        connector = self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, auth_token=auth_token)
+        connector = self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, auth_token=auth_token, allow_private_network=allow_private_network, proxy=proxy)
         try:
             await connector.negotiate()
             return await connector.list_tools()
@@ -265,10 +265,15 @@ class SkillGateway:
             auth_token = self._resolve_secret_token(secret_ref)
             if isinstance(auth_token, ExecutionResult):
                 return auth_token
-            # 主机白名单经 policy.source Port 提供（P2-14），缺失时退回配置
+            # 主机白名单经 policy.source Port 提供（P2-14），缺失时退回配置；
+            # 连接器 target_policy.allow_private_network 时放行白名单内目标的 http 明文形式
             policy = try_port("policy.source")
             allowed_hosts = policy.mcp_allowed_hosts() if policy is not None else settings.mcp_allowed_hosts
-            connector = self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token, extra_headers=self._identity_headers(identity))
+            target_policy = config.get("target_policy") if isinstance(config.get("target_policy"), dict) else {}
+            allow_private = bool(config.get("allow_private_network") or target_policy.get("allow_private_network"))
+            # 出站代理（连接器级三态）：缺省走全局，""=直连，URL=指定代理
+            proxy = config.get("proxy") if "proxy" in config else None
+            connector = self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token, extra_headers=self._identity_headers(identity), allow_private_network=allow_private, proxy=proxy if isinstance(proxy, str) else None)
         elif transport == "stdio":
             registry = self.stdio_registry
             server_name = config.get("server_name")
@@ -740,10 +745,14 @@ class SkillGateway:
             tables = (connector.config or {}).get("allowed_tables")
             if isinstance(tables, list):
                 config["connector_allowed_tables"] = [str(table) for table in tables]
-        if connector is not None and connector.connector_type == "REST" and connector.target_policy:
-            # REST 工具：目标安全策略（allow_private_network 等）以连接器实时配置为源头，
-            # 叠加到工具导入快照之上，避免已导入工具的旧快照阻塞策略更新
-            config["target_policy"] = {**(config.get("target_policy") or {}), **connector.target_policy}
+        if connector is not None and connector.connector_type in ("REST", "MCP"):
+            # REST/MCP 工具：目标安全策略与出站代理以连接器实时配置为源头（保存即生效，
+            # 无需重新登记工具）。proxy 三态：缺省=跟随全局；""=直连；URL=指定代理。
+            if connector.target_policy:
+                config["target_policy"] = {**(config.get("target_policy") or {}), **connector.target_policy}
+            connector_config = connector.config or {}
+            if "proxy" in connector_config:
+                config["proxy"] = connector_config.get("proxy")
         if connector is not None and connector.connector_type == "REST":
             # 连接器级凭据头（前端连接器页配置，明文保存时已转 secret:// 引用）：
             # 覆盖导入工具 headers 里的同名 {{参数}} 模板项 → 一次配置对该连接器全部工具生效，

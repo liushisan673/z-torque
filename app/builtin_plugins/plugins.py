@@ -80,8 +80,21 @@ class ModelProviderPlugin:
         # 插件级熔断与配额（契约 §5.5）：模型网关统一经 GuardedModelGateway 守卫
         guard = PluginGuardRegistry.from_settings(settings)
         if settings.model_base_url and api_key:
+            # trust_env=False：模型网关永不读取 HTTP(S)_PROXY 环境变量。模型端点由 MODEL_BASE_URL
+            # 显式配置，且国内模型服务（如 DeepSeek）拒绝海外出口 IP——出站代理（PROXY_URL）一旦
+            # 生效会把模型流量带进代理导致 401/连接中断（实测事故 2026-10-27），此处彻底隔离。
+            import httpx as _httpx
+
             def factory() -> OpenAICompatibleGateway:
-                return GuardedModelGateway(OpenAICompatibleGateway(settings.model_base_url, api_key, default_model=settings.model_name), guard)
+                return GuardedModelGateway(
+                    OpenAICompatibleGateway(
+                        settings.model_base_url,
+                        api_key,
+                        default_model=settings.model_name,
+                        client=_httpx.AsyncClient(trust_env=False),
+                    ),
+                    guard,
+                )
             label = f"openai_compatible({settings.model_name})"
         else:
             def factory() -> MockModelGateway:

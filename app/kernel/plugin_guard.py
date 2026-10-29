@@ -97,17 +97,42 @@ class PluginGuardRegistry:
             quota_per_minute=getattr(settings, "plugin_quota_per_minute", _DEFAULT_QUOTA_PER_MINUTE),
         )
 
-    def check(self, key: str) -> None:
-        """闸门：熔断 OPEN 或配额超限抛 ApiError（503/429）；通过则记配额。"""
+    def check(self, key: str, *, failure_threshold: int | None = None, cooldown_seconds: float | None = None) -> None:
+        """闸门：熔断 OPEN 或配额超限抛 ApiError（503/429）；通过则记配额。
+
+        `failure_threshold` / `cooldown_seconds` 是**按组件键**的覆盖值：插件自己的
+        `A2A_CIRCUIT_*` 一类配置项此前被 `A2AConfig.validate()` 校验却从未生效（真正
+        生效的只有全局 `PLUGIN_BREAKER_*`），组件级语义必须由调用方显式传入。
+        """
         breaker = self._breakers.get(key)
-        if breaker is not None and not breaker.allow():
+        if breaker is None:
+            breaker = self._breakers[key] = CircuitBreaker(
+                self._failure_threshold if failure_threshold is None else failure_threshold,
+                self._cooldown_seconds if cooldown_seconds is None else cooldown_seconds,
+            )
+        else:
+            if failure_threshold is not None:
+                breaker.failure_threshold = max(1, failure_threshold)
+            if cooldown_seconds is not None:
+                breaker.cooldown_seconds = max(0.0, cooldown_seconds)
+        if not breaker.allow():
             raise ApiError(CIRCUIT_OPEN_CODE, f"plugin component {key} circuit is open (cooling down)", 503)
         quota = self._quotas.setdefault(key, _QuotaWindow(self._quota_per_minute))
         if quota.reject():
             raise ApiError(QUOTA_EXCEEDED_CODE, f"plugin component {key} exceeded quota ({self._quota_per_minute}/min)", 429)
 
-    def record(self, key: str, *, succeeded: bool) -> None:
-        breaker = self._breakers.setdefault(key, CircuitBreaker(self._failure_threshold, self._cooldown_seconds))
+    def record(self, key: str, *, succeeded: bool, failure_threshold: int | None = None, cooldown_seconds: float | None = None) -> None:
+        breaker = self._breakers.setdefault(
+            key,
+            CircuitBreaker(
+                self._failure_threshold if failure_threshold is None else failure_threshold,
+                self._cooldown_seconds if cooldown_seconds is None else cooldown_seconds,
+            ),
+        )
+        if failure_threshold is not None:
+            breaker.failure_threshold = max(1, failure_threshold)
+        if cooldown_seconds is not None:
+            breaker.cooldown_seconds = max(0.0, cooldown_seconds)
         if succeeded:
             breaker.record_success()
         else:

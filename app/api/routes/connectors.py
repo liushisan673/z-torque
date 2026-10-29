@@ -39,11 +39,39 @@ MCP_PROBE_TIMEOUT_SECONDS = 10.0
 REST_PROBE_TIMEOUT_SECONDS = 8.0
 
 
+def _exception_reason(exc: BaseException) -> str:
+    """提取可读的异常原因：本异常无消息时沿 __cause__/__context__ 链向下找（最多 8 层）。
+
+    传输层异常常被无消息地层层包裹（如空消息的 McpTransportError ← ConnectTimeout ←
+    TimeoutError ← CancelledError'deadline exceeded'），直接 str(exc) 为空会退化成类名，
+    丢失根因信息；找到链内消息时带上外层类名便于定位。
+    """
+    current: BaseException | None = exc
+    fallback = exc.__class__.__name__
+    for _ in range(8):
+        if current is None:
+            break
+        text = str(current).strip()
+        if text:
+            first_line = text.splitlines()[0][:200]
+            return first_line if current is exc else f"{fallback}: {first_line}"
+        current = current.__cause__ or current.__context__
+    return fallback
+
+
 def _mcp_error_reason(exc: Exception) -> str:
-    return str(exc).strip().splitlines()[0][:200] or "unknown error"
+    # str(exc) 可能整体为空（如无消息的传输层异常），splitlines()[0] 会 IndexError；
+    # 沿异常链提取根因，兜底退回异常类名
+    return _exception_reason(exc)
 
 
-async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = None) -> dict:
+def _mcp_allow_private(item: Connector) -> bool:
+    """连接器 target_policy 声明的内网/明文放行（探测与执行同源，语义对齐 REST）。"""
+    config_policy = (item.config or {}).get("target_policy") if isinstance((item.config or {}).get("target_policy"), dict) else {}
+    return bool(config_policy.get("allow_private_network") or (item.target_policy or {}).get("allow_private_network"))
+
+
+async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = None, allow_private_network: bool = False) -> dict:
     """对 MCP 连接做真实探测：initialize 握手 + tools/list，返回 tools/list 原始结果。
 
     仅支持 HTTP 传输（Streamable HTTP）；传输实现经装配注入的 SkillGateway
@@ -69,12 +97,17 @@ async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = No
     registry = getattr(request.app.state, "port_registry", None)
     policy = registry.try_get("policy.source") if registry is not None else None
     allowed_hosts = policy.mcp_allowed_hosts() if policy is not None else settings.mcp_allowed_hosts
+    # 出站代理（连接器级三态）：缺省跟随全局；""=直连；URL=指定代理（与执行期同源）
+    raw_proxy = config.get("proxy")
+    proxy = raw_proxy.strip() if isinstance(raw_proxy, str) else None
     return await gateway.probe_mcp_http(
         endpoint,
         allowed_hosts=allowed_hosts,
         timeout_seconds=max(min(timeout, MCP_PROBE_TIMEOUT_SECONDS), 1.0),
         max_response_bytes=settings.mcp_max_response_bytes,
         secret_ref=secret_ref,
+        allow_private_network=allow_private_network,
+        proxy=proxy,
     )
 
 
@@ -124,6 +157,7 @@ async def _probe_rest(config: dict, secret_ref: str | None) -> dict:
 
     返回字典至少含 http_status、method_used、auth_used；失败抛 ApiError。
     401/403 仍视为「远端可达」，单独以 status=auth_required 表达，便于前端诚实提示。
+    405/501（该地址不接受 HEAD/GET）同样证明远端可达，以 method_not_allowed 表达。
     """
 
     import httpx
@@ -139,8 +173,13 @@ async def _probe_rest(config: dict, secret_ref: str | None) -> dict:
         }
     from urllib.parse import urlparse
     parsed = urlparse(base_url)
-    # 内网地址绕过环境代理：否则会拿到代理返回的 502，被误判成"对方服务挂了"
-    bypass_proxy = _is_private_address(parsed.hostname)
+    # 出站代理（连接器级三态，与执行期同源）：
+    #   缺省 → 内网地址绕过环境代理（否则会拿到代理返回的 502，被误判成"对方服务挂了"）
+    #   ""   → 强制直连
+    #   URL  → 指定代理
+    raw_proxy = config.get("proxy")
+    explicit_proxy = raw_proxy.strip() if isinstance(raw_proxy, str) else None
+    bypass_proxy = explicit_proxy == "" or (explicit_proxy is None and _is_private_address(parsed.hostname))
     if parsed.scheme not in ("http", "https"):
         raise ApiError("AI_PARAM_INVALID", "REST 连接 base_url 必须以 http:// 或 https:// 开头", 400)
     if not parsed.netloc:
@@ -187,7 +226,10 @@ async def _probe_rest(config: dict, secret_ref: str | None) -> dict:
     # 否则 httpx 会把 192.168.x / 10.x 的请求交给 127.0.0.1:12000 这类本机代理，
     # 代理连不上目标就回 502，被误读成"对方服务 502"，实际是本机网络不通。
     client_kwargs: dict = {"follow_redirects": False, "timeout": timeout, "verify": verify_tls}
-    if bypass_proxy:
+    if explicit_proxy:
+        client_kwargs["proxy"] = explicit_proxy
+        client_kwargs["trust_env"] = False
+    elif bypass_proxy:
         client_kwargs["trust_env"] = False
         client_kwargs["proxy"] = None
 
@@ -234,6 +276,11 @@ async def _probe_rest(config: dict, secret_ref: str | None) -> dict:
         verdict = "ready"
     elif status in (401, 403):
         verdict = "auth_required"  # 鉴权被拒：远端可达，凭证待修
+    elif status in (405, 501):
+        # HEAD/GET 均被拒：响应来自目标服务本身，说明主机/TLS/路由都通。
+        # 典型场景：仅支持 POST 的检索/推理接口（如 Bocha /v1/web-search），
+        # 用 GET 探测必然 405——判失败会把「远端可达」误报成「检查失败」。
+        verdict = "method_not_allowed"
     else:
         # 4xx/5xx：区分"目标服务返回"与"中间代理返回"，后者必须点名代理，避免冤枉对方服务
         origin = "中间代理" if proxy_hint else "远端服务"
@@ -259,7 +306,8 @@ async def _probe_rest(config: dict, secret_ref: str | None) -> dict:
 
 
 def _rest_error_reason(exc: Exception) -> str:
-    return str(exc).strip().splitlines()[0][:200] or "unknown error"
+    # 同 _mcp_error_reason：沿异常链提取根因，兜底退回异常类名
+    return _exception_reason(exc)
 
 
 def _is_private_address(host: str | None) -> bool:
@@ -415,8 +463,9 @@ async def archive_connector(connector_id: UUID, request: Request, user: ManageUs
 @router.delete("/{connector_id}", summary="删除连接器")
 async def delete_connector(connector_id: UUID, request: Request, user: ManageUser, db: DbSession):
     item = get_owned(db, user, connector_id)
-    if item.status != "ARCHIVED":
-        raise ApiError("AI_REQUEST_INVALID", "connector must be archived before deletion", 409)
+    # 停用即视同退出服务：DISABLED / ARCHIVED 均可删除（启用中的连接器仍不可删）
+    if item.status not in ("ARCHIVED", "DISABLED"):
+        raise ApiError("AI_REQUEST_INVALID", "connector must be disabled or archived before deletion", 409)
     # 绑定检查：仍注册有工具的连接器不允许删除，需先删除对应工具
     linked = db.scalar(select(func.count(ConnectorTool.id)).where(ConnectorTool.connector_id == item.id)) or 0
     if linked:
@@ -465,7 +514,7 @@ async def test_connector(connector_id: UUID, request: Request, user: ReadUser, d
         if transport not in ("http", ""):
             raise ApiError("AI_REQUEST_INVALID", "当前仅支持 HTTP 传输的 MCP 连接探测", 400)
         try:
-            listing = await _probe_mcp(request, dict(item.config or {}), item.secret_ref)
+            listing = await _probe_mcp(request, dict(item.config or {}), item.secret_ref, allow_private_network=_mcp_allow_private(item))
         except ApiError:
             raise
         except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
@@ -494,7 +543,7 @@ async def test_connector(connector_id: UUID, request: Request, user: ReadUser, d
             result["warning"] = "未配置 base_url，已跳过实际网络探测"
             result["auth_used"] = False
         else:
-            result["status"] = probe["verdict"]  # ready | auth_required
+            result["status"] = probe["verdict"]  # ready | auth_required | method_not_allowed
             result["endpoint"] = str((item.config or {}).get("base_url") or "")
             result["http_status"] = probe["http_status"]
             result["response_method"] = probe["method_used"]
@@ -502,9 +551,14 @@ async def test_connector(connector_id: UUID, request: Request, user: ReadUser, d
             result["server"] = probe.get("server") or ""
             result["content_type"] = probe.get("content_type") or ""
             result["proxy_bypassed"] = bool(probe.get("proxy_bypassed"))
-            result["partial"] = probe["verdict"] == "auth_required"
+            result["partial"] = probe["verdict"] != "ready"
             if probe["verdict"] == "auth_required":
                 result["warning"] = "远端可达，但鉴权被拒（401/403）"
+            elif probe["verdict"] == "method_not_allowed":
+                result["warning"] = (
+                    f"远端可达，但该地址不接受 HEAD/GET（{probe['http_status']}，常见于仅支持 POST 的接口）；"
+                    "请用已注册工具实际调用验证"
+                )
     finished = datetime.now(timezone.utc)
     result["latency_ms"] = int((finished - started).total_seconds() * 1000)
     result["checked_at"] = iso_utc(finished)
@@ -534,7 +588,7 @@ async def discover_connector(connector_id: UUID, request: Request, user: ReadUse
     from app.kernel.ports.connector import McpProtocolError, McpTransportError
 
     try:
-        listing = await _probe_mcp(request, dict(item.config or {}), item.secret_ref)
+        listing = await _probe_mcp(request, dict(item.config or {}), item.secret_ref, allow_private_network=_mcp_allow_private(item))
     except ApiError:
         raise
     except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:

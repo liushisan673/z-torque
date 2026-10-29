@@ -19,14 +19,7 @@ type BindPick = {
   tool: SelectableTool;
   tool_version_id: string;
   version_number: number;
-  role: string;
   note: string;
-};
-
-const BIND_ROLE_LABELS: Record<string, string> = {
-  prerequisite: "前置",
-  normal: "常规",
-  followup: "后续",
 };
 // 筛选维度对齐 skill.html 规范：全部 / MD-Skill / 纯指令 / 脚本 / 待确认启用
 type Filter = "all" | "md" | "instruction" | "script" | "pending";
@@ -648,7 +641,7 @@ export function SkillsPage() {
     if (!version) return;
     setSelectedBindings((prev) => [
       ...prev,
-      { tool, tool_version_id: version.tool_version_id, version_number: version.version_number, role: "normal", note: "" },
+      { tool, tool_version_id: version.tool_version_id, version_number: version.version_number, note: "" },
     ]);
   }
 
@@ -662,7 +655,7 @@ export function SkillsPage() {
     );
   }
 
-  function updatePick(toolId: string, patch: Partial<Pick<BindPick, "role" | "note">>) {
+  function updatePick(toolId: string, patch: Partial<Pick<BindPick, "note">>) {
     setSelectedBindings((prev) => prev.map((pick) => (pick.tool.tool_id === toolId ? { ...pick, ...patch } : pick)));
   }
 
@@ -675,7 +668,7 @@ export function SkillsPage() {
       for (const pick of selectedBindings) {
         await request(`/api/z-torque/skills-tools/skill-versions/${viewVersion.id}/tools`, {
           method: "POST",
-          body: { tool_version_id: pick.tool_version_id, role: pick.role, note: pick.note.trim() || undefined },
+          body: { tool_version_id: pick.tool_version_id, note: pick.note.trim() || undefined },
         });
       }
       const count = selectedBindings.length;
@@ -1100,6 +1093,14 @@ export function SkillsPage() {
                       </div>
                     )}
 
+                    {editing && (
+                      <div className="skill-section" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                        <button className="btn btn-secondary" disabled={busy} onClick={() => void saveVersion()}>保存草稿</button>
+                        <button className="btn btn-primary" disabled={busy} onClick={() => void saveAndPublish()}>发布</button>
+                        <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
+                      </div>
+                    )}
+
                     <div className="skill-section">
                       <h3>{detailIsMd ? "详情" : "技能配置"}</h3>
                       <div className="skill-form-grid">
@@ -1286,16 +1287,7 @@ export function SkillsPage() {
                         </div>
                       </div>
                     )}
-                    {editing ? (
-                      <div className="skill-section" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                        <button className="btn btn-secondary" disabled={busy} onClick={() => void saveVersion()}>保存草稿</button>
-                        <button className="btn btn-primary" disabled={busy} onClick={() => void saveAndPublish()}>发布</button>
-                        <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
-                      </div>
-                    ) : (
-                      <div className="skill-alert skill-alert-warning">
-                      </div>
-                    )}
+                    {!editing && <div className="skill-alert skill-alert-warning" />}
                   </div>
                     </section>
 
@@ -1384,7 +1376,7 @@ export function SkillsPage() {
                                           className="btn btn-ghost btn-sm"
                                           disabled={busy}
                                           onClick={() => void upgradeToolBinding(t)}
-                                          title="升级到最新发布版本（保留顺序/角色/备注）"
+                                          title="升级到最新发布版本（保留顺序与备注）"
                                         >
                                           升级
                                         </button>
@@ -1394,7 +1386,6 @@ export function SkillsPage() {
                                 </td>
                                 <td>
                                   <div className="skill-tool-note">
-                                    {t.role && <span className="skill-tag skill-tag-neutral">{BIND_ROLE_LABELS[t.role] ?? t.role}</span>}
                                     <span>{t.note || t.description || "—"}</span>
                                   </div>
                                 </td>
@@ -1759,7 +1750,7 @@ export function SkillsPage() {
                 </span>
               </div>
               {selectedBindings.length === 0 ? (
-                <div className="skill-readonly-banner">从左侧勾选工具；勾选后在此设置版本、执行角色与说明。</div>
+                <div className="skill-readonly-banner">从左侧勾选工具；勾选后在此设置版本与调用说明。</div>
               ) : (
                 selectedBindings.map((pick, index) => (
                   <div key={pick.tool.tool_id} className="skill-bind-pick-card">
@@ -1784,18 +1775,6 @@ export function SkillsPage() {
                         >
                           {pick.tool.published_versions.map((version) => (
                             <option key={version.tool_version_id} value={version.tool_version_id}>v{version.version_number}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <label>
-                        <span>角色</span>
-                        <select
-                          className="input"
-                          value={pick.role}
-                          onChange={(e) => updatePick(pick.tool.tool_id, { role: e.target.value })}
-                        >
-                          {Object.entries(BIND_ROLE_LABELS).map(([value, label]) => (
-                            <option key={value} value={value}>{label}</option>
                           ))}
                         </select>
                       </label>

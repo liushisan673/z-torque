@@ -25,7 +25,7 @@ MCP_PROTOCOL_VERSION = "2025-06-18"
 class StreamableHttpMcpConnector:
     protocol_version = MCP_PROTOCOL_VERSION
 
-    def __init__(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float = 30, max_response_bytes: int = 1_000_000, transport: httpx.AsyncBaseTransport | None = None, auth_token: str | None = None, extra_headers: dict[str, str] | None = None) -> None:
+    def __init__(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float = 30, max_response_bytes: int = 1_000_000, transport: httpx.AsyncBaseTransport | None = None, auth_token: str | None = None, extra_headers: dict[str, str] | None = None, allow_private_network: bool = False, proxy: str | None = None) -> None:
         self.endpoint = endpoint
         self.allowed_hosts = set(allowed_hosts)
         self.timeout_seconds = timeout_seconds
@@ -33,9 +33,26 @@ class StreamableHttpMcpConnector:
         self.auth_token = auth_token
         # 身份透传头（P2-5：SecurityContext 贯穿外部调用，X-ZT-User-Id 等，仅执行期）
         self.extra_headers = dict(extra_headers) if extra_headers else {}
+        # 连接器 target_policy 显式放行内网/明文目标（语义对齐 REST，配置者担责）
+        self.allow_private_network = allow_private_network
         self.session_id: str | None = None
         self._request_id = 0
-        self.client = httpx.AsyncClient(follow_redirects=False, timeout=timeout_seconds, transport=transport)
+        self.client = self._build_client(transport, proxy, timeout_seconds)
+
+    @staticmethod
+    def _build_client(transport: httpx.AsyncBaseTransport | None, proxy: str | None, timeout_seconds: float) -> httpx.AsyncClient:
+        """出站代理：连接器 config.proxy 三态——缺省=跟随全局（环境变量/PROXY_URL）；
+        ""=强制直连；URL=指定代理。与 REST 连接器语义一致。"""
+        kwargs: dict[str, Any] = {"follow_redirects": False, "timeout": timeout_seconds}
+        if transport is not None:
+            # 显式传输（测试注入）优先，不叠加代理
+            kwargs["transport"] = transport
+        elif proxy is not None and proxy.strip():
+            kwargs["proxy"] = proxy.strip()
+            kwargs["trust_env"] = False
+        elif proxy == "":
+            kwargs["trust_env"] = False
+        return httpx.AsyncClient(**kwargs)
 
     async def negotiate(self) -> None:
         result = await self._request("initialize", {"protocolVersion": self.protocol_version, "capabilities": {}, "clientInfo": {"name": "z-torque", "version": "0.1.0"}}, include_session=False)
@@ -70,12 +87,17 @@ class StreamableHttpMcpConnector:
 
     async def _send(self, payload: dict[str, Any], *, expect_response: bool, include_session: bool = True) -> dict[str, Any]:
         parsed = urlparse(self.endpoint)
-        # 回环地址允许 http（本地联调）；其余目标强制 https 且必须在 allowed_hosts 白名单内
+        # 回环地址允许 http（本地联调）；其余目标强制 https 且必须在 allowed_hosts 白名单内；
+        # 连接器 target_policy.allow_private_network 时放行白名单内目标的 http 明文形式（对齐 REST 语义）
         if parsed.hostname in _LOOPBACK_HOSTS:
             if parsed.scheme not in ("https", "http"):
                 raise McpTransportError("MCP endpoint is not allowed")
-        elif parsed.scheme != "https" or parsed.hostname not in self.allowed_hosts:
+        elif parsed.hostname not in self.allowed_hosts:
+            raise McpTransportError(f"MCP endpoint host '{parsed.hostname}' is not in the allowed hosts whitelist (MCP_ALLOWED_HOSTS)")
+        elif parsed.scheme not in ("https", "http"):
             raise McpTransportError("MCP endpoint is not allowed")
+        elif parsed.scheme == "http" and not self.allow_private_network:
+            raise McpTransportError("MCP endpoint must use https unless the connector enables 'allow_private_network' (允许访问)")
         headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json", "MCP-Protocol-Version": self.protocol_version}
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
@@ -114,9 +136,9 @@ class StreamableHttpMcpConnector:
         raise McpTransportError("MCP SSE response did not contain JSON-RPC data")
 
 
-def make_http_connector(endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, auth_token: str | None = None, extra_headers: dict[str, str] | None = None) -> StreamableHttpMcpConnector:
+def make_http_connector(endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, auth_token: str | None = None, extra_headers: dict[str, str] | None = None, allow_private_network: bool = False, proxy: str | None = None) -> StreamableHttpMcpConnector:
     """SkillGateway 经该工厂创建 HTTP 连接器（内核不感知实现类）。"""
-    return StreamableHttpMcpConnector(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, auth_token=auth_token, extra_headers=extra_headers)
+    return StreamableHttpMcpConnector(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, auth_token=auth_token, extra_headers=extra_headers, allow_private_network=allow_private_network, proxy=proxy)
 
 
 @dataclass(frozen=True)

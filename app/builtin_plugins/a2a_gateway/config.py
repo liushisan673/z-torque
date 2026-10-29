@@ -62,6 +62,8 @@ class A2AConfig:
     circuit_failure_threshold: int = 5
     circuit_cooldown_seconds: float = 30.0
     federation_enabled: bool = False
+    # 入站请求体上限；出站只有 max_response_bytes，入站没有闸门等于把内存交给调用方
+    max_request_bytes: int = 1_000_000
 
     @classmethod
     def from_settings(cls, settings: Any) -> "A2AConfig":
@@ -98,6 +100,7 @@ class A2AConfig:
             circuit_failure_threshold=int(getattr(settings, "a2a_circuit_failure_threshold", 5)),
             circuit_cooldown_seconds=float(getattr(settings, "a2a_circuit_cooldown_seconds", 30.0)),
             federation_enabled=bool(getattr(settings, "a2a_federation_enabled", False)),
+            max_request_bytes=int(getattr(settings, "a2a_max_request_bytes", 1_000_000)),
         )
 
     def peer(self, peer_id: str) -> PeerConfig | None:
@@ -118,6 +121,8 @@ class A2AConfig:
             raise ValueError("a2a_default_timeout_seconds must be positive")
         if self.max_response_bytes < 1024:
             raise ValueError("a2a_max_response_bytes must be >= 1024")
+        if self.max_request_bytes < 1024:
+            raise ValueError("a2a_max_request_bytes must be >= 1024")
         if self.circuit_failure_threshold < 1 or self.circuit_cooldown_seconds < 1:
             raise ValueError("a2a circuit breaker thresholds must be positive")
         # 白名单语义：声明了远端 peer 却不给白名单 = 默认全开，必须装配期失败

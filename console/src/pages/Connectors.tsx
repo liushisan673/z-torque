@@ -117,8 +117,9 @@ function configFields(type: string): CfgField[] {
   }
   if (type === "MCP") {
     return [
-      { key: "transport", label: "传输方式", kind: "select", options: ["HTTP", "stdio"] },
-      { key: "endpoint", label: "端点 / 命令", kind: "text", full: true, hint: "如 https://mcp.example.com/mcp；本地联调可用 http://127.0.0.1:8765/mcp" },
+      { key: "transport", label: "传输方式", kind: "select", options: ["HTTP", "stdio"], hint: "HTTP=远程 Streamable HTTP 端点；stdio=服务端白名单注册的本地进程" },
+      { key: "endpoint", label: "服务端点", kind: "text", full: true, hint: "如 https://mcp.example.com/mcp；本地联调可用 http://127.0.0.1:8765/mcp（仅 HTTP 传输）" },
+      { key: "server_name", label: "已注册服务名", kind: "text", hint: "服务端 StdioServerRegistry 预注册的名称（仅 stdio 传输，由管理员白名单配置）" },
       { key: "timeout_seconds", label: "超时（秒）", kind: "number" },
     ];
   }
@@ -130,6 +131,28 @@ function configFields(type: string): CfgField[] {
 }
 
 const AUTH_MODES = ["Bearer Token", "API Key Header", "Basic Auth", "匿名（需管理员允许）"];
+
+// 出站代理三态（与后端 config.proxy 约定一致）：缺省=跟随全局；""=直连；URL=指定代理
+type ProxyMode = "inherit" | "direct" | "custom";
+const PROXY_MODES: { value: ProxyMode; label: string }[] = [
+  { value: "inherit", label: "跟随全局（默认）" },
+  { value: "direct", label: "直连（不走代理）" },
+  { value: "custom", label: "指定代理地址" },
+];
+
+// 由 config.proxy 反推编辑态
+function proxyModeOf(config: Record<string, unknown>): { mode: ProxyMode; url: string } {
+  const raw = config["proxy"];
+  if (typeof raw !== "string") return { mode: "inherit", url: "" };
+  return { mode: raw ? "custom" : "direct", url: raw };
+}
+
+// 编辑态写回 config.proxy（删除键表示跟随全局）
+function applyProxyMode(config: Record<string, unknown>, mode: ProxyMode, url: string): void {
+  if (mode === "direct") config["proxy"] = "";
+  else if (mode === "custom" && url.trim()) config["proxy"] = url.trim();
+  else delete config["proxy"];
+}
 
 // 认证模式展示映射（存储值保持原始字符串，仅渲染点转中文）
 function authModeLabel(m: string): string {
@@ -153,6 +176,7 @@ function restTestHeadline(r: ConnectorTestResult): string {
     return "配置就绪（未发起网络请求）";
   }
   if (r.status === "auth_required") return "远端可达，鉴权被拒";
+  if (r.status === "method_not_allowed") return "远端可达，该地址不接受 HEAD/GET";
   if (r.status === "ready") return "连接就绪（已真实请求）";
   return `响应 ${r.http_status}`;
 }
@@ -198,6 +222,9 @@ export function ConnectorsPage() {
   const [editDesc, setEditDesc] = useState("");
   // 目标安全策略编辑态（REST）：回显连接器当前 target_policy.allow_private_network
   const [editAllowPrivate, setEditAllowPrivate] = useState(false);
+  // 出站代理编辑态（REST/MCP）：三态 + 自定义地址
+  const [editProxyMode, setEditProxyMode] = useState<ProxyMode>("inherit");
+  const [editProxyUrl, setEditProxyUrl] = useState("");
   const [editConfig, setEditConfig] = useState<Record<string, string>>({});
   // REST 凭据头编辑行（连接器级认证头：覆盖该连接器全部导入工具的同名头模板）
   const [authHeadersRows, setAuthHeadersRows] = useState<{ key: string; value: string }[]>([]);
@@ -229,9 +256,14 @@ export function ConnectorsPage() {
   const [createType, setCreateType] = useState("REST");
   const [createDesc, setCreateDesc] = useState("");
   const [createTarget, setCreateTarget] = useState("");
+  // MCP 二级选项：传输方式（HTTP=远程端点 / stdio=服务端注册的本地进程），按选择级联展示字段
+  const [createMcpTransport, setCreateMcpTransport] = useState("HTTP");
   const [createSecret, setCreateSecret] = useState("");
   // 目标安全策略（REST）：内网/明文 http 目标需显式放行（后端 fail-closed，未声明即拦截）
   const [createAllowPrivate, setCreateAllowPrivate] = useState(false);
+  // 出站代理（REST/MCP 新建）：三态 + 自定义地址
+  const [createProxyMode, setCreateProxyMode] = useState<ProxyMode>("inherit");
+  const [createProxyUrl, setCreateProxyUrl] = useState("");
   // 数据库连接向导字段（类型为 DB 时显示）
   const [createDriver, setCreateDriver] = useState("postgresql");
   const [createHost, setCreateHost] = useState("");
@@ -255,6 +287,7 @@ export function ConnectorsPage() {
   const [regDesc, setRegDesc] = useState("");
   const [regType, setRegType] = useState("HTTP");
   const [regExternal, setRegExternal] = useState("");
+  const [regMethod, setRegMethod] = useState("GET");
   const [regUrl, setRegUrl] = useState("");
   const [regHeaders, setRegHeaders] = useState("");
   const [regQuery, setRegQuery] = useState("");
@@ -396,6 +429,9 @@ export function ConnectorsPage() {
       setEditName(d.name);
       setEditDesc(d.description ?? "");
       setEditAllowPrivate(Boolean(d.target_policy?.allow_private_network));
+      const proxyState = proxyModeOf(d.config);
+      setEditProxyMode(proxyState.mode);
+      setEditProxyUrl(proxyState.url);
       setEditConfig(initEditConfig(d));
       setAuthHeadersRows(initAuthHeaders(d));
       setTableSelection(initTableSelection(d));
@@ -464,6 +500,10 @@ export function ConnectorsPage() {
       base["auth_mode"] = (editConfig["auth_mode"] ?? "").trim() || AUTH_MODES[0];
       base["auth_header"] = (editConfig["auth_header"] ?? "").trim() || "Authorization";
     }
+    if (detail.connector_type === "REST" || detail.connector_type === "MCP") {
+      // 出站代理：按连接器单独决定，保存即生效（执行期实时叠加，无需重新登记工具）
+      applyProxyMode(base, editProxyMode, editProxyUrl);
+    }
     if (detail.connector_type === "REST") {
       // 凭据头：空行剔除；掩码回显/新明文原样提交，由后端按语义处理（掩码保留旧值、明文自动加密）
       const headers: Record<string, string> = {};
@@ -494,7 +534,7 @@ export function ConnectorsPage() {
     return items.filter((c) => {
       if (filter !== "all" && c.connector_type !== filter) return false;
       if (!kw) return true;
-      const target = cfgStr(c.config, "base_url") || dbTarget(c) || cfgStr(c.config, "endpoint");
+      const target = cfgStr(c.config, "base_url") || dbTarget(c) || cfgStr(c.config, "endpoint") || cfgStr(c.config, "server_name");
       return (c.name + " " + (c.description ?? "") + " " + target).toLowerCase().includes(kw);
     });
   }, [items, filter, keyword]);
@@ -511,7 +551,7 @@ export function ConnectorsPage() {
           description: editDesc.trim() || null,
           config: buildConfig(),
           // 目标安全策略：连接器表独立字段（非 config 内），执行期实时叠加、保存即生效
-          ...(detail.connector_type === "REST" ? { target_policy: { allow_private_network: editAllowPrivate } } : {}),
+          ...(detail.connector_type === "REST" || detail.connector_type === "MCP" ? { target_policy: { allow_private_network: editAllowPrivate } } : {}),
         },
       });
       setDetail(d);
@@ -705,8 +745,16 @@ export function ConnectorsPage() {
         }
       }
       if (createType === "MCP") {
-        if (createTarget.trim()) config["endpoint"] = createTarget.trim();
-        config["transport"] = "HTTP";
+        // 二级选项级联：HTTP 写 endpoint（远程端点）；stdio 写 server_name（服务端注册名）
+        config["transport"] = createMcpTransport;
+        if (createTarget.trim()) {
+          if (createMcpTransport === "HTTP") config["endpoint"] = createTarget.trim();
+          else config["server_name"] = createTarget.trim();
+        }
+      }
+      if (createType === "REST" || createType === "MCP") {
+        // 出站代理三态：缺省不写（跟随全局），""=直连，URL=指定代理
+        applyProxyMode(config, createProxyMode, createProxyUrl);
       }
       const d = await request<Connector>(API, {
         method: "POST",
@@ -716,17 +764,22 @@ export function ConnectorsPage() {
           description: createDesc.trim() || null,
           config,
           secret_ref: createSecret.trim() || null,
-          // REST 内网/明文目标需显式放行（fail-closed）
-          ...(createType === "REST" ? { target_policy: { allow_private_network: createAllowPrivate } } : {}),
+          // REST/MCP(HTTP) 内网/明文目标需显式放行（fail-closed）；stdio 无网络端点不适用
+          ...(createType === "REST" || (createType === "MCP" && createMcpTransport === "HTTP")
+            ? { target_policy: { allow_private_network: createAllowPrivate } }
+            : {}),
         },
       });
       setCreateOpen(false);
       setCreateName("");
       setCreateType("REST");
+      setCreateMcpTransport("HTTP");
       setCreateDesc("");
       setCreateTarget("");
       setCreateSecret("");
       setCreateAllowPrivate(false);
+      setCreateProxyMode("inherit");
+      setCreateProxyUrl("");
       setCreateHost("");
       setCreatePort("5432");
       setCreateDbName("");
@@ -840,7 +893,7 @@ export function ConnectorsPage() {
         if (headers === null) return;
         const queryParams = parseJson(regQuery, "查询参数");
         if (queryParams === null) return;
-        config = { method: "GET", url: regUrl.trim(), headers, queryParams };
+        config = { method: regMethod, url: regUrl.trim(), headers, queryParams };
       }
       if (regSchema.trim()) {
         const parsed = parseJson(regSchema, "输入参数 Schema");
@@ -864,6 +917,7 @@ export function ConnectorsPage() {
       setRegDesc("");
       setRegType("HTTP");
       setRegExternal("");
+      setRegMethod("GET");
       setRegUrl("");
       setRegHeaders("");
       setRegQuery("");
@@ -895,6 +949,7 @@ export function ConnectorsPage() {
       setRegName(tool.name ?? tool.external_name ?? tool.id);
       setRegDesc(tool.description ?? "");
       setRegExternal(String(cfg.external_name ?? tool.external_name ?? ""));
+      setRegMethod(String(cfg.method ?? "GET").toUpperCase());
       setRegUrl(String(cfg.url ?? ""));
       setRegHeaders(cfg.headers ? JSON.stringify(cfg.headers) : "");
       setRegQuery(cfg.queryParams ? JSON.stringify(cfg.queryParams) : "");
@@ -1099,6 +1154,17 @@ export function ConnectorsPage() {
   const enabled = selected?.status === "ENABLED";
   const typeLabel = selected ? typeInfo(selected.connector_type).label : "—";
   const fields = selected ? configFields(selected.connector_type) : [];
+  // MCP 二级级联：按当前传输方式过滤字段（HTTP 显示端点，stdio 显示注册服务名，超时恒显）
+  const mcpTransport = selected?.connector_type === "MCP"
+    ? String(editConfig["transport"] || cfgStr(selected.config, "transport") || "HTTP")
+    : "";
+  const mcpFields = selected?.connector_type === "MCP"
+    ? fields.filter((f) => {
+        if (f.key === "endpoint") return mcpTransport === "HTTP";
+        if (f.key === "server_name") return mcpTransport === "stdio";
+        return true;
+      })
+    : fields;
   const editingFields = editing && canManage;
 
   // 编辑 / 保存操作条（编辑态出现在概览与配置 Tab）
@@ -1247,7 +1313,7 @@ export function ConnectorsPage() {
                         归档
                       </button>
                     )}
-                    {canManage && selected.status === "ARCHIVED" && (
+                    {canManage && !enabled && (
                       <button
                         className="skill-btn-danger-outline"
                         disabled={busy}
@@ -1498,6 +1564,24 @@ export function ConnectorsPage() {
                               <span>允许访问</span>
                             </label>
                           </div>
+                          <div className="connector-field full">
+                            <label>出站代理</label>
+                            <select value={editProxyMode} disabled={!editingFields} onChange={(e) => setEditProxyMode(e.target.value as ProxyMode)}>
+                              {PROXY_MODES.map((m) => (
+                                <option key={m.value} value={m.value}>{m.label}</option>
+                              ))}
+                            </select>
+                            {editProxyMode === "custom" && (
+                              <input
+                                type="text"
+                                value={editProxyUrl}
+                                disabled={!editingFields}
+                                placeholder="http://127.0.0.1:7897"
+                                onChange={(e) => setEditProxyUrl(e.target.value)}
+                              />
+                            )}
+                            <div className="help">按连接器单独决定：境内服务选「直连」，境外服务选「指定代理」；「跟随全局」沿用 PROXY_URL / 系统环境代理。保存即生效，无需重新登记工具</div>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -1529,7 +1613,7 @@ export function ConnectorsPage() {
                       <div className="connector-section">
                         <h3>MCP 传输 <span className="hint">JSON-RPC 2.0 · tools/list · tools/call</span></h3>
                         <div className="connector-form-grid">
-                          {fields.map((f) => (
+                          {mcpFields.map((f) => (
                             <div key={f.key} className={`connector-field${f.full ? " full" : ""}`}>
                               <label>{f.label}</label>
                               {f.kind === "select" ? (
@@ -1552,6 +1636,36 @@ export function ConnectorsPage() {
                               {f.hint && <div className="help">{f.hint}</div>}
                             </div>
                           ))}
+                          {mcpTransport !== "stdio" && (
+                          <div className="connector-field full">
+                            <label>目标安全策略</label>
+                            <label className="connector-check">
+                              <input type="checkbox" checked={editAllowPrivate} disabled={!editingFields} onChange={(e) => setEditAllowPrivate(e.target.checked)} />
+                              <span>允许访问</span>
+                            </label>
+                            <div className="help">勾选后放行该 MCP 端点的 http 明文形式（域名仍需在服务端 MCP_ALLOWED_HOSTS 白名单内）；默认仅允许 https。保存即生效，无需重新登记工具</div>
+                          </div>
+                          )}
+                          {mcpTransport !== "stdio" && (
+                          <div className="connector-field full">
+                            <label>出站代理</label>
+                            <select value={editProxyMode} disabled={!editingFields} onChange={(e) => setEditProxyMode(e.target.value as ProxyMode)}>
+                              {PROXY_MODES.map((m) => (
+                                <option key={m.value} value={m.value}>{m.label}</option>
+                              ))}
+                            </select>
+                            {editProxyMode === "custom" && (
+                              <input
+                                type="text"
+                                value={editProxyUrl}
+                                disabled={!editingFields}
+                                placeholder="http://127.0.0.1:7897"
+                                onChange={(e) => setEditProxyUrl(e.target.value)}
+                              />
+                            )}
+                            <div className="help">按连接器单独决定：境内 MCP 选「直连」，境外 MCP 选「指定代理」；「跟随全局」沿用 PROXY_URL / 系统环境代理。保存即生效，无需重新登记工具</div>
+                          </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -1830,7 +1944,14 @@ export function ConnectorsPage() {
                                             <button
                                               className="btn btn-secondary btn-sm"
                                               disabled={busy}
-                                              onClick={() => { setRegType("MCP"); setRegName(t.name); setRegExternal(t.name); setRegDesc(t.description); setRegOpen(true); }}
+                                              onClick={() => {
+                                                setRegType("MCP");
+                                                setRegName(t.name);
+                                                setRegExternal(t.name);
+                                                setRegDesc(t.description);
+                                                setRegSchema(t.input_schema && Object.keys(t.input_schema).length > 0 ? JSON.stringify(t.input_schema, null, 2) : "");
+                                                setRegOpen(true);
+                                              }}
                                             >
                                               登记为工具
                                             </button>
@@ -1874,25 +1995,61 @@ export function ConnectorsPage() {
         </div>
         <div className="form-field">
           <label>类型</label>
-          <select className="select" value={createType} onChange={(e) => { setCreateType(e.target.value); setCreateTarget(""); }}>
+          <select className="select" value={createType} onChange={(e) => { setCreateType(e.target.value); setCreateMcpTransport("HTTP"); setCreateTarget(""); }}>
             <option value="REST">REST API</option>
             <option value="DB">只读数据库</option>
             <option value="MCP">MCP 服务</option>
           </select>
         </div>
-        {createType !== "DB" && (
+        {createType === "MCP" && (
           <div className="form-field">
-            <label>{createType === "REST" ? "Base URL" : "MCP 端点"}</label>
+            <label>传输方式</label>
+            <select className="select" value={createMcpTransport} onChange={(e) => { setCreateMcpTransport(e.target.value); setCreateTarget(""); }}>
+              <option value="HTTP">HTTP（远程 Streamable HTTP 端点）</option>
+              <option value="stdio">stdio（服务端注册的本地进程）</option>
+            </select>
+            <span className="hint">
+              {createMcpTransport === "HTTP"
+                ? "适用于远程 MCP 服务，通过 URL 访问；支持测试连接与工具发现"
+                : "适用于服务端本机进程（由管理员在白名单预注册）；测试连接与工具发现暂不支持，注册工具后可实际调用验证"}
+            </span>
+          </div>
+        )}
+        {createType !== "DB" && (createType !== "MCP" || createMcpTransport === "HTTP") && (
+          <div className="form-field">
+            <label>{createType === "REST" ? "Base URL" : "MCP 服务端点"}</label>
             <input className="input" value={createTarget} onChange={(e) => setCreateTarget(e.target.value)} placeholder={createType === "REST" ? "https://crm.example.com/api/v2" : "https://mcp.example.com/rpc"} />
           </div>
         )}
-        {createType === "REST" && (
+        {createType === "MCP" && createMcpTransport === "stdio" && (
+          <div className="form-field">
+            <label>已注册服务名</label>
+            <input className="input" value={createTarget} onChange={(e) => setCreateTarget(e.target.value)} placeholder="例如：filesystem（需与服务端注册名一致）" />
+            <span className="hint">stdio 进程由管理员在服务端 StdioServerRegistry 白名单预置（可执行文件/参数/环境变量），此处仅填注册名</span>
+          </div>
+        )}
+        {(createType === "REST" || (createType === "MCP" && createMcpTransport === "HTTP")) && (
           <div className="form-field">
             <label>目标安全策略</label>
             <label className="connector-check">
               <input type="checkbox" checked={createAllowPrivate} onChange={(e) => setCreateAllowPrivate(e.target.checked)} />
               <span>允许访问</span>
             </label>
+            <span className="hint">{createType === "MCP" ? "勾选后放行该 MCP 端点的 http 明文形式（域名仍需在服务端 MCP_ALLOWED_HOSTS 白名单内）；默认仅允许 https" : "勾选后允许访问内网/明文目标（由配置者担责）"}</span>
+          </div>
+        )}
+        {(createType === "REST" || (createType === "MCP" && createMcpTransport === "HTTP")) && (
+          <div className="form-field">
+            <label>出站代理</label>
+            <select className="select" value={createProxyMode} onChange={(e) => setCreateProxyMode(e.target.value as ProxyMode)}>
+              {PROXY_MODES.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+            {createProxyMode === "custom" && (
+              <input className="input" value={createProxyUrl} onChange={(e) => setCreateProxyUrl(e.target.value)} placeholder="http://127.0.0.1:7897" />
+            )}
+            <span className="hint">境内服务选「直连」，境外服务选「指定代理」；「跟随全局」沿用 PROXY_URL / 系统环境代理</span>
           </div>
         )}
         {createType === "DB" && (
@@ -2080,12 +2237,27 @@ export function ConnectorsPage() {
             <span className="hint">选中后自动填入外部名、说明与参数 Schema（均可修改）——参数定义完整时模型才能自动传参</span>
           </div>
         )}
+        {regType === "MCP" && (
+          <div className="form-field">
+            <label>输入参数 Schema（JSON，可选）</label>
+            <textarea className="textarea" rows={6} value={regSchema} onChange={(e) => setRegSchema(e.target.value)} placeholder='{"type": "object", "properties": {"begin_time": {"type": "string", "description": "开始时间"}}, "required": ["begin_time"]}' />
+            <span className="hint">会原样作为模型可见的 function parameters；为空时模型不知道要传什么参数，远端必填参数会被漏掉。建议通过发现列表「登记为工具」或上方快速填充带入服务端真实 Schema</span>
+          </div>
+        )}
         {regType === "HTTP" && (
           <>
             <div className="form-field">
+              <label>请求方法</label>
+              <select className="select" value={regMethod} onChange={(e) => setRegMethod(e.target.value)}>
+                {regMethod !== "GET" && regMethod !== "POST" && <option value={regMethod}>{regMethod}</option>}
+                <option value="GET">GET</option>
+                <option value="POST">POST</option>
+              </select>
+              <div className="field-help">仅 GET / POST 可登记；POST 的 JSON 请求体需放进输入 Schema 的 {"__body__"} 对象（例如博查 /v1/web-search）。</div>
+            </div>
+            <div className="form-field">
               <label>请求 URL</label>
               <input className="input" value={regUrl} onChange={(e) => setRegUrl(e.target.value)} placeholder="https://api.example.com/v1/resource" />
-              <div className="field-help">当前仅支持 GET 请求；POST/PUT 等写接口暂不支持登记。</div>
             </div>
             <div className="form-field">
               <label>请求头（JSON，可选）</label>

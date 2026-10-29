@@ -27,6 +27,7 @@
 > - **v1.3.4（2026-10-26）——登记能力语义变更**：未注入 `sandbox.driver` 时 `MdSkillRuntime` 由「内核默认实现」改为拒绝执行 `AI_CAPABILITY_UNAVAILABLE`(503)，在 §十 变更与兼容表中注明属**升级收紧**（对齐《内核契约 v1》§3 optional 缺失语义），非能力回退。
 > - **v1.3.8（2026-10-26）——Port 协议与 ORM 解耦（标准插件遗留一期）**：`app/kernel/ports/{identity_provider,memory_short,approval_provider}.py` 的模型 import 移入 `TYPE_CHECKING`，import Port 协议不再连带拉起 `app.models`，单插件「零内核依赖」收口；新增子进程探针机器断言，见 §12.7。
 > - **v1.4（2026-10-26）——M4 收口：sidecar 容器隔离 + A2A 联邦身份**：`sandbox.driver` 新增 docker CLI 容器实现（`sandbox_isolation_mode=container`，同 Port 同契约、社区默认 process 零变化）；A2A 联邦入站方案 B（对端 service account 共享密钥）+ 出站 per-peer mTLS；入站真 mTLS 如实登记为部署层职责，见 §4.10 / §6.5 / §12.4 / §12.5。
+> - **v1.3.9（2026-10-28）——三插件行为缺陷修复**：组件级熔断阈值真正生效、A2A 入站请求体闸门（`A2A_MAX_REQUEST_BYTES`）与上游 trace 继承、认证与 mTLS/审计/DB 下沉线程、沙箱输出「到顶即杀」与 Windows proactor 终止修复、归档幂等/互斥/陈旧回收用例化；新增 `AI_AUDIT_ARCHIVE_BUSY`(409) 并订正两处默认状态码，见 §8 / §12.4 / §12.5 / §13.6。
 
 ---
 
@@ -886,6 +887,7 @@ def _available_features(registry, plugins: tuple[str, ...] = ()) -> list[str]:
 | `AI_AUDIT_EXPORT_TOO_LARGE` | 413 | audit | 超出 `export_max_rows` |
 | `AI_AUDIT_EXPORT_FAILED` | 500 | audit | Job 内部失败（分片写失败、恢复时超龄） |
 | `AI_AUDIT_ARCHIVE_FAILED` | 502 | audit | 归档写入 `object.store` 失败（含密钥引用解不开 / 上一把密钥引用非法） |
+| `AI_AUDIT_ARCHIVE_BUSY` | 409 | audit | 同租户已有 `PENDING`/`RUNNING` 批次（在途互斥）；与写入失败 502 严格区分 |
 | `AI_AUDIT_ARCHIVE_KEY_MISSING` | 502 | audit | 归档对象只能被已下线（retire）的密钥解开，或当前 + 上一把都解不开；**不得静默跳过** |
 | `AI_A2A_DISABLED` | 503 | a2a | 未启用 |
 | `AI_A2A_DENIED` | 403 | a2a | 身份/权限拒绝、深度头非法 |
@@ -1076,6 +1078,8 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 | `test_v13_a2a_api.py` | 5 | 未装配 503、入站鉴权拒绝（不写无法归属的审计行）、缺权限留痕、404、发现不外泄 |
 | `test_v13_permission_seed.py` | 7 | 种子幂等、存量库补授权、user 角色不含高危权限 |
 
+**2026-10-28 复测刷新**（v1.3.9 修复后重新收集，口径为"当前文件用例数"，含 v1.4 联邦/容器追加项）：全集 **543** 项；`test_audit_reader.py` 10、`test_audit_export_archive.py` 29、`test_a2a_gateway.py` 51、`test_sandbox_hardening.py` 14、`test_v13_audit_export_api.py` 5、`test_v13_a2a_api.py` 7、`test_v13_permission_seed.py` 7。实测：`tests/unit` **423 passed / 10 skipped**，`tests/integration` **96 passed / 14 skipped**（skip 均为平台相关：POSIX rlimit / killpg / Windows fail-closed / 无 docker / live 联调开关）。上表 2026-10-23 的旧计数仅作历史留存。
+
 **三方言结果**：
 
 | 环境 | 结果 | 说明 |
@@ -1095,7 +1099,8 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 | `SANDBOX_RLIMIT_ENABLED` | `true` | POSIX rlimit（CPU/FSIZE/NPROC） | Windows 无此语义，能力位如实为 false |
 | `SANDBOX_MAX_PROCESSES` | `64` | `RLIMIT_NPROC` | |
 | `SANDBOX_MAX_FILE_BYTES` | `16 MiB` | `RLIMIT_FSIZE` | 命中判定见 §12.5 第 1 条 |
-| `AUDIT_EXPORT_DIR` | `./data/audit-exports` | 导出件落盘根 | 需与 `AUDIT_ARCHIVE_DIR` 分离 |
+| ~~`AUDIT_EXPORT_DIR`~~ | 已移除 | — | 该配置**从未被消费**；对象键由 `object.store` 在自己的根目录下按前缀布局，不单独配落盘根 |
+| `AUDIT_EXPORT_MAX_OBJECT_BYTES` | `512 MiB` | 单对象（分片/manifest）写入上限 | 存储侧兜底；分片远小于该值，超限按写失败重试后判 `AI_AUDIT_EXPORT_FAILED` |
 | `AUDIT_EXPORT_MAX_ROWS` | `100000` | 单任务行上限 | 超限 `AI_AUDIT_EXPORT_TOO_LARGE`，**不产截断件** |
 | `AUDIT_EXPORT_CHUNK_ROWS` | `1000` | 分片行数 | 必须 ≤ `MAX_ROWS` |
 | `AUDIT_EXPORT_MAX_CONCURRENCY` | `1` | 导出线程池大小 | 多副本下可 >1：执行权由行级租约仲裁，见 §5.9 |
@@ -1108,18 +1113,23 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 | `AUDIT_EXPORT_REDACTION_PROFILE` | `standard` | 脱敏档位 | `strict` 时主体 id 走 HMAC |
 | `AUDIT_EXPORT_REDACTION_KEY` | 空 | HMAC 密钥 | `strict` 档必填，否则启动校验失败 |
 | `AUDIT_EXPORT_HOT_RETENTION_DAYS` | `90` | 热区保留天数 | 清理只删对象与分片，任务行保留 |
-| `AUDIT_ARCHIVE_DIR` / `AUDIT_ARCHIVE_PREFIX` | `./data/audit-archive` / `audit-archive` | 归档落盘 | |
+| `AUDIT_EXPORT_PURGE_INTERVAL_SECONDS` | `3600` | 热区过期清理定时器周期 | `<=0` 关闭定时器（仅保留手动清理）；随服务启停在 `maintenance` 中拉起/取消 |
+| `AUDIT_EXPORT_PURGE_BATCH_LIMIT` | `100` | 单轮到期待清理任务上限 | 必须 ≥1；未清完的留在下一轮，单轮不无限占用连接 |
+| ~~`AUDIT_ARCHIVE_DIR`~~ / `AUDIT_ARCHIVE_PREFIX` | 已移除 / `audit-archive` | 归档对象前缀 | 落盘根同 `AUDIT_EXPORT_DIR`：随 `object.store` 根目录，不单独配置 |
 | `AUDIT_ARCHIVE_ENCRYPTION_ENABLED` | `false` | AES-256-GCM 归档 | 开启必须给 `AUDIT_ARCHIVE_SECRET_REF` |
 | `AUDIT_ARCHIVE_SECRET_REF` | 空 | 当前密钥密文引用 | 明文密钥不得进配置；新写入恒用这把 |
 | `AUDIT_ARCHIVE_PREVIOUS_SECRET_REF` | 空 | 上一把密钥密文引用（**只读**） | 轮换过渡期用；须与当前引用不同，且仅在加密开启时允许 |
 | `AUDIT_ARCHIVE_SCHEDULE_HOURS` | `24` | 归档窗口 | 必须 > 0 |
 | `A2A_ENABLED` | `false` | 入站/出站总开关 | 关闭时路由 503，不暴露内部实现 |
+| `A2A_LOCAL_DISCOVERY` | `true` | 本地发现接口开关 | 关闭时 `/a2a/discovery` 返回 `AI_A2A_DISABLED` 503；出站调用不受影响 |
+| `A2A_DEFAULT_TIMEOUT_SECONDS` | `120` | 出站调用默认超时 | peer 自带 `timeout_seconds` 时以 peer 为准 |
 | `A2A_ALLOWED_PEERS` | 空 | 出站白名单 | 空 = 全部拒绝；`REMOTE_PEERS` 非空而此为空 → 装配失败 |
 | `A2A_REMOTE_PEERS` | `[]` | peer JSON 数组 | `base_url` 必须 https（回环可 http） |
 | `A2A_MAX_DEPTH` / `A2A_MAX_FANOUT` | `2` / `5` | 委派深度 / 扇出 | 越界直接拒绝并留痕 |
 | `A2A_IDENTITY_PROPAGATION` | `user_id_header` | 出站身份传播方式 | `none` / `user_id_header` / `full_context_token` |
-| `A2A_MAX_RESPONSE_BYTES` | `1 MB` | 入站响应上限 | 超限按失败计，参与熔断 |
-| `A2A_CIRCUIT_FAILURE_THRESHOLD` / `A2A_CIRCUIT_COOLDOWN_SECONDS` | `5` / `30` | 熔断阈值与冷却 | |
+| `A2A_MAX_RESPONSE_BYTES` | `1 MB` | **出站**响应体上限 | 边读边计数，超限立即中断（不截断后解析），按对端失败计并参与熔断 |
+| `A2A_MAX_REQUEST_BYTES` | `1 MB` | **入站**请求体上限（≥1024） | 路由层在认证**之前**边读边计数，超限 `AI_A2A_DENIED` 403，且不落无法归属的审计行 |
+| `A2A_CIRCUIT_FAILURE_THRESHOLD` / `A2A_CIRCUIT_COOLDOWN_SECONDS` | `5` / `30` | 熔断阈值与冷却 | 作为**全局默认值**；插件 `config_schema` 同名项可覆盖，覆盖后按 per-peer 熔断键实际生效 |
 | `A2A_FEDERATION_ENABLED` | `false` | 联邦入站总开关（v1.4） | 开启后 `inbound_federation` peer 可用共享密钥入站；开启却零主体 → 装配失败 |
 | `SANDBOX_ISOLATION_MODE` | `process` | 沙箱隔离形态（v1.4） | `process`（默认）/ `container`；Windows 选 container → 装配失败 |
 | `SANDBOX_CONTAINER_IMAGE` | `python:3.11-slim` | 容器模式镜像 | 需预拉取；运行期不自动 pull |
@@ -1137,6 +1147,10 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 7. **`process.spawn` 不构成安全边界**：该权限码只在 `sandbox_driver` manifest 里**登记**，内核没有 spawn 拦截点（插件用 `asyncio.create_subprocess_exec` 自建子进程），因此它既不限制子进程数量，也不阻止插件以任意参数起进程。真正的能力边界由 `sandbox_driver/process.py` 自身实现保证（cwd 白名单 / `-I` / 最小 env / rlimit / `killpg` / 输出上限 / fail-closed）；**验收与对外文案不得以「已拦截」表述**，只能说「已登记 + 插件内自证实现」。真正的运行时强制点要等企业 sidecar / M0-4。
 8. **A2A 无「技能名 → 版本」解析**：`params.skill` 只是名字，插件 DB 边界不允许按名查库，因此跨实例调用必须显式传 `skill_version_id`（§6.6 出站载荷语义）；只传名字的 `route=remote` 由对端自行路由，两个本实例之间不存在这条路径。
 9. **入站真 mTLS 不在应用层（v1.4 如实登记）**：uvicorn 不向 ASGI 应用暴露对端证书，应用内无法校验客户端证书——入站 mTLS 由部署层（反向代理/Caddy/nginx）终止后转发，应用层联邦身份只有方案 B（共享密钥 service account）。出站方向已支持 per-peer mTLS（§6.6）。联邦主体的 `user_id` 恒为 `None`（不是本地用户，合成 UUID 会撞审计 actor 外键），归属走审计 `detail`；其技能级 `required_permissions` 一律 default-deny， federation 主体默认无本地授权。容器沙箱 live 冒烟（`ZTORQUE_SANDBOX_CONTAINER_LIVE=1`）只在「有 docker 守护进程的 POSIX 主机」可跑；CI 与 zt-test 容器内无 docker，不默认执行。
+10. **热区清理是「定时器 + 有界批量」，不是全量扫**：`AUDIT_EXPORT_PURGE_INTERVAL_SECONDS` 周期触发，每轮最多处理 `AUDIT_EXPORT_PURGE_BATCH_LIMIT` 条到期任务；设为 `<=0` 只关闭定时器，手动清理入口仍在。清理只删对象与分片，**任务行保留**（审计可追溯），因此「行数不减」不等于「清理没跑」。多副本各跑各的定时器，删除动作按对象键幂等。
+11. **归档窗口语义（幂等 / 互斥 / 陈旧回收）**：定时窗口对齐 UTC 天边界，同窗口已有 `SUCCEEDED` 批次直接复用，多副本不会产出重复冷副本；同租户已有 `PENDING`/`RUNNING` 批次时新请求以 `AI_AUDIT_ARCHIVE_BUSY`（409）拒绝，单进程内再用触发锁串行化定时与手动入口；超过半个调度周期仍未终态的批次视为中断（进程被 kill 等），落 `FAILED`（`AI_AUDIT_ARCHIVE_FAILED`）后放行新批次——因此**看到 FAILED 批次不等于实现有 bug**，先看 `error_message` 是否为 `archive batch interrupted before completion`。
+12. **Windows 子进程终止以「读端 EOF」为完成信号（proactor 缺陷规避）**：`asyncio` 在 Windows proactor 下，子进程被 kill 且 stdout/stderr 管道内仍有未读数据时，`process.wait()` 可能永不唤醒（`returncode` 已有值仍挂住）。实现改为：终止进程树后对两条流 `feed_eof()`，主流程只 `gather` 两个 drain 任务，`process.wait()` 仅在有界超时内做收尾（并 `shield` 等待）。**后续改动不得把 `process.wait()` 重新塞回 `gather`**，否则「无限输出」场景会退化为整体超时（曾实测 0.1s 变成 25s）。
+13. **输出上限是「到顶即杀」而非「读完全量再拒绝」**：drain 任务边读边累计，超过 `max_output_bytes` 立刻置位并终止进程树，随后统一抛 `AI_SKILL_FAILED`（500）。不会把无界输出缓冲进内存（旧实现存在 OOM 风险）。rlimit 命中（`RLIMIT_FSIZE`/`RLIMIT_NPROC` 等）仍单独归为 `AI_SANDBOX_RESOURCE_EXCEEDED`（429），两者不得混用。
 
 ### 12.6 维护说明
 
@@ -1309,7 +1323,29 @@ $env:ZTORQUE_A2A_LIVE="1"; python -m pytest tests/integration/test_a2a_live_peer
 
 **缺陷 2（出站载荷把路由信息当成执行指令）**：`params.peer` 是**发送方命名空间**里的 id，原样转发会让对端拿它去查自己的 peer 表 → 要么 503，要么打错人；两个本实例之间根本调不通。修法：出站载荷描述「对端要做什么」——调用方钉了 `skill_version_id` 就改写 `route=local`，对端经 `skill.executor` 直接执行（`peer` 降级为观测字段）；只给 `skill` 名时保持 `route=remote` 原样转发。语义写进 §6.6，残留限制写进 §12.5 第 8 条。
 
-**熔断用例单独起实例**：熔断是**进程内状态**，与主实例共用会让失败计数互相污染、再靠用例顺序"消灾"就是假通过；因此该用例用独立实例 + `PLUGIN_BREAKER_FAILURE_THRESHOLD=2` 断言「连续两次 5xx → 第三次 `AI_PLUGIN_CIRCUIT_OPEN`」。顺带确认：A2A 自己的 `circuit_failure_threshold` 目前只做装配期校验，实际阈值来自内核 `plugin_breaker_*`。
+**熔断用例单独起实例**：熔断是**进程内状态**，与主实例共用会让失败计数互相污染、再靠用例顺序"消灾"就是假通过；因此该用例用独立实例 + `PLUGIN_BREAKER_FAILURE_THRESHOLD=2` 断言「连续两次 5xx → 第三次 `AI_PLUGIN_CIRCUIT_OPEN`」。~~A2A 自己的 `circuit_failure_threshold` 只做装配期校验，实际阈值来自内核 `plugin_breaker_*`~~ → **已于 v1.3.9 修复**：`plugin_guard.check/record` 支持按组件覆盖阈值/冷却，A2A per-peer 熔断键改用插件配置（`test_a2a_gateway.py::test_peer_breaker_uses_plugin_config_not_global_default`）。
+
+### 13.6 v1.3.9：三插件行为缺陷修复（2026-10-28）
+
+**触发点**：对 `app/builtin_plugins` 下三个插件做实现体检，确认了「声明有、行为无」与「配置只校验不生效」两类问题。逐条如下（均有用例锁定）：
+
+| # | 插件 | 缺陷 | 影响 | 修复 |
+|---|------|------|------|------|
+| 1 | a2a | per-peer 熔断只读全局 `PLUGIN_BREAKER_*`，插件 `circuit_failure_threshold` / `circuit_cooldown_seconds` **只校验不生效** | 改 env 不改变行为，运维以为已调 | `plugin_guard.check/record` 增加 `failure_threshold` / `cooldown_seconds` 覆盖参数（就地更新已有 breaker），A2A 传入插件配置 |
+| 2 | a2a | 入站请求体**没有任何体积闸门**（出站有 `max_response_bytes`） | 内存占用交给调用方 | 路由层 `request.stream()` 边读边计数，超 `A2A_MAX_REQUEST_BYTES` 抛 `AI_A2A_DENIED` 403；认证前拒绝，不留无法归属的审计行 |
+| 3 | a2a | 入站丢弃上游 `x-a2a-trace`，每跳重新生成 trace | 跨实例调用链断裂，无法追一整条 | 合法 trace（`^[A-Za-z0-9._:-]{1,128}$`）优先沿用，否则回退 `trace_id_from(request)` |
+| 4 | a2a | `invoke_many` 每个子项都重新认证（1+N 次） | 联邦/DB 认证被放大 N 倍 | 拆出 `_authenticate()` 与 `_run()`，`invoke_many` 只认证一次；认证本身 `to_thread`，不压事件循环 |
+| 5 | a2a | 同步 mTLS 证书落盘 + `SSLContext` 构建、同步审计写、同步 DB 查询压在事件循环上 | 单请求阻塞整个 loop | 统一 `await asyncio.to_thread(...)` |
+| 6 | a2a | 注入 client 分支未拒绝已跟随的重定向 | body / Bearer 可能被带到未白名单主机 | `response.history` 非空即 `AI_A2A_PEER_UNAVAILABLE` 503 |
+| 7 | a2a | `modules.py` 的 `requires_ports` 缺 `secret.provider` / `observability.sink` | 与 manifest `requires` 不一致，装配契约说谎 | 对齐 manifest |
+| 8 | sandbox | 输出上限采用「全量缓冲后拒绝」 | 无界输出可把进程内存打满（OOM） | drain 任务边读边累计，到顶即置位并终止进程树，抛 `AI_SKILL_FAILED` 500 |
+| 9 | sandbox | Windows proactor 下 kill 后 `process.wait()` 不唤醒（管道有未读数据） | 「无限输出」退化为整体超时（实测 25s 而非 0.1s） | 终止后对两条流 `feed_eof()`，`wait()` 移出 `gather` 并做有界收尾，见 §12.5 第 12 条 |
+| 10 | sandbox | 配额判定口径过宽：裸 `SIGKILL`（外部 kill / OOM killer）可能被当成 rlimit 命中 | 调用方拿到错误的 `AI_SANDBOX_RESOURCE_EXCEEDED`，掩盖真实故障 | 判定前提为 rlimit 已开启；仅 `SIGXCPU(-24)`/`SIGXFSZ(-25)`，或 `-9` 且 stderr 含内核 errno 文案才算配额，其余 `AI_SKILL_FAILED` 500；用例 `test_sigkill_without_rlimit_is_not_reported_as_quota` 锁死 |
+| 11 | audit | 热区清理定时器缺少启停契约与批量上限的可验证行为 | 关停后定时器泄漏 / 单轮扫全表 | 新增用例锁定：启停与取消、`<=0` 关闭、单轮 `purge_batch_limit` 上限 |
+| 12 | audit | 归档窗口幂等 / 在途互斥 / 陈旧批次回收无用例 | 多副本可能产出重复冷副本或永久卡在 `RUNNING` | 新增用例：同窗口复用 `SUCCEEDED`、在途 409 `AI_AUDIT_ARCHIVE_BUSY`、超半周期落 `FAILED` 后放行 |
+| 13 | 契约 | `AI_AUDIT_ARCHIVE_BUSY` 已在实现里抛出，但**未登记** `PLUGIN_ERROR_CODES`；`AI_SKILL_FAILED` / `AI_AUDIT_EXPORT_FAILED` 的默认状态码写成 502 与 §8 表（500）不符 | 前端映射拿不到码 / 默认状态语义错位 | 登记新码（409），两处默认值改 500，§8 表同步 |
+
+**未在本批处理的已知项**（如实登记，不假装已修）：容器模式超时后未 `docker kill`（未用 `--cidfile`）、容器侧输出上限仍需全量读取、`--user/--cap-add` 硬化参数面未补齐、`sandbox` 默认进程数 64 与文档他处 256 的口径不一致待统一。
 
 
 

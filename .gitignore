@@ -1,4 +1,8 @@
 .env
+.env.plugins
+# 演示环境变量含真实模型密钥与管理员口令，只留 example
+.env.demo
+data/plugins/
 *.db
 *.db-shm
 *.db-wal

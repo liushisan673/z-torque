@@ -762,6 +762,132 @@ def test_failed_job_event_adds_only_error_code(tmp_path, monkeypatch):
     assert str(tenant_id) not in json.dumps(failed, default=str)
 
 
+# ---------------------------------------------------------------- 热区维护定时器 / 归档幂等（v1.4 补齐）
+
+
+def test_service_starts_periodic_purge_timer_and_cancels_on_shutdown(tmp_path):
+    """`AUDIT_EXPORT_HOT_RETENTION_DAYS` 只有配上定时器才真正生效。"""
+    service, _store = _service(tmp_path)
+    try:
+        assert service._maintenance_timer is not None, "默认必须拉起过期清理定时器"
+    finally:
+        service.shutdown()
+    assert service._maintenance_timer is None
+
+
+def test_purge_interval_zero_disables_timer(tmp_path):
+    service, _store = _service(tmp_path, config=_config(purge_interval_seconds=0))
+    try:
+        assert service._maintenance_timer is None
+    finally:
+        service.shutdown()
+
+
+def test_purge_uses_configured_batch_limit(tmp_path):
+    tenant_id, user_id = _tenant_and_user()
+    _seed_audit(tenant_id, [{"action": "AGENT_CREATED"}])
+
+    service, store = _service(tmp_path, config=_config(purge_batch_limit=1))
+    try:
+        first = _wait_job(
+            service,
+            tenant_id,
+            service.create_job(tenant_id=tenant_id, actor_user_id=user_id, filters={}, export_format="jsonl")["id"],
+        )
+        second = _wait_job(
+            service,
+            tenant_id,
+            service.create_job(tenant_id=tenant_id, actor_user_id=user_id, filters={}, export_format="jsonl")["id"],
+        )
+        with SessionLocal.begin() as db:
+            for item in (first, second):
+                db.get(AuditExportJob, item["id"]).expires_at = utc_now() - timedelta(seconds=1)
+
+        assert service.purge_expired() == 1, "单轮清理必须受 purge_batch_limit 约束，不能一次性全扫"
+        assert store.local_path(f"{_job_row(second['id']).object_prefix}/manifest.json").exists()
+
+        assert service.purge_expired() == 1
+        assert not store.local_path(f"{_job_row(second['id']).object_prefix}/manifest.json").exists()
+    finally:
+        service.shutdown()
+
+
+def _archive_batches(tenant_id) -> list:
+    with SessionLocal() as db:
+        return list(
+            db.scalars(
+                select(AuditArchiveBatch)
+                .where(AuditArchiveBatch.tenant_id == tenant_id)
+                .order_by(AuditArchiveBatch.created_at)
+            ).all()
+        )
+
+
+def test_scheduled_archive_window_is_idempotent(tmp_path):
+    """同一调度窗口重复调度必须复用已完成批次：多副本各自调度不得各写一份冷副本。"""
+    tenant_id, user_id = _tenant_and_user()
+    _seed_audit(tenant_id, [{"created_at": utc_now() - timedelta(days=95)}])
+    service, _store = _archive_service(tmp_path)
+
+    first = service.trigger(tenant_id=tenant_id, actor_user_id=user_id, trigger_source="SCHEDULE")
+    second = service.trigger(tenant_id=tenant_id, actor_user_id=user_id, trigger_source="SCHEDULE")
+
+    assert first["status"] == "SUCCEEDED", first
+    assert second["id"] == first["id"], "定时窗口必须按 UTC 天边界对齐，否则幂等复用永远命中不了"
+    assert len(_archive_batches(tenant_id)) == 1
+
+
+def test_archive_refuses_while_a_batch_is_in_flight(tmp_path):
+    tenant_id, user_id = _tenant_and_user()
+    _seed_audit(tenant_id, [{"created_at": utc_now() - timedelta(days=95)}])
+    service, _store = _archive_service(tmp_path)
+
+    with SessionLocal.begin() as db:
+        db.add(
+            AuditArchiveBatch(
+                tenant_id=tenant_id,
+                created_by=user_id,
+                trigger_source="MANUAL",
+                status="RUNNING",
+                window_start=utc_now() - timedelta(days=1),
+                window_end=utc_now(),
+                encryption="none",
+            )
+        )
+
+    with pytest.raises(ApiError) as excinfo:
+        service.trigger(tenant_id=tenant_id, actor_user_id=user_id)
+    assert excinfo.value.code == "AI_AUDIT_ARCHIVE_BUSY"
+    assert len(_archive_batches(tenant_id)) == 1, "被拒的触发不得留下新批次"
+
+
+def test_stale_inflight_archive_batch_is_reaped(tmp_path):
+    """崩溃副本留下的 RUNNING 批次不能永久占位：超过半个调度周期即判失败并放行。"""
+    tenant_id, user_id = _tenant_and_user()
+    _seed_audit(tenant_id, [{"created_at": utc_now() - timedelta(days=95)}])
+    service, _store = _archive_service(tmp_path)
+
+    with SessionLocal.begin() as db:
+        db.add(
+            AuditArchiveBatch(
+                tenant_id=tenant_id,
+                created_by=user_id,
+                trigger_source="SCHEDULE",
+                status="RUNNING",
+                window_start=utc_now() - timedelta(days=2),
+                window_end=utc_now() - timedelta(days=1),
+                encryption="none",
+                created_at=utc_now() - timedelta(days=3),
+            )
+        )
+
+    batch = service.trigger(tenant_id=tenant_id, actor_user_id=user_id, trigger_source="SCHEDULE")
+
+    assert batch["status"] == "SUCCEEDED", batch
+    stale = [item for item in _archive_batches(tenant_id) if item.status == "FAILED"]
+    assert len(stale) == 1, "陈旧在途批次必须落 FAILED 而不是继续挂着"
+
+
 def test_sink_failure_never_breaks_export(tmp_path, monkeypatch):
     """sink 抛错只记日志：导出照常成功，业务返回值不受影响。"""
 

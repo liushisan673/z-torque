@@ -120,13 +120,16 @@ class SandboxDriverPlugin:
             driver, label = self._build_container_driver(settings, normalized)
         else:
             rlimit_enabled = bool(getattr(settings, "sandbox_rlimit_enabled", True))
+            # 能力位按平台如实上报：Windows 无 rlimit 语义，label 不得写成 rlimit=True，
+            # 否则 /system/features 的 implementation 文案与 isolation_level 自相矛盾
+            effective_rlimit = rlimit_enabled and os.name != "nt"
             driver = ProcessSandboxDriver(
                 allowed_roots=normalized,
                 rlimit_enabled=rlimit_enabled,
-                max_processes=int(getattr(settings, "sandbox_max_processes", 256)),
+                max_processes=int(getattr(settings, "sandbox_max_processes", 64)),
                 max_file_bytes=int(getattr(settings, "sandbox_max_file_bytes", 16 * 1024 * 1024)),
             )
-            label = f"builtin_inprocess_sandbox(rlimit={rlimit_enabled})"
+            label = f"builtin_inprocess_sandbox(rlimit={effective_rlimit})"
         # 装配期对象共享：skill_executors 构造 SkillGateway 时注入 MdSkillRuntime
         sdk.publish("sandbox.driver", driver)
         sdk.publish("sandbox.allowed_roots", tuple(normalized))

@@ -8,6 +8,7 @@ DB_SQL（连接器目标库执行）仍在 app/kernel/db_executor.py（含注册
 
 import ipaddress
 import json
+import os
 import re
 import socket
 from typing import Any
@@ -26,6 +27,13 @@ from app.kernel.ports.skill_executor import ExecutionResult
 SUPPORTED_HTTP_METHODS = ("GET", "POST")
 
 _TEMPLATE = re.compile(r"\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}")
+
+_PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+
+def _global_proxy_configured() -> bool:
+    """全局出站代理是否已配置（PROXY_URL 会被写入进程环境，故统一看环境变量）。"""
+    return any(os.environ.get(key) for key in _PROXY_ENV_KEYS)
 
 
 class MockExecutor:
@@ -93,8 +101,15 @@ class HttpExecutor:
         if target is None:
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_TARGET_BLOCKED", error_message="HTTP target is not allowed")
         host, pinned_ip = target
+        # 出站代理：连接器 config.proxy 三态——缺省=跟随全局（环境变量/PROXY_URL）；
+        # ""=强制直连；URL=指定代理。指定代理时由代理解析目标，不再固定 IP（配置者担责）。
+        proxy = config.get("proxy") if "proxy" in config else None
+        if isinstance(proxy, str):
+            proxy = proxy.strip()
+            if proxy and not (proxy.startswith("http://") or proxy.startswith("https://")):
+                return ExecutionResult(status="FAILED", error_code="AI_HTTP_CONFIG_INVALID", error_message="proxy must be an http(s) proxy URL or empty string")
         try:
-            client = self._client(timeout_seconds, host, pinned_ip)
+            client = self._client(timeout_seconds, host, pinned_ip, proxy if isinstance(proxy, str) else None)
         except RuntimeError:
             # 无法把连接固定到已校验地址时 fail-closed，避免退化为可被 rebinding 绕过的校验
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_TARGET_BLOCKED", error_message="HTTP client cannot pin the validated address")
@@ -149,8 +164,22 @@ class HttpExecutor:
         return _TEMPLATE.sub(substitute, value)
 
     @staticmethod
-    def _client(timeout_seconds: float, host: str, pinned_ip: str | None) -> httpx.Client:
-        """构造 HTTP 客户端；公网目标把连接钉在已校验 IP 上（pinned_ip=None 表示显式放行内网）。"""
+    def _client(timeout_seconds: float, host: str, pinned_ip: str | None, proxy: str | None = None) -> httpx.Client:
+        """构造 HTTP 客户端；公网目标把连接钉在已校验 IP 上（pinned_ip=None 表示显式放行内网）。
+
+        proxy：None=跟随全局（配置了全局代理则走代理，否则直连）；""=强制直连；URL=指定代理。
+        """
+        if proxy:
+            # 显式代理：连接由代理解析，pinned IP 无意义；trust_env=False 避免与环境变量叠加
+            return httpx.Client(proxy=proxy, trust_env=False, follow_redirects=False, timeout=timeout_seconds)
+        if proxy == "":
+            # 强制直连：内网目标本就无 transport 固定，公网目标继续用 pinned transport
+            if pinned_ip is None:
+                return httpx.Client(follow_redirects=False, timeout=timeout_seconds, trust_env=False)
+        elif pinned_ip is not None and _global_proxy_configured():
+            # 跟随全局且确实配置了代理：交给 httpx 环境代理（NO_PROXY 内的目标仍直连），
+            # 与探测路径保持一致；代价是放弃 IP 固定（由配置者经 PROXY_URL 显式开启）
+            return httpx.Client(follow_redirects=False, timeout=timeout_seconds, trust_env=True)
         if pinned_ip is None:
             return httpx.Client(follow_redirects=False, timeout=timeout_seconds)
         transport = httpx.HTTPTransport(retries=0)

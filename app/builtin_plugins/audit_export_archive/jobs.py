@@ -150,6 +150,7 @@ class AuditExportService:
         self._config = config
         self._guard = guard
         self._executor: ThreadPoolExecutor | None = None
+        self._maintenance_timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._closed = False
         # 多副本租约：实例标识必须进程间唯一（默认 host:pid:rand 已足够区分副本）。
@@ -167,11 +168,44 @@ class AuditExportService:
         with self._lock:
             if self._executor is None and not self._closed:
                 self._executor = ThreadPoolExecutor(max_workers=self._config.max_concurrency, thread_name_prefix="audit-export")
+        self.start_maintenance()
+
+    def start_maintenance(self) -> None:
+        """拉起热窗口过期清理定时器（`purge_interval_seconds<=0` 表示关闭）。
+
+        没有这个定时器时 `purge_expired` 只能被外部直接调用，`AUDIT_EXPORT_HOT_RETENTION_DAYS`
+        实际不生效：热桶对象与分片记录会无限期堆积，保留策略只是文档。
+        """
+        interval = float(self._config.purge_interval_seconds)
+        if interval <= 0 or self._closed:
+            return
+        timer = threading.Timer(interval, self._maintenance_tick)
+        timer.daemon = True
+        with self._lock:
+            if self._closed:
+                return
+            self._maintenance_timer = timer
+        timer.start()
+
+    def _maintenance_tick(self) -> None:
+        if self._closed:
+            return
+        try:
+            purged = self.purge_expired()
+            if purged:
+                _LOGGER.info("purged %s expired audit export job(s)", purged)
+        except Exception:  # noqa: BLE001 - 维护线程不得因单轮失败而停止
+            _LOGGER.warning("audit export purge failed", exc_info=True)
+        finally:
+            self.start_maintenance()
 
     def shutdown(self) -> None:
         with self._lock:
             self._closed = True
             executor, self._executor = self._executor, None
+            timer, self._maintenance_timer = self._maintenance_timer, None
+        if timer is not None:
+            timer.cancel()
         if executor is not None:
             # 后台任务不可中断（导出件写一半比任务超时更糟）；等待在途分片收尾
             executor.shutdown(wait=True, cancel_futures=False)
@@ -225,6 +259,14 @@ class AuditExportService:
         if store is None:
             raise ApiError("AI_CAPABILITY_UNAVAILABLE", "object.store is not assembled", 503)
         return store
+
+    @staticmethod
+    def _delete_object(store: Any, key: str) -> None:
+        """删对象（幂等）：单个对象删除失败不能中断整轮清理，也不能掩盖其余对象的回收。"""
+        try:
+            store.delete(key)
+        except Exception:  # noqa: BLE001 - 清理是尽力而为，失败记日志继续
+            _LOGGER.warning("failed to delete audit export object %s", key, exc_info=True)
 
     def _check_breaker(self) -> None:
         if self._guard is not None:
@@ -414,10 +456,11 @@ class AuditExportService:
             export_format = job.export_format
         try:
             store = self._object_store()
+        except ApiError:  # object.store 缺失：任务行已落 FAILED，对象清理无从进行
+            store = None
+        if store is not None:
             for key in orphan_keys:
-                store.delete(key)
-        except Exception:  # noqa: BLE001 - 清理失败不能掩盖原始失败原因
-            pass
+                self._delete_object(store, key)
         # 生命周期事件先于审计写入：观测看板要能立刻看到失败，不能等审计事务
         _emit_job_event(
             job_id=job_id,
@@ -426,15 +469,18 @@ class AuditExportService:
             duration_ms=duration_ms,
             error_code=code,
         )
-        self._sdk.record_audit(
-            tenant_id=tenant_id,
-            actor_user_id=actor_id,
-            action=_ACTION_FAILED,
-            resource_type=_RESOURCE_TYPE,
-            resource_id=job_id,
-            summary=message or "audit export failed",
-            detail={"error_code": code},
-        )
+        try:
+            self._sdk.record_audit(
+                tenant_id=tenant_id,
+                actor_user_id=actor_id,
+                action=_ACTION_FAILED,
+                resource_type=_RESOURCE_TYPE,
+                resource_id=job_id,
+                summary=message or "audit export failed",
+                detail={"error_code": code},
+            )
+        except Exception:  # noqa: BLE001 - 审计写入失败不得逃逸出后台线程（会留下 RUNNING 任务）
+            _LOGGER.warning("failed to record audit for export job %s", job_id, exc_info=True)
 
     def _execute(self, job_id: UUID) -> None:
         with self._sdk.session() as db:
@@ -568,20 +614,25 @@ class AuditExportService:
             chunk_count=len(shards),
             duration_ms=_elapsed_ms(started),
         )
-        self._sdk.record_audit(
-            tenant_id=tenant_id,
-            actor_user_id=actor_id,
-            action=_ACTION_EXPORTED,
-            resource_type=_RESOURCE_TYPE,
-            resource_id=job_id,
-            summary=f"audit export completed ({row_count} rows, {len(shards)} shards)",
-            detail={
-                "row_count": row_count,
-                "shard_count": len(shards),
-                "sha256_total": sha256_total([item["sha256"] for item in shards]),
-                "recursive": not self._config.exclude_own_actions,
-            },
-        )
+        try:
+            self._sdk.record_audit(
+                tenant_id=tenant_id,
+                actor_user_id=actor_id,
+                action=_ACTION_EXPORTED,
+                resource_type=_RESOURCE_TYPE,
+                resource_id=job_id,
+                summary=f"audit export completed ({row_count} rows, {len(shards)} shards)",
+                detail={
+                    "row_count": row_count,
+                    "shard_count": len(shards),
+                    "sha256_total": sha256_total([item["sha256"] for item in shards]),
+                    "recursive": not self._config.exclude_own_actions,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            # 任务已在事务里落 SUCCEEDED 并释放租约；此处异常若逃逸会被 _run 当失败处理，
+            # 进而把成功任务标 FAILED 并删掉刚写完的分片——保住导出件优先。
+            _LOGGER.warning("failed to record audit for export job %s", job_id, exc_info=True)
 
     # ---- 查询/下载 ----
     def get_job(self, *, tenant_id: UUID, job_id: UUID) -> dict[str, Any]:
@@ -632,9 +683,15 @@ class AuditExportService:
         )
         return path, path.name
 
-    def purge_expired(self, *, limit: int = 100) -> int:
-        """热窗口过期清理：删对象与分片记录，保留任务行用于审计追溯。"""
+    def purge_expired(self, *, limit: int | None = None) -> int:
+        """热窗口过期清理：删对象与分片记录，保留任务行用于审计追溯。
+
+        由 `start_maintenance` 按 `audit_export_purge_interval_seconds` 周期调用（多副本
+        各自清理是安全的：删除按 object_key 幂等，DB 删除按 job 收敛）。
+        """
         store = self._object_store()
+        if limit is None:
+            limit = self._config.purge_batch_limit
         now = datetime.now(timezone.utc)
         with self._sdk.session() as db:
             rows = db.scalars(
@@ -651,9 +708,9 @@ class AuditExportService:
             for job in rows:
                 shards = db.scalars(select(AuditExportShard).where(AuditExportShard.job_id == job.id)).all()
                 for shard in shards:
-                    store.delete(shard.object_key)
+                    self._delete_object(store, shard.object_key)
                 if job.object_prefix:
-                    store.delete(f"{job.object_prefix}/manifest.json")
+                    self._delete_object(store, f"{job.object_prefix}/manifest.json")
                 db.execute(delete(AuditExportShard).where(AuditExportShard.job_id == job.id))
                 job.shards_total = 0
                 job.size_total = 0
@@ -680,6 +737,8 @@ class AuditExportService:
             "started_at": iso_utc(job.started_at),
             "finished_at": iso_utc(job.finished_at),
             "expires_at": iso_utc(job.expires_at),
+            # 被接管/重试次数：运维判断"这个任务是否反复被多副本抢走"的唯一线索
+            "attempts": job.attempts,
         }
 
     @staticmethod

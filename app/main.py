@@ -2,12 +2,14 @@ import logging
 import re
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_optional_user
@@ -246,3 +248,47 @@ async def capabilities(request: Request, user: User | None = Depends(get_optiona
         files["storage_dir"] = str(settings.file_storage_dir)
         connectors["allowed_targets"] = settings.connector_allowed_targets
     return success_response(request, {"stage": derive_stage(registry), "features": _available_features(registry, assembled_plugins), "ports": ports, "sandbox": _sandbox_capability(registry, assembled_plugins, settings), "audit_export": _audit_export_capability(assembled_plugins, settings), "a2a": _a2a_capability(assembled_plugins, settings), "md_skill": md_skill, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled}, "files": files, "connectors": connectors})
+
+
+def _resolve_console_dist(settings) -> Path:
+    dist = settings.console_dist_dir
+    if not dist.is_absolute():
+        # 相对路径按仓库根解析：locator 而不是 CWD，避免从别处启动时找不到构建产物
+        dist = Path(__file__).resolve().parents[1] / dist
+    return dist
+
+
+def _mount_console(target: FastAPI) -> None:
+    """单端口交付：后端在 / 上直接提供 console/dist（前端构建产物）。
+
+    仅在 SERVE_CONSOLE=true 且 dist/index.html 存在时挂载，未构建时静默跳过，
+    开发期（vite dev server）与测试/CI 的路由行为因此完全不变。
+    /api/... 未命中的路径仍按 404 语义返回，不落到前端 index.html —— 否则接口
+    拼错会得到一份 HTML 200，客户端错误处理全部失效。
+    """
+    settings = get_settings()
+    if not settings.serve_console:
+        return
+    dist = _resolve_console_dist(settings)
+    index_file = dist / "index.html"
+    if not index_file.is_file():
+        logger.warning("serve_console enabled but console build missing: %s", dist)
+        return
+    assets_dir = dist / "assets"
+    if assets_dir.is_dir():
+        target.mount("/assets", StaticFiles(directory=str(assets_dir)), name="console-assets")
+    root = dist.resolve()
+
+    @target.get("/{full_path:path}", include_in_schema=False)
+    async def console_spa(request: Request, full_path: str):
+        if full_path.startswith(("api/", "docs", "redoc", "openapi.json")):
+            return error_response(request, ApiError("AI_RESOURCE_NOT_FOUND", "not found", 404))
+        if full_path:
+            candidate = (root / full_path).resolve()
+            # 目录穿越防护：解析后必须仍在 dist 内（../ 之类不得读到构建产物之外）
+            if candidate.is_file() and root in candidate.parents:
+                return FileResponse(candidate)
+        return FileResponse(index_file)
+
+
+_mount_console(app)
