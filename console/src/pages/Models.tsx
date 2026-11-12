@@ -111,6 +111,9 @@ export function ModelsPage() {
   const [editIface, setEditIface] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [editFnCall, setEditFnCall] = useState(true);
+  // 多模态能力存于 ModelResource.config（不新增数据库列）
+  const [editVision, setEditVision] = useState(false);
+  const [editAudio, setEditAudio] = useState(false);
   const [editCtx, setEditCtx] = useState("");
   const [editMaxOut, setEditMaxOut] = useState("");
 
@@ -179,6 +182,9 @@ export function ModelsPage() {
     setEditIface(d.interface_type ?? "");
     setEditDesc(d.description ?? "");
     setEditFnCall(d.supports_function_calling);
+    const config = (d.config ?? {}) as Record<string, unknown>;
+    setEditVision(Boolean(config.supports_vision));
+    setEditAudio(Boolean(config.supports_audio));
     setEditCtx(d.context_window != null ? String(d.context_window) : "");
     setEditMaxOut(d.max_output_tokens != null ? String(d.max_output_tokens) : "");
   }
@@ -251,6 +257,12 @@ export function ModelsPage() {
         supports_function_calling: editFnCall,
         context_window: editCtx.trim() ? Number(editCtx) : null,
         max_output_tokens: editMaxOut.trim() ? Number(editMaxOut) : null,
+        // config 是整体替换语义：必须合并现有配置，避免丢失 interface_type 等键
+        config: {
+          ...(detail.config ?? {}),
+          supports_vision: editVision,
+          supports_audio: editAudio,
+        },
       };
       const d = await request<ModelResource>(`/api/z-torque/models/${detail.id}`, { method: "PATCH", body });
       setDetail(d);
@@ -709,6 +721,32 @@ export function ModelsPage() {
                                 style={{ margin: '0 8px 0 0' }} 
                               />
                             </label>
+                          </div>
+                          <div className="model-field">
+                            <label style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
+                              支持视觉（图片输入）
+                              <input
+                                type="checkbox"
+                                checked={editVision}
+                                onChange={(e) => setEditVision(e.target.checked)}
+                                disabled={busy || !canManage}
+                                style={{ margin: '0 8px 0 0' }}
+                              />
+                            </label>
+                            <div className="help">关闭时图片降级为文本提示，不会发给模型</div>
+                          </div>
+                          <div className="model-field">
+                            <label style={{ cursor: 'pointer', display: 'inline-flex', alignItems: 'center' }}>
+                              支持音频输入
+                              <input
+                                type="checkbox"
+                                checked={editAudio}
+                                onChange={(e) => setEditAudio(e.target.checked)}
+                                disabled={busy || !canManage}
+                                style={{ margin: '0 8px 0 0' }}
+                              />
+                            </label>
+                            <div className="help">首期仅做能力标记，语音转写按 P1 接入</div>
                           </div>
                       </div>
                       {canManage && (

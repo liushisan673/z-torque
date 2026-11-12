@@ -41,6 +41,7 @@ export const APP_NAV: NavItem[] = [
   { to: "/skills", label: "技能管理" },
   { to: "/models", label: "模型管理", adminOnly: true },
   { to: "/connectors", label: "连接器管理", adminOnly: true },
+  { to: "/webhooks", label: "Webhook 接入", adminOnly: true },
   // 审计为例外入口：普通用户可见，但后端自动限定为仅本人记录
   { to: "/audit", label: "审计管理" },
   { to: "/users", label: "用户管理", adminOnly: true },

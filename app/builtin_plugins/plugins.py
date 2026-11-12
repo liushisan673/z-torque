@@ -30,9 +30,18 @@ from app.builtin_plugins.identity_provider import IdentityProviderPlugin
 from app.builtin_plugins.interceptor import InterceptorPlugin
 from app.builtin_plugins.lock_provider import LockProviderPlugin
 from app.builtin_plugins.long_memory import LongMemoryPlugin
-from app.builtin_plugins.manifest import PluginManifest, PluginSdk, validate_manifest
+from app.builtin_plugins.manifest import (
+    ENGINE_PERMISSION,
+    PluginManifest,
+    PluginSdk,
+    validate_manifest,
+)
 from app.builtin_plugins.mcp import StdioServerRegistry, make_http_connector
-from app.builtin_plugins.model_gateway import MockModelGateway, OpenAICompatibleGateway
+from app.builtin_plugins.model_gateway import (
+    MockModelGateway,
+    ModelRoutingGateway,
+    OpenAICompatibleGateway,
+)
 from app.builtin_plugins.model_selector import RuleBasedModelSelectorPlugin
 from app.builtin_plugins.notify_channel import NotifyChannelPlugin
 from app.builtin_plugins.object_store import ObjectStorePlugin
@@ -43,6 +52,7 @@ from app.builtin_plugins.sandbox_driver import SandboxDriverPlugin
 from app.builtin_plugins.secret_provider import SecretProviderPlugin
 from app.builtin_plugins.short_memory import ShortMemoryPlugin
 from app.builtin_plugins.working_memory import WorkingMemoryPlugin
+from app.kernel.model_gateway import ModelGateway
 from app.kernel.plugin_guard import GuardedModelGateway, PluginGuardRegistry
 from app.kernel.ports.specs import PORT_SPEC_BY_NAME
 from app.kernel.registry.port_registry import AssemblyError
@@ -64,9 +74,10 @@ def _resolve_api_key(secret_provider, raw_key: SecretStr | str | None) -> str | 
 class ModelProviderPlugin:
     manifest = PluginManifest(
         name="model_provider",
-        description="OpenAI 兼容模型网关；未配置时显式降级为 Mock（能力查询可见）",
+        description="模型路由网关：按模型管理配置选择 Provider/Endpoint；未配置时显式降级为 Mock",
         provides=("model.provider",),
         requires=("secret.provider",),
+        permissions=(ENGINE_PERMISSION,),
     )
 
     def contribute(self, sdk: PluginSdk) -> None:
@@ -79,28 +90,32 @@ class ModelProviderPlugin:
         api_key = _resolve_api_key(secret_provider, settings.model_api_key)
         # 插件级熔断与配额（契约 §5.5）：模型网关统一经 GuardedModelGateway 守卫
         guard = PluginGuardRegistry.from_settings(settings)
-        if settings.model_base_url and api_key:
-            # trust_env=False：模型网关永不读取 HTTP(S)_PROXY 环境变量。模型端点由 MODEL_BASE_URL
-            # 显式配置，且国内模型服务（如 DeepSeek）拒绝海外出口 IP——出站代理（PROXY_URL）一旦
-            # 生效会把模型流量带进代理导致 401/连接中断（实测事故 2026-10-27），此处彻底隔离。
-            import httpx as _httpx
+        # 全局配置只作为兜底：运行时优先按 request.tenant_id + model 走模型管理。
+        # trust_env=False：模型网关永不读取 HTTP(S)_PROXY 环境变量（DeepSeek 拒绝海外出口 IP）。
+        import httpx as _httpx
 
-            def factory() -> OpenAICompatibleGateway:
-                return GuardedModelGateway(
-                    OpenAICompatibleGateway(
-                        settings.model_base_url,
-                        api_key,
-                        default_model=settings.model_name,
-                        client=_httpx.AsyncClient(trust_env=False),
-                    ),
-                    guard,
-                )
-            label = f"openai_compatible({settings.model_name})"
+        if settings.model_base_url and api_key:
+            default_gateway: Any = OpenAICompatibleGateway(
+                settings.model_base_url,
+                api_key,
+                default_model=settings.model_name,
+                client=_httpx.AsyncClient(trust_env=False),
+            )
+            label = f"model_routing(global={settings.model_name})"
         else:
-            def factory() -> MockModelGateway:
-                return GuardedModelGateway(MockModelGateway(), guard)
-            label = "mock(development fallback)"
-            logger.warning("model provider is NOT configured; MockModelGateway is active and will be reported in /capabilities (显式降级，勿用于生产)")
+            default_gateway = MockModelGateway()
+            label = "model_routing(global=mock)"
+            logger.warning("global model is NOT configured; MockModelGateway is the routing fallback (显式降级，勿用于生产)")
+
+        router = ModelRoutingGateway(
+            session_factory=lambda: sdk.session(),
+            secret_provider=secret_provider,
+            default_gateway=default_gateway,
+        )
+
+        def factory() -> ModelGateway:
+            return GuardedModelGateway(router, guard)
+
         sdk.register_port("model.provider", factory, label=label)
 
 

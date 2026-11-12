@@ -6,6 +6,7 @@
 """
 
 from .contracts import (
+    ModelContentPart,
     ModelGateway,
     ModelGatewayError,
     ModelMessage,
@@ -15,4 +16,4 @@ from .contracts import (
     ModelUsage,
 )
 
-__all__ = ['ModelGateway', 'ModelGatewayError', 'ModelMessage', 'ModelRequest', 'ModelResponse', 'ModelToolCall', 'ModelUsage']
+__all__ = ['ModelContentPart', 'ModelGateway', 'ModelGatewayError', 'ModelMessage', 'ModelRequest', 'ModelResponse', 'ModelToolCall', 'ModelUsage']

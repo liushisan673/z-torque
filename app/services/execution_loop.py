@@ -25,7 +25,9 @@ from app.services.function_calling import ToolMapping, map_tool_calls
 from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
 
-MAX_ROUNDS = 8
+# 单次执行循环的最大「模型思考 + 工具调用」轮次。8 轮对多工具 MCP 链路偏紧，
+# 容易在收尾阶段触发 AI_MAX_ROUNDS_EXCEEDED；放宽到 30，仍由任务 deadline 兜底。
+MAX_ROUNDS = 30
 MAX_TOOL_CALLS_PER_ROUND = 8
 MAX_TOOL_RESULT_CHARS = 20_000
 
@@ -232,6 +234,7 @@ class AgentExecutionLoop:
         child_request = ModelRequest(
             trace_id=f"delegate-{child_agent_version_id}-{delegation_depth}",
             conversation_id=None,
+            tenant_id=ctx.tenant_id,
             agent_version_id=child_agent_version_id,
             model=child_selection.model,
             temperature=child_selection.temperature,

@@ -177,6 +177,36 @@ async def test_file_isolation_and_audit_written_on_read(baseline):
         assert other_audits.status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_file_bridge_export_copies_to_shared_volume(baseline, tmp_path, monkeypatch):
+    from app.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "bridge_media_shared_root", tmp_path / "shared")
+    monkeypatch.setattr(settings, "bridge_media_container_root", "/tmp/weixin-agent/media")
+    monkeypatch.setattr(settings, "bridge_media_outbound_subdir", "outbound")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        token = await _login(client, "owner", "pass")
+        uploaded = await client.post(
+            "/api/z-torque/files",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"upload": ("hello.txt", io.BytesIO(b"hello"), "text/plain")},
+        )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["data"]["id"]
+
+        exported = await client.post(
+            f"/api/z-torque/files/{file_id}/bridge-export",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert exported.status_code == 200
+        data = exported.json()["data"]
+        assert data["bridge_path"] == f"/tmp/weixin-agent/media/outbound/{file_id}_hello.txt"
+        assert (tmp_path / "shared" / "outbound" / f"{file_id}_hello.txt").read_bytes() == b"hello"
+        assert data["send_media"]["arguments"]["url"] == data["bridge_path"]
+
+
 def test_task_request_summary_redacts_secrets():
     from app.kernel.task.service import sanitize_summary
 

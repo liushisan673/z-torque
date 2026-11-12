@@ -6081,6 +6081,32 @@ body.pane-resizing {
 }
 .chat-msg-file:hover { border-color: var(--primary); color: var(--primary); }
 
+/* 媒体气泡：图片预览 / 音频 / 视频，全部使用 CSS 变量 */
+.chat-msg-media-image {
+  display: block;
+  max-width: min(320px, 100%);
+  max-height: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  object-fit: cover;
+  cursor: zoom-in;
+}
+.chat-msg-media-audio { width: min(320px, 100%); }
+.chat-msg-media-video {
+  display: block;
+  max-width: min(360px, 100%);
+  max-height: 260px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.chat-msg-media-state {
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+
 /* 气泡 + 下方操作行的纵向容器：操作按钮独立于气泡外，更醒目（用户消息靠右对齐）。
  * flex:1 占据头像右侧整行，形成定宽上下文——气泡的百分比 max-width 才能正确解析，
  * 否则在自适应宽度容器里会塌缩成 min-content（中文逐字换行）。与 .chat-turn 同款处理。 */

@@ -11,7 +11,11 @@ from sqlalchemy import create_engine
 
 from app.assembly import assemble
 from app.builtin_plugins.manifest import PluginSdk
-from app.builtin_plugins.model_gateway import MockModelGateway, OpenAICompatibleGateway
+from app.builtin_plugins.model_gateway import (
+    MockModelGateway,
+    ModelRoutingGateway,
+    OpenAICompatibleGateway,
+)
 from app.builtin_plugins.plugins import ModelProviderPlugin
 from app.builtin_plugins.secret_provider import LocalSecretProvider, SecretProviderPlugin
 from app.kernel.plugin_guard import GuardedModelGateway
@@ -46,8 +50,10 @@ def test_model_provider_resolves_secret_uri_key():
     registry.resolve()
     gateway = registry.get("model.provider")
     assert isinstance(gateway, GuardedModelGateway)
-    assert isinstance(gateway._inner, OpenAICompatibleGateway)
-    assert gateway._inner.api_key == "sk-real-key"
+    assert isinstance(gateway._inner, ModelRoutingGateway)
+    default = gateway._inner._default_gateway
+    assert isinstance(default, OpenAICompatibleGateway)
+    assert default.api_key == "sk-real-key"
 
 
 def test_model_provider_plain_key_backward_compatible():
@@ -56,7 +62,9 @@ def test_model_provider_plain_key_backward_compatible():
     settings = SimpleNamespace(model_base_url="https://api.example.com/v1", model_api_key="sk-plain", model_name="gpt-x", model_allowed_names=[])
     _contribute_model_provider(settings, registry)
     registry.resolve()
-    assert registry.get("model.provider").api_key == "sk-plain"
+    default = registry.get("model.provider")._inner._default_gateway
+    assert isinstance(default, OpenAICompatibleGateway)
+    assert default.api_key == "sk-plain"
 
 
 def test_model_provider_without_key_falls_back_to_mock():
@@ -66,7 +74,8 @@ def test_model_provider_without_key_falls_back_to_mock():
     registry.resolve()
     gateway = registry.get("model.provider")
     assert isinstance(gateway, GuardedModelGateway)
-    assert isinstance(gateway._inner, MockModelGateway)
+    assert isinstance(gateway._inner, ModelRoutingGateway)
+    assert isinstance(gateway._inner._default_gateway, MockModelGateway)
 
 
 def test_model_provider_requires_secret_provider_fail_fast():

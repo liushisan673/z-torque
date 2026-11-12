@@ -10,19 +10,21 @@ from app.core.errors import ApiError
 from app.kernel.model_gateway import ModelGateway, ModelGatewayError, ModelRequest
 from app.kernel.ports.memory_short import ShortTermMemoryProvider
 from app.kernel.ports.model_selector import snapshot_model_params
+from app.kernel.registry.active import try_port
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.service import create_task
-from app.models import Agent, AgentVersion, Conversation, Message, Task
+from app.models import Agent, AgentVersion, Conversation, File, Message, Task
 from app.models.message import message_file
 from app.security.permissions import admin_owned_clause
+from app.services.bridge_media import export_file_to_bridge
 from app.services.chat_service import ChatResult
 from app.services.context_builder import (
     assistant_reasoning_parts,
     build_agent_system_prompt,
     build_context,
 )
-from app.services.model_limits import effective_max_tokens
+from app.services.model_limits import effective_max_tokens, model_capabilities
 from app.services.tool_mapping_builder import build_tool_mappings
 
 logger = logging.getLogger("z_torque.chat")
@@ -72,7 +74,7 @@ def _published_agent_version(db: Session, agent_id: UUID | None) -> AgentVersion
     return agent_version
 
 
-async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None) -> ChatResult:
+async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None, commit_before_generate: bool = False) -> ChatResult:
     tenant_id = ctx.tenant_id
     user_id = ctx.user_id
     trace_id = trace_id or ctx.trace_id
@@ -90,6 +92,8 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
         if agent_id is not None and conversation.agent_id != agent_id:
             raise ApiError("AI_CONVERSATION_AGENT_CONFLICT", "conversation agent cannot be changed", 409)
+    if content_parts:
+        _enrich_bridge_paths(db, content_parts, conversation)
     user_message = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="USER", content=content, content_parts=content_parts, status="PROCESSING")
     db.add(user_message)
     db.flush()
@@ -118,16 +122,30 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             settings = get_settings()
             # 调用参数：版本快照键优先（快照语义），未设置回退模型档案 max_output_tokens，再退全局兜底
             temperature, max_tokens = snapshot_model_params(agent_version.config_snapshot, default_temperature=settings.model_temperature, default_max_tokens=settings.model_max_tokens)
-            model_name = getattr(model_gateway, "default_model", "mock")
+            # 无工具直答同样使用智能体版本绑定的模型，而不是全局默认模型
+            model_name = str((agent_version.config_snapshot or {}).get("model") or "").strip() or getattr(model_gateway, "default_model", "mock")
             max_tokens = effective_max_tokens(db, tenant_id=tenant_id, model_identifier=model_name, snapshot_max_tokens=(agent_version.config_snapshot or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
+            capabilities = model_capabilities(db, tenant_id=tenant_id, model_identifier=model_name)
             request = ModelRequest(
                 trace_id=trace_id or str(user_message.id), conversation_id=conversation.id,
+                tenant_id=tenant_id,
                 model=model_name,
                 temperature=temperature, max_tokens=max_tokens,
-                messages=build_context(db, conversation, system_prompt=system_prompt, attachment_ids=attachment_ids),
+                messages=build_context(
+                    db,
+                    conversation,
+                    system_prompt=system_prompt,
+                    attachment_ids=attachment_ids,
+                    supports_vision=capabilities.supports_vision,
+                    supports_audio=capabilities.supports_audio,
+                ),
                 tools=[], timeout_seconds=settings.model_timeout_seconds,
             )
             try:
+                # 入站回调等后台链路先落库用户消息再调模型：避免 SQLite 写事务
+                # 跨模型网络调用持有写锁，阻塞控制台等其他写请求。
+                if commit_before_generate:
+                    db.commit()
                 response = await model_gateway.generate(request)
             except ModelGatewayError as exc:
                 user_message.status = "FAILED"
@@ -178,6 +196,40 @@ def _version_id(db: Session, agent_id: UUID) -> UUID:
     if agent is None or agent.current_published_version_id is None:
         raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent has no published version", 409)
     return agent.current_published_version_id
+
+
+def _enrich_bridge_paths(db: Session, content_parts: list[dict], conversation: Conversation) -> None:
+    """把附件导出到 Bridge 共享卷，并在 content_parts 写入可发送路径。
+
+    入站 Webhook 媒体已由 ``_ingest_media`` 写入 ``bridge_path``，这里会跳过；
+    控制台上传等 z-torque 文件在发送时导出一次，智能体即可用
+    ``weixin.send_media(url=<bridge_path>)`` 发回微信。
+    """
+    settings = get_settings()
+    if settings.bridge_media_root is None:
+        return
+    store = try_port("object.store")
+    if store is None:
+        return
+    for part in content_parts:
+        if not isinstance(part, dict) or part.get("bridge_path") or not part.get("file_id"):
+            continue
+        try:
+            file_id = UUID(str(part["file_id"]))
+        except ValueError:
+            continue
+        item = db.get(File, file_id)
+        if (
+            item is None
+            or item.tenant_id != conversation.tenant_id
+            or item.owner_user_id != conversation.owner_user_id
+            or item.status == "DELETED"
+        ):
+            continue
+        try:
+            part["bridge_path"] = export_file_to_bridge(item, store, settings).bridge_path
+        except ApiError:
+            logger.warning("bridge media export skipped file_id=%s", file_id, exc_info=True)
 
 
 def _attachment_ids(content_parts: list[dict] | None) -> list[UUID]:

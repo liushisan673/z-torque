@@ -2,11 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { useNavigate } from "react-router-dom";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ApiRequestError, request, uploadFile } from "../services/api";
+import { ApiRequestError, downloadFile, fetchBlob, request, uploadFile } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import { openGetStream, openPostStream } from "../services/sse";
-import type { Agent, ChatResponse, Confirmation, Conversation, FileContent, FileMetadata, FileStatus, Message, Task, TaskEvent } from "../types";
+import type { Agent, ChatResponse, Confirmation, Conversation, FileContent, FileMetadata, FileStatus, Message, MessageContentPart, Task, TaskEvent } from "../types";
 import { StatusTag, EmptyState, Alert } from "../components/ui";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
@@ -44,6 +44,52 @@ const RENDER_STEP = 50;
 // 会话记忆为空串表示"上次停留在新对话"，返回时保持空白而非自动选中第一个会话。
 const CONV_KEY = "zt.chat.conversationId";
 const AGENT_KEY = "zt.chat.agentId";
+
+const MEDIA_PLACEHOLDER_RE = /^\[(图片|语音|视频|文件)\]$/;
+const MEDIA_KINDS = new Set(["image", "audio", "video"]);
+
+function partKind(part: MessageContentPart): "image" | "file" | "audio" | "video" {
+  const kind = String(part.type ?? "");
+  return MEDIA_KINDS.has(kind) ? (kind as "image" | "audio" | "video") : "file";
+}
+
+// 媒体气泡：带鉴权取 blob 再转 object URL，卸载时 revoke，避免 <img> 401 与内存泄漏
+function MessageMedia({ part }: { part: MessageContentPart }) {
+  const kind = partKind(part);
+  const fileId = String(part.file_id ?? "");
+  const name = String(part.file_name ?? `附件 ${fileId.slice(0, 8)}`);
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    if (!fileId || !MEDIA_KINDS.has(kind)) return;
+    let active = true;
+    let objectUrl: string | null = null;
+    void (async () => {
+      try {
+        const blob = await fetchBlob(`/api/z-torque/files/${fileId}/raw`);
+        if (!active) return;
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      } catch {
+        if (active) setError(true);
+      }
+    })();
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [fileId, kind]);
+  if (!url) {
+    return <div className="chat-msg-media-state">{error ? "媒体加载失败" : "媒体加载中…"}</div>;
+  }
+  if (kind === "image") {
+    return <img className="chat-msg-media-image" src={url} alt={name} onClick={() => window.open(url, "_blank", "noopener")} />;
+  }
+  if (kind === "audio") {
+    return <audio className="chat-msg-media-audio" src={url} controls />;
+  }
+  return <video className="chat-msg-media-video" src={url} controls />;
+}
 
 export function ChatPage() {
   // 左右分栏宽度：拖拽把手调整左侧会话列表宽度，会话内保持，退出登录恢复默认
@@ -954,11 +1000,6 @@ export function ChatPage() {
     }
   }
 
-  // 消息气泡中的附件 chip：占位元数据即可，viewFile 内部会拉取真实详情
-  function openMessageFile(fileId: string) {
-    void viewFile({ id: fileId, name: `附件 ${fileId.slice(0, 8)}`, media_type: "", size_bytes: 0, status: "UPLOADED", created_at: "" });
-  }
-
   // 文件详情 / 状态 / 解析内容
   async function viewFile(meta: FileMetadata) {
     setError(null);
@@ -1110,6 +1151,80 @@ export function ChatPage() {
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeRun?.taskId, task?.id, taskRunning, runLive]);
+
+  // 后台入站消息（通用 Webhook / 企微）由后端 SSE 主动推送：收到后立刻刷新会话列表/当前会话，不再轮询。
+  useEffect(() => {
+    let disposed = false;
+    let retryTimer: number | null = null;
+    let handle: { abort: () => void } | null = null;
+
+    function scheduleReconnect() {
+      if (disposed || retryTimer !== null) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        connect();
+      }, 3000);
+    }
+
+    function connect() {
+      if (disposed) return;
+      handle = openGetStream("/api/z-torque/chat/events", {
+        onEvent: (msg) => {
+          if (msg.event !== "chat.message") return;
+          const payload = msg.data as
+            | {
+                conversation_id?: string;
+                message_id?: string;
+                sender_type?: string;
+                content?: string;
+                content_parts?: MessageContentPart[] | null;
+                created_at?: string;
+                task_id?: string | null;
+                pending_task_id?: string | null;
+              }
+            | null;
+          if (!payload?.conversation_id || !payload.message_id) return;
+          // 当前会话直接插入气泡，不再额外请求消息列表
+          if (conversationIdRef.current === payload.conversation_id) {
+            setMessages((prev) =>
+              prev.some((m) => m.id === payload.message_id)
+                ? prev
+                : [
+                    ...prev,
+                    {
+                      id: payload.message_id as string,
+                      conversation_id: payload.conversation_id as string,
+                      sender_type: payload.sender_type ?? "USER",
+                      content: payload.content ?? "",
+                      content_parts: payload.content_parts ?? null,
+                      status: "COMPLETED",
+                      task_id: payload.task_id ?? null,
+                      error_code: null,
+                      created_at: payload.created_at ?? new Date().toISOString(),
+                    },
+                  ],
+            );
+            // 后台 Webhook 触发的任务：像手动发送一样展示内联执行块并订阅任务事件流
+            if (payload.sender_type === "USER" && payload.pending_task_id) {
+              startRun(payload.pending_task_id);
+              subscribeTask(payload.pending_task_id, { convId: payload.conversation_id });
+            }
+          }
+          // 会话列表只需要刷新标题/最新会话（不轮询）
+          void loadConversations(showArchived);
+        },
+        onError: scheduleReconnect,
+        onDone: scheduleReconnect,
+      });
+    }
+
+    connect();
+    return () => {
+      disposed = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      handle?.abort();
+    };
+  }, [showArchived, loadConversations, loadMessages]);
 
   // Agent meta 标签：默认父 Agent / 官方 / 我的
   const agentMetaTag = currentAgent
@@ -1399,34 +1514,43 @@ export function ChatPage() {
                 {visibleMessages.map((m) => {
                   const isUser = m.sender_type === "USER";
                   const failed = !isUser && m.status === "FAILED";
-                  const files = Array.isArray(m.content_parts)
-                    ? (m.content_parts as { file_id?: string }[]).filter((p) => p?.file_id)
+                  const parts = Array.isArray(m.content_parts)
+                    ? m.content_parts.filter((p) => p?.file_id)
                     : [];
+                  const hasAttachment = parts.length > 0;
+                  // 占位文本只在没有附件时兜底显示
+                  const hidePlaceholder = hasAttachment && MEDIA_PLACEHOLDER_RE.test(m.content.trim());
                   return (
                     <div key={m.id} className={`chat-msg ${isUser ? "user" : "assistant"}`}>
                       <div className="chat-msg-avatar">{isUser ? "我" : "Z"}</div>
                       <div className="chat-msg-main">
                         <div className="chat-msg-bubble">
                           {isUser ? (
-                            <div className="chat-msg-content">{m.content}</div>
+                            <div className="chat-msg-content">{hidePlaceholder ? "" : m.content}</div>
                           ) : (
                             <div className="chat-msg-content chat-md">
                               <Markdown remarkPlugins={[remarkGfm]}>{m.content}</Markdown>
                             </div>
                           )}
-                          {files.length > 0 && (
+                          {hasAttachment && (
                             <div className="chat-msg-files">
-                              {files.map((p, i) => (
-                                <button
-                                  key={i}
-                                  className="chat-msg-file"
-                                  type="button"
-                                  onClick={() => openMessageFile(p.file_id as string)}
-                                  title="查看文件详情"
-                                >
-                                  附件 {String(p.file_id).slice(0, 8)}
-                                </button>
-                              ))}
+                              {parts.map((p, i) => {
+                                if (partKind(p) !== "file") {
+                                  return <MessageMedia key={i} part={p} />;
+                                }
+                                const name = String(p.file_name ?? `附件 ${String(p.file_id).slice(0, 8)}`);
+                                return (
+                                  <button
+                                    key={i}
+                                    className="chat-msg-file"
+                                    type="button"
+                                    onClick={() => void downloadFile(`/api/z-torque/files/${p.file_id}/raw`, name)}
+                                    title="下载附件"
+                                  >
+                                    {name}
+                                  </button>
+                                );
+                              })}
                             </div>
                           )}
                           {!isUser && m.task_id && (

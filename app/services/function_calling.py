@@ -28,12 +28,16 @@ class ToolMapping:
     input_schema: dict[str, Any]
     # 非空表示这是委派工具：skill_version_id 字段复用为子智能体版本 ID，执行时走子智能体而非 skill
     child_agent_version_id: UUID | None = None
+    # 工具原始名（如 weixin.send_text）；模型可能按系统提示直接输出原名而非 ASCII 别名
+    original_name: str | None = None
 
 
 def map_tool_calls(calls: list[ModelToolCall], mappings: dict[str, ToolMapping]) -> list[tuple[ToolMapping, dict[str, Any]]]:
     result = []
     for call in calls:
         mapping = mappings.get(call.name)
+        if mapping is None and call.name:
+            mapping = next((item for item in mappings.values() if item.original_name == call.name), None)
         if mapping is None:
             raise ApiError('AI_TOOL_MAPPING_INVALID', 'tool name is not allowed for this agent version', 422)
         try:

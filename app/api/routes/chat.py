@@ -71,11 +71,12 @@ async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: s
     settings = get_settings()
     snapshot_cfg = agent_version.config_snapshot if agent_version is not None else None
     temperature, max_tokens = snapshot_model_params(snapshot_cfg, default_temperature=settings.model_temperature, default_max_tokens=settings.model_max_tokens)
-    model_name = getattr(gateway, "default_model", "mock")
+    model_name = str((snapshot_cfg or {}).get("model") or "").strip() or getattr(gateway, "default_model", "mock")
     max_tokens = effective_max_tokens(db, tenant_id=ctx.tenant_id, model_identifier=model_name, snapshot_max_tokens=(snapshot_cfg or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
     model_request = ModelRequest(
         trace_id=request.state.trace_id,
         conversation_id=conversation.id,
+        tenant_id=ctx.tenant_id,
         messages=build_context(db, conversation, system_prompt=build_agent_system_prompt(db, agent_version)),
         model=model_name,
         temperature=temperature,

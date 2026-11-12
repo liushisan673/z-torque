@@ -15,9 +15,11 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 
 import httpx
+from sqlalchemy import select
 
 from app.kernel.model_gateway.contracts import (
     ModelGateway,
@@ -28,6 +30,8 @@ from app.kernel.model_gateway.contracts import (
     ModelToolCall,
     ModelUsage,
 )
+from app.models import ModelEndpoint, ModelProvider, ModelResource
+from app.security.secret_store import SecretStore, SecretStoreError
 
 logger = logging.getLogger("z_torque.model_gateway")
 
@@ -292,7 +296,19 @@ class OpenAICompatibleGateway(ModelGateway):
 
     @staticmethod
     def _message(message: ModelMessage) -> dict[str, Any]:
-        result: dict[str, Any] = {'role': message.role, 'content': message.content}
+        parts = getattr(message, 'content_parts', None)
+        if parts:
+            content: list[dict[str, Any]] = []
+            for part in parts:
+                if part.type == 'text' and part.text:
+                    content.append({'type': 'text', 'text': part.text})
+                elif part.type == 'image_url' and part.image_url:
+                    content.append({'type': 'image_url', 'image_url': {'url': part.image_url}})
+            if message.content and not any(item.get('type') == 'text' for item in content):
+                content.insert(0, {'type': 'text', 'text': message.content})
+            result: dict[str, Any] = {'role': message.role, 'content': content or message.content}
+        else:
+            result = {'role': message.role, 'content': message.content}
         # 思考模型多轮回传：上游要求历史 assistant 消息必须携带 reasoning_content，否则 400
         if getattr(message, 'reasoning_content', None):
             result['reasoning_content'] = message.reasoning_content
@@ -344,3 +360,113 @@ class MockModelGateway(ModelGateway):
     async def stream(self, request: ModelRequest) -> AsyncIterator[str]:
         response = await self.generate(request)
         yield response.content or ""
+
+
+class ModelRoutingGateway(ModelGateway):
+    """按模型管理配置路由：ModelResource → ModelProvider → ModelEndpoint。
+
+    运行时应以模型管理为准，而不是全局 MODEL_BASE_URL/MODEL_API_KEY：
+    - `request.tenant_id + request.model` 命中 ENABLED 模型时，用其 Provider 密钥与 Endpoint 地址；
+    - 未命中时回退 `default_gateway`（兼容没有被模型管理覆盖的部署/测试）。
+    """
+
+    def __init__(
+        self,
+        *,
+        session_factory: Any,
+        secret_provider: Any = None,
+        default_gateway: ModelGateway | None = None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._secret_provider = secret_provider
+        self._default_gateway = default_gateway
+        self._cache: dict[tuple[str, str, str, str], OpenAICompatibleGateway] = {}
+
+    @property
+    def default_model(self) -> str:
+        return str(getattr(self._default_gateway, "default_model", "") or "")
+
+    def _decrypt(self, secret_ref: str) -> str:
+        if not secret_ref:
+            return ""
+        token = secret_ref.removeprefix("secret://")
+        if self._secret_provider is not None:
+            try:
+                return str(self._secret_provider.decrypt(token))
+            except Exception:
+                logger.warning("model routing secret decrypt via secret.provider failed", exc_info=True)
+        try:
+            return SecretStore().decrypt(token)
+        except SecretStoreError:
+            logger.warning("model routing secret decrypt failed secret_ref=%s", secret_ref)
+            return ""
+
+    def _resolve(self, request: ModelRequest) -> OpenAICompatibleGateway | None:
+        if request.tenant_id is None or self._session_factory is None:
+            return None
+        try:
+            with self._session_factory() as db:
+                resource = db.scalar(
+                    select(ModelResource)
+                    .where(
+                        ModelResource.tenant_id == request.tenant_id,
+                        ModelResource.model_identifier == request.model,
+                        ModelResource.status == "ENABLED",
+                    )
+                    .order_by(ModelResource.created_at)
+                    .limit(1)
+                )
+                if resource is None:
+                    return None
+                provider = db.get(ModelProvider, resource.provider_id)
+                if provider is None or provider.status != "ENABLED":
+                    return None
+                endpoint = db.scalar(
+                    select(ModelEndpoint)
+                    .where(ModelEndpoint.model_id == resource.id, ModelEndpoint.status == "ENABLED")
+                    .order_by(ModelEndpoint.priority, ModelEndpoint.created_at)
+                    .limit(1)
+                )
+                base_url = ((endpoint.endpoint_url if endpoint is not None else None) or provider.base_url or "").strip()
+                if not base_url:
+                    return None
+                secret_ref = (provider.secret_ref or "").strip()
+                cache_key = (str(request.tenant_id), resource.model_identifier, base_url, secret_ref)
+                cached = self._cache.get(cache_key)
+                if cached is not None:
+                    return cached
+                gateway = OpenAICompatibleGateway(
+                    base_url,
+                    self._decrypt(secret_ref),
+                    default_model=request.model,
+                    client=httpx.AsyncClient(trust_env=False),
+                )
+        except Exception:
+            logger.exception("model routing lookup failed model=%s tenant=%s", request.model, request.tenant_id)
+            return None
+        self._cache[cache_key] = gateway
+        return gateway
+
+    def _route(self, request: ModelRequest) -> tuple[ModelGateway, str]:
+        gateway = self._resolve(request)
+        if gateway is not None:
+            return gateway, request.model
+        if self._default_gateway is not None:
+            model = self.default_model or request.model
+            logger.info("model routing fallback to global gateway model=%s requested=%s", model, request.model)
+            return self._default_gateway, model
+        raise ModelGatewayError("AI_MODEL_NOT_AVAILABLE", f"no enabled model endpoint for {request.model!r}")
+
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        gateway, model = self._route(request)
+        return await gateway.generate(replace(request, model=model))
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[str]:
+        gateway, model = self._route(request)
+        async for delta in gateway.stream(replace(request, model=model)):
+            yield delta
+
+    async def stream_response(self, request: ModelRequest) -> AsyncIterator[dict[str, Any]]:
+        gateway, model = self._route(request)
+        async for event in gateway.stream_response(replace(request, model=model)):
+            yield event

@@ -1,6 +1,8 @@
-from functools import lru_cache
 import os
+from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
+from uuid import UUID
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -71,6 +73,15 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_allow_origins.split(',') if item.strip()]
+
+    @property
+    def bridge_media_root(self) -> Path | None:
+        """Bridge 共享媒体目录的宿主机路径；未显式配置时复用入站媒体根目录。"""
+        if self.bridge_media_shared_root is not None:
+            return Path(self.bridge_media_shared_root).expanduser()
+        if self.inbound_media_roots:
+            return Path(self.inbound_media_roots[0]).expanduser()
+        return None
 
     # 显式 Port 覆盖（P2-15）："port.name=module:factory[,port.name=...]"，
     # 解析优先级最高（显式配置 > 插件 > 内置默认）
@@ -227,6 +238,64 @@ class Settings(BaseSettings):
     # 入站真 mTLS 属部署层职责（uvicorn 不向 ASGI 应用暴露客户端证书），见 §12.5
     a2a_federation_enabled: bool = False
 
+    # ---- 企微能力服务事件订阅（AI 中台作为接收方）----
+    # 能力服务把企微入站事件按订阅推送到本服务的 HTTPS Webhook；本服务不直连企微 API。
+    # token / secret 只从 env 读取，不得写入日志或提交真实值。
+    wecom_service_base_url: str = ''
+    wecom_service_token: SecretStr | None = None
+    wecom_sub_secret: SecretStr | None = None
+    # Webhook 路径可配置；默认 /wecom/events，不挂 /api/z-torque 前缀
+    wecom_event_path: str = '/wecom/events'
+    # 事件 ID 去重窗口：服务端会重试，至少保留 24h
+    wecom_dedupe_ttl_seconds: int = 86400
+    wecom_service_timeout_seconds: float = 10.0
+    # 入站消息桥接到控制台 Chat 页：复用现有 Conversation/Message，不新增表。
+    # owner 必须是已存在的本地账号（登录控制台能看到该账号的会话）；agent 留空则取租户内第一个已发布 Agent。
+    wecom_chat_enabled: bool = True
+    wecom_chat_owner_username: str = 'admin'
+    # 兼容旧配置：未按通道拆分时使用；按通道拆分的 Agent 优先
+    wecom_chat_agent_id: str = ''
+    # 按通道拆分：自建应用 / 智能机器人 / 微信客服分别使用不同 Agent
+    wecom_agent_id_app: str = ''
+    wecom_agent_id_bot: str = ''
+    wecom_agent_id_kf: str = ''
+    # Agent 任务型回复的等待上限（秒）；超时后提示用户到控制台查看
+    wecom_task_reply_timeout_seconds: float = 120.0
+    # 通用入站 Webhook：工具型任务完成后等待最终回复落库并推送给控制台的上限（秒）
+    inbound_webhook_task_watch_seconds: float = 600.0
+    # 通用入站 Webhook：回写到外部系统（reply_url）的单次请求超时（秒）
+    inbound_webhook_reply_timeout_seconds: float = 10.0
+
+    # ---- 入站 Webhook 媒体能力（主应用内，与模型/skill 网关同级）----
+    # 本地媒体根目录白名单：Webhook 的 media.filePath 只能落在这些目录内；
+    # 为空时拒绝所有本地路径（仍支持 http(s) 与 base64: 前缀）。
+    inbound_media_roots: list[str] = Field(default_factory=list)
+    inbound_media_timeout_seconds: float = 15.0
+    inbound_max_file_mb: int = 20
+    inbound_max_files: int = 5
+    # ---- 出站媒体：导出到 wechat-Bot 共享卷 ----
+    # 宿主机目录（与 Bridge 容器 bind mount 的目录相同）；为空时复用 inbound_media_roots[0]。
+    bridge_media_shared_root: Path | None = None
+    # 该目录在 Bridge 容器内的路径；weixin.send_media 的 url 传这个容器路径。
+    bridge_media_container_root: str = '/tmp/weixin-agent/media'
+    # 入站媒体根目录（inbound_media_roots）在 Bridge 容器内的路径；用于直接复用已在共享卷的入站媒体
+    bridge_media_inbound_container_root: str = '/tmp/weixin-agent/media'
+    # 导出子目录，避免与 Bridge 的 inbound 媒体混在一起。
+    bridge_media_outbound_subdir: str = 'outbound'
+    # 声明 MIME 白名单（不精确值由媒体落库的扩展名 + 魔术字节兜底）
+    inbound_allowed_media_types: list[str] = Field(default_factory=lambda: [
+        "image/jpeg", "image/png", "image/gif", "image/webp",
+        "audio/mpeg", "audio/wav", "audio/ogg", "audio/amr", "audio/mp4",
+        "video/mp4", "video/quicktime", "video/webm",
+        "application/pdf", "text/plain", "text/markdown", "text/csv",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ])
+    # ---- 多模态上下文 ----
+    # 单条消息最多注入图片数 / 单图上限 / 历史消息图片注入条数（0 = 只当前消息）
+    model_max_images_per_message: int = 4
+    model_max_image_mb: int = 5
+    model_image_history_limit: int = 0
+
     @property
     def resolved_sandbox_roots(self) -> list[str]:
         """沙箱 cwd 白名单（绝对化）。未配置 → md_skills_dir；显式空 → 空列表（由插件拒绝）。"""
@@ -307,6 +376,59 @@ class Settings(BaseSettings):
             raise ValueError('A2A_MAX_FANOUT must be >= 1')
         if self.a2a_max_request_bytes < 1024:
             raise ValueError('A2A_MAX_REQUEST_BYTES must be >= 1024')
+        event_path = (self.wecom_event_path or '').strip()
+        if not event_path.startswith('/') or len(event_path) < 2 or any(ch.isspace() for ch in event_path):
+            raise ValueError("WECOM_EVENT_PATH must start with '/' and contain no whitespace")
+        if self.wecom_dedupe_ttl_seconds < 86400:
+            raise ValueError('WECOM_DEDUPE_TTL_SECONDS must be >= 86400')
+        if self.wecom_service_timeout_seconds <= 0:
+            raise ValueError('WECOM_SERVICE_TIMEOUT_SECONDS must be positive')
+        if self.wecom_chat_enabled:
+            if not self.wecom_chat_owner_username.strip():
+                raise ValueError('WECOM_CHAT_OWNER_USERNAME is required when WECOM_CHAT_ENABLED=true')
+            if self.wecom_chat_agent_id.strip():
+                try:
+                    UUID(self.wecom_chat_agent_id.strip())
+                except ValueError as exc:
+                    raise ValueError('WECOM_CHAT_AGENT_ID must be a UUID') from exc
+            for env_name, value in (
+                ('WECOM_AGENT_ID_APP', self.wecom_agent_id_app),
+                ('WECOM_AGENT_ID_BOT', self.wecom_agent_id_bot),
+                ('WECOM_AGENT_ID_KF', self.wecom_agent_id_kf),
+            ):
+                if not value.strip():
+                    continue
+                try:
+                    UUID(value.strip())
+                except ValueError as exc:
+                    raise ValueError(f'{env_name} must be a UUID') from exc
+        if self.wecom_task_reply_timeout_seconds <= 0:
+            raise ValueError('WECOM_TASK_REPLY_TIMEOUT_SECONDS must be positive')
+        if self.inbound_webhook_task_watch_seconds <= 0:
+            raise ValueError('INBOUND_WEBHOOK_TASK_WATCH_SECONDS must be positive')
+        if self.inbound_webhook_reply_timeout_seconds <= 0:
+            raise ValueError('INBOUND_WEBHOOK_REPLY_TIMEOUT_SECONDS must be positive')
+        if self.inbound_max_file_mb < 1 or self.inbound_max_files < 1:
+            raise ValueError('INBOUND_MAX_FILE_MB and INBOUND_MAX_FILES must be positive')
+        if self.inbound_media_timeout_seconds <= 0:
+            raise ValueError('INBOUND_MEDIA_TIMEOUT_SECONDS must be positive')
+        container_root = (self.bridge_media_container_root or '').strip()
+        inbound_container_root = (self.bridge_media_inbound_container_root or '').strip()
+        if not container_root.startswith('/') or not inbound_container_root.startswith('/'):
+            raise ValueError('BRIDGE_MEDIA_CONTAINER_ROOT and BRIDGE_MEDIA_INBOUND_CONTAINER_ROOT must be absolute container paths')
+        outbound_subdir = (self.bridge_media_outbound_subdir or '').strip()
+        if not outbound_subdir or any(token in outbound_subdir for token in ('/', '\\', '..')):
+            raise ValueError('BRIDGE_MEDIA_OUTBOUND_SUBDIR must be a single relative directory name')
+        if self.model_max_images_per_message < 0 or self.model_max_image_mb < 1 or self.model_image_history_limit < 0:
+            raise ValueError('MODEL_MAX_IMAGES_PER_MESSAGE / MODEL_MAX_IMAGE_MB / MODEL_IMAGE_HISTORY_LIMIT must be valid')
+        wecom_base_url = (self.wecom_service_base_url or '').strip()
+        wecom_token = _plain_secret(self.wecom_service_token) if self.wecom_service_token is not None else ''
+        if bool(wecom_base_url) != bool(wecom_token):
+            raise ValueError('WECOM_SERVICE_BASE_URL and WECOM_SERVICE_TOKEN must be configured together')
+        if wecom_base_url:
+            parsed = urlparse(wecom_base_url)
+            if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+                raise ValueError('WECOM_SERVICE_BASE_URL must be an http(s) URL')
         if self.sandbox_max_processes < 1 or self.sandbox_max_file_bytes < 1:
             raise ValueError('sandbox resource limits must be positive')
         if self.sandbox_isolation_mode not in ('process', 'container'):

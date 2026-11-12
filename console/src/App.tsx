@@ -14,6 +14,7 @@ const AgentsPage = lazy(() => import("./pages/Agents").then((m) => ({ default: m
 const SkillsPage = lazy(() => import("./pages/Skills").then((m) => ({ default: m.SkillsPage })));
 const ModelsPage = lazy(() => import("./pages/Models").then((m) => ({ default: m.ModelsPage })));
 const ConnectorsPage = lazy(() => import("./pages/Connectors").then((m) => ({ default: m.ConnectorsPage })));
+const WebhooksPage = lazy(() => import("./pages/Webhooks").then((m) => ({ default: m.WebhooksPage })));
 const AuditPage = lazy(() => import("./pages/Audit").then((m) => ({ default: m.AuditPage })));
 const UsersPage = lazy(() => import("./pages/Users").then((m) => ({ default: m.UsersPage })));
 // 嵌入对话页：第三方宿主 iframe 集成，不走 RequireAccess（自带登录态探测）
@@ -74,6 +75,7 @@ export function App() {
           <Route path="/skills" element={<RequireAccess><ConsoleShell><SkillsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/models" element={<RequireAccess navTo="/models"><ConsoleShell><ModelsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/connectors" element={<RequireAccess navTo="/connectors"><ConsoleShell><ConnectorsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/webhooks" element={<RequireAccess navTo="/webhooks"><ConsoleShell><WebhooksPage /></ConsoleShell></RequireAccess>} />
           <Route path="/audit" element={<RequireAccess><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
           <Route path="/users" element={<RequireAccess navTo="/users"><ConsoleShell><UsersPage /></ConsoleShell></RequireAccess>} />
           <Route path="*" element={<HomeRedirect />} />

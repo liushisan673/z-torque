@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request, UploadFile
 from fastapi import File as UploadFileParam
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -18,7 +19,9 @@ from app.kernel.audit.service import record_audit
 from app.kernel.ports.object_store import ObjectStore
 from app.models import Conversation, File, User
 from app.models.message import message_file
+from app.services.bridge_media import export_file_to_bridge
 from app.services.file_parser import SUPPORTED, parse_file
+from app.services.media_ingest import signature_matches
 
 router = APIRouter(prefix="/files", tags=["files"])
 logger = logging.getLogger("z_torque.files")
@@ -37,8 +40,8 @@ def owned_file(db: Session, user: User, file_id: UUID) -> File:
 
 
 def _signature_matches(path: Path, suffix: str) -> bool:
-    header = path.read_bytes()[:8]
-    return {".pdf": header.startswith(b"%PDF"), ".xlsx": header.startswith(b"PK"), ".txt": True, ".md": True, ".csv": True}.get(suffix, False)
+    # 与媒体落库共用同一套魔术字节判定，避免两处规则漂移
+    return signature_matches(suffix, path.read_bytes()[:16])
 
 
 def metadata(item: File) -> dict:
@@ -99,6 +102,72 @@ async def content(file_id: UUID, request: Request, user: User = Depends(get_curr
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="FILE_READ", resource_type="FILE", resource_id=item.id, summary="file content read", trace_id=request.state.trace_id)
     db.commit()
     return success_response(request, {"id": str(item.id), "content": item.extracted_text or ""})
+
+
+@router.get("/{file_id}/raw", summary="读取原始文件")
+async def raw(file_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """返回 object.store 中的原始字节（图片/音频/视频预览与文件下载共用）。"""
+    item = owned_file(db, user, file_id)
+    if item.status == "DELETED":
+        raise ApiError("AI_RESOURCE_NOT_FOUND", "file not found", 404)
+    store = _object_store(request)
+    target = store.local_path(item.storage_key)
+    if not target.is_file():
+        raise ApiError("AI_RESOURCE_NOT_FOUND", "file object not found", 404)
+    record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="FILE_READ", resource_type="FILE", resource_id=item.id, summary="file raw content read", trace_id=request.state.trace_id)
+    db.commit()
+    return FileResponse(
+        target,
+        media_type=item.media_type or "application/octet-stream",
+        filename=item.original_name,
+        content_disposition_type="inline",
+    )
+
+
+@router.post("/{file_id}/bridge-export", summary="导出文件到 Bridge 共享卷")
+async def bridge_export(file_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """把文件复制到 wechat-Bot 共享卷，返回 Bridge 容器内可发送路径。
+
+    同机部署时，智能体可把返回的 ``bridge_path`` 作为 ``weixin.send_media`` 的
+    ``url`` 参数，Bridge 会按容器内本地文件读取并发送到微信。
+    """
+    item = owned_file(db, user, file_id)
+    if item.status == "DELETED":
+        raise ApiError("AI_RESOURCE_NOT_FOUND", "file not found", 404)
+    store = _object_store(request)
+    exported = export_file_to_bridge(item, store, get_settings())
+    record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="FILE_EXPORTED",
+        resource_type="FILE",
+        resource_id=item.id,
+        summary="file exported to bridge shared volume",
+        detail={"bridge_path": exported.bridge_path},
+        trace_id=request.state.trace_id,
+    )
+    db.commit()
+    return success_response(
+        request,
+        {
+            "file_id": str(item.id),
+            "bridge_path": exported.bridge_path,
+            "media_type": exported.media_type,
+            "file_name": exported.file_name,
+            "size_bytes": exported.size_bytes,
+            "sha256": exported.sha256,
+            # 直接可用的工具调用参数，前端/智能体编排层可原样透传
+            "send_media": {
+                "tool": "weixin.send_media",
+                "arguments": {
+                    "media_type": exported.media_type,
+                    "url": exported.bridge_path,
+                    "file_name": exported.file_name,
+                },
+            },
+        },
+    )
 
 
 @router.delete("/{file_id}", summary="删除文件")

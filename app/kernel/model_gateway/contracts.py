@@ -1,12 +1,23 @@
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 from uuid import UUID
+
+
+@dataclass(frozen=True)
+class ModelContentPart:
+    """多模态消息片段；``image_url`` 为 data URI 或可访问 URL。"""
+
+    type: Literal["text", "image_url"]
+    text: str | None = None
+    image_url: str | None = None
 
 
 @dataclass(frozen=True)
 class ModelMessage:
     role: str
     content: str | None = None
+    # 为空时行为与纯文本链路完全一致（网关只输出 {role, content}）
+    content_parts: list[ModelContentPart] | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     # 思考模型（如 deepseek-flash）的思考过程：多轮回传时官方要求必须携带，否则上游 400
@@ -42,6 +53,8 @@ class ModelRequest:
     trace_id: str
     messages: list[ModelMessage]
     model: str
+    # 模型路由所需：按租户查 ModelResource → Provider → Endpoint；为空时回退全局网关
+    tenant_id: UUID | None = None
     # 无会话任务（POST /tasks）没有 conversation_id：上下文改由 task.request_summary 提供
     conversation_id: UUID | None = None
     tools: list[dict[str, Any]] = field(default_factory=list)

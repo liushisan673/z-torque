@@ -16,6 +16,11 @@ const BASE =
   (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_API_BASE) ||
   "";
 
+/** 后端地址（用于展示需要外部系统直接调用的入站地址，如 Webhook）。 */
+export function apiBaseUrl(): string {
+  return BASE || (typeof window !== "undefined" ? window.location.origin : "");
+}
+
 export class ApiRequestError extends Error {
   readonly code: string;
   readonly status: number;
@@ -214,6 +219,29 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     throw new ApiRequestError(envelope.code ? String(envelope.code) : "AI_INTERNAL_ERROR", envelope.message, resp.status, envelope.trace_id || traceId);
   }
   return envelope.data;
+}
+
+/**
+ * 受保护文件读取：带 Bearer 头取回 blob。
+ * 媒体气泡用它生成 object URL；`<img src>` 无法携带 Authorization。
+ */
+export async function fetchBlob(path: string): Promise<Blob> {
+  const url = buildUrl(path);
+  const token = getAccessToken();
+  const resp = await fetchWithAuth(url, {
+    method: "GET",
+    credentials: "same-origin",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!resp.ok) {
+    const envelope = await safeEnvelope(resp);
+    throw new ApiRequestError(
+      String(envelope?.code ?? "AI_INTERNAL_ERROR"),
+      envelope?.message ?? `读取失败（${resp.status}）`,
+      resp.status,
+    );
+  }
+  return resp.blob();
 }
 
 /**

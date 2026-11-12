@@ -19,6 +19,7 @@ from app.models.tool_skill import (
     Tool,
     ToolVersion,
 )
+from app.models.webhook import InboundWebhook, InboundWebhookEvent
 
 # 插件自有表（AuditExportJob / AuditExportShard / AuditArchiveBatch）不在此处导出：
 # 方案 b 下它们的模型定义跟随插件目录 `app/builtin_plugins/audit_export_archive/models.py`，
@@ -35,6 +36,8 @@ __all__ = [
     "ConnectorTool",
     "Conversation",
     "File",
+    "InboundWebhook",
+    "InboundWebhookEvent",
     "Message",
     # 关联表本身不对外使用，但必须在包级 import 一次才会注册进 Base.metadata
     "message_file",

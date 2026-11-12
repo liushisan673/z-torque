@@ -41,12 +41,23 @@ export interface Conversation {
   last_message_at: string | null;
 }
 
+export type MessageContentPartType = "image" | "file" | "audio" | "video" | string;
+
+// 消息附件片段：type + file_id 由后端写入；file_name/mime_type 用于展示与降级提示
+export interface MessageContentPart {
+  type?: MessageContentPartType;
+  file_id?: string;
+  file_name?: string;
+  mime_type?: string;
+  [key: string]: unknown;
+}
+
 export interface Message {
   id: string;
   conversation_id: string;
   sender_type: "USER" | "ASSISTANT" | string;
   content: string;
-  content_parts: unknown[] | null;
+  content_parts: MessageContentPart[] | null;
   status: string;
   task_id: string | null;
   error_code: string | null;
@@ -126,6 +137,46 @@ export interface TaskSnapshot {
   parent_task_id: string | null;
   delegation_depth: number;
   child_sequence: number | null;
+}
+
+// ---- 通用入站 Webhook ----
+export interface InboundWebhook {
+  id: string;
+  name: string;
+  description: string | null;
+  enabled: boolean;
+  target_agent_id: string;
+  target_agent_name: string | null;
+  auth_mode: "HMAC" | "TOKEN" | string;
+  signature_header: string;
+  timestamp_header: string;
+  event_id_header: string;
+  token_header: string;
+  token_prefix: string;
+  signature_algorithm: "SHA256" | "SHA1" | string;
+  signature_encoding: "HEX" | "BASE64" | string;
+  signature_prefix: string;
+  signature_template: string;
+  timestamp_tolerance_seconds: number;
+  message_path: string;
+  conversation_key_path: string;
+  event_id_path: string;
+  media_path: string | null;
+  media_type_path: string;
+  media_source_path: string;
+  media_mime_path: string;
+  media_file_name_path: string;
+  media_placeholder_texts: string[];
+  reply_url: string | null;
+  reply_token_configured: boolean;
+  reply_account_path: string;
+  reply_peer_path: string;
+  inbound_path: string;
+  secret_configured: boolean;
+  last_received_at: string | null;
+  created_at: string;
+  // 仅创建/轮换时返回一次
+  secret?: string;
 }
 
 // ---- Agent ----

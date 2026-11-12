@@ -5,12 +5,42 @@ max_tokens 优先级：智能体版本快照（显式逐智能体配置）> 模�
 模型页未配置或无匹配档案时原值直通，不改变既有行为。
 """
 
+from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import ModelResource
+
+
+@dataclass(frozen=True)
+class ModelCapabilities:
+    supports_vision: bool = False
+    supports_audio: bool = False
+
+
+def model_capabilities(db: Session, *, tenant_id: UUID, model_identifier: str | None) -> ModelCapabilities:
+    """按租户 + 模型标识读取模型档案 config 中的多模态能力；缺省一律 False。"""
+    if not model_identifier:
+        return ModelCapabilities()
+    config: Any = db.scalar(
+        select(ModelResource.config)
+        .where(
+            ModelResource.tenant_id == tenant_id,
+            ModelResource.model_identifier == model_identifier,
+            ModelResource.status == "ENABLED",
+        )
+        .order_by(ModelResource.created_at)
+        .limit(1)
+    )
+    if not isinstance(config, dict):
+        return ModelCapabilities()
+    return ModelCapabilities(
+        supports_vision=bool(config.get("supports_vision")),
+        supports_audio=bool(config.get("supports_audio")),
+    )
 
 
 def effective_max_tokens(

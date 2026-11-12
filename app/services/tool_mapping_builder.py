@@ -74,7 +74,8 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             # 净化后同时用于"发给模型的工具定义"与"执行侧参数校验"，保证两侧一致
             schema = _sanitize_schema(tool_version.input_schema or {"type": "object", "properties": {}})
             alias = safe_function_name(name)
-            mappings[alias] = ToolMapping(alias, skill.id, tool_version.id, schema)
+            # 同时记录原始工具名：模型可能直接输出系统提示里的 weixin.send_text 等原名
+            mappings[alias] = ToolMapping(alias, skill.id, tool_version.id, schema, original_name=name)
             # 工具描述只取工具自身 description，禁止回退到 skill.instructions——
             # 流程指令属于 system prompt，塞进单个工具描述会误导模型把该函数当作流程中的其他工具
             desc = f"{name}：{(tool.description or '').strip()}".rstrip("：")[:512]

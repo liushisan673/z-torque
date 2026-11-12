@@ -40,6 +40,7 @@ lint = ["ruff==0.17.2"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+norecursedirs = ["data", "console", "docs", "md-skills", "node_modules", "__pycache__", ".venv", ".git"]
 
 [tool.ruff]
 line-length = 100

@@ -8,12 +8,14 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_optional_user
 from app.api.router import router as api_router
+from app.api.routes.webhooks import inbound_router as webhook_inbound_router
+from app.api.routes.wecom_events import build_router as build_wecom_events_router
 from app.assembly import assemble, resolve_profile
 from app.config import get_settings
 from app.core.errors import ApiError
@@ -84,6 +86,7 @@ OPENAPI_TAG_DESCRIPTIONS = [
     {"name": "md-skills", "description": "MD 技能包：SKILL.md / zip 上传解析与目录扫描导入"},
     {"name": "models", "description": "模型接入：供应商、模型与接入点三层管理及连通性测试"},
     {"name": "connectors", "description": "连接器：MCP / REST / 数据库连接管理、工具发现注册、连通性测试"},
+    {"name": "webhooks", "description": "通用入站 Webhook：外部系统回调消息接入配置与密钥轮换"},
     {"name": "files", "description": "文件管理：上传、状态查询、内容下载与删除"},
     {"name": "secrets", "description": "密钥存储：明文转 Secret 加密引用（明文不落库）"},
     {"name": "audit", "description": "审计日志：事件检索、详情与 Trace 链路查询（只读）"},
@@ -115,6 +118,11 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+# 企微能力服务事件 Webhook：路径由 WECOM_EVENT_PATH 决定（默认 /wecom/events），
+# 不挂 /api/z-torque 前缀 —— 能力服务按订阅配置直接推送到根路径。
+app.include_router(build_wecom_events_router(get_settings().wecom_event_path))
+# 通用入站 Webhook：外部系统按配置调用 POST /webhooks/{id}，与用户鉴权链路隔离
+app.include_router(webhook_inbound_router)
 
 
 # 外部 trace 只接受限长、受限字符集；非法值（换行/超长/任意文本）一律重新生成，
@@ -291,4 +299,65 @@ def _mount_console(target: FastAPI) -> None:
         return FileResponse(index_file)
 
 
+def _register_root(target: FastAPI) -> None:
+    """控制台未构建/未启用时，根路径返回服务落地页而不是 404。"""
+    settings = get_settings()
+    if settings.serve_console and (_resolve_console_dist(settings) / "index.html").is_file():
+        # 单端口交付模式：根路径由 console SPA 接管
+        return
+
+    @target.get("/", include_in_schema=False)
+    async def root():
+        return HTMLResponse(
+            status_code=200,
+            content=f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Z-Torque 社区版</title>
+  <style>
+    :root {{ color-scheme: light dark; }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #0f172a; color: #e2e8f0;
+    }}
+    .card {{
+      width: min(560px, calc(100vw - 40px)); padding: 32px; border-radius: 16px;
+      background: #111827; border: 1px solid #1f2937;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .38);
+    }}
+    h1 {{ margin: 0 0 8px; font-size: 22px; letter-spacing: .2px; }}
+    p {{ margin: 0 0 22px; color: #94a3b8; line-height: 1.65; font-size: 14px; }}
+    code {{ color: #cbd5e1; }}
+    .links {{ display: grid; gap: 10px; }}
+    a {{
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 14px; border-radius: 10px; text-decoration: none;
+      background: #1f2937; color: #e2e8f0; border: 1px solid #334155;
+      transition: background .15s ease, border-color .15s ease;
+    }}
+    a:hover {{ background: #273449; border-color: #475569; }}
+    .tag {{ font-size: 12px; color: #94a3b8; }}
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Z-Torque 社区版</h1>
+    <p>服务运行中 · v{app.version}<br>API 前缀 <code>/api/z-torque</code></p>
+    <div class="links">
+      <a href="/docs">API 文档 <span class="tag">Swagger UI</span></a>
+      <a href="/redoc">API 文档 <span class="tag">ReDoc</span></a>
+      <a href="/health">健康检查 <span class="tag">JSON</span></a>
+      <a href="/api/z-torque/capabilities">能力清单 <span class="tag">JSON</span></a>
+    </div>
+  </main>
+</body>
+</html>""",
+        )
+
+
+_register_root(app)
 _mount_console(app)

@@ -8,6 +8,7 @@ from app.api.routes.audit_exports import archive_router as audit_archive_router
 from app.api.routes.audit_exports import router as audit_exports_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.chat import router as chat_router
+from app.api.routes.chat_events import router as chat_events_router
 from app.api.routes.confirmations import router as confirmations_router
 from app.api.routes.connectors import router as connectors_router
 from app.api.routes.conversations import router as conversations_router
@@ -19,6 +20,7 @@ from app.api.routes.secrets import router as secrets_router
 from app.api.routes.skills_tools import router as skills_tools_router
 from app.api.routes.tasks import router as tasks_router
 from app.api.routes.users_roles_compat import router as users_roles_compat_router
+from app.api.routes.webhooks import router as webhooks_router
 
 router = APIRouter(prefix="/api/z-torque")
 router.include_router(auth_router)
@@ -31,6 +33,7 @@ router.include_router(messages_router)
 router.include_router(skills_tools_router)
 router.include_router(confirmations_router)
 router.include_router(chat_router)
+router.include_router(chat_events_router)
 router.include_router(md_skills_router)
 router.include_router(connectors_router)
 router.include_router(models_router)
@@ -40,3 +43,4 @@ router.include_router(audit_exports_router)
 router.include_router(audit_archive_router)
 router.include_router(a2a_router)
 router.include_router(secrets_router)
+router.include_router(webhooks_router)

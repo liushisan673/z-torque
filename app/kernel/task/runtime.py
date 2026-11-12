@@ -48,7 +48,7 @@ from app.services.context_builder import (
     build_context,
 )
 from app.services.execution_loop import AgentExecutionLoop
-from app.services.model_limits import effective_max_tokens
+from app.services.model_limits import effective_max_tokens, model_capabilities
 from app.services.tool_mapping_builder import build_tool_mappings
 
 logger = logging.getLogger("z_torque.task_worker")
@@ -291,9 +291,17 @@ class TaskRuntime:
             # 与 chat 页面流式链路一致：系统提示 + 绑定 skill 执行指令
             system_prompt = build_agent_system_prompt(db, agent_version, [m.skill_version_id for m in mappings.values() if m.skill_version_id])
             selection = self._resolve_selection(db, task.tenant_id, agent_version)
-            messages = build_context(db, conversation, system_prompt=system_prompt) if conversation is not None else [ModelMessage(role="user", content=task.request_summary or "")]
+            capabilities = model_capabilities(db, tenant_id=task.tenant_id, model_identifier=selection.model)
+            messages = build_context(
+                db,
+                conversation,
+                system_prompt=system_prompt,
+                supports_vision=capabilities.supports_vision,
+                supports_audio=capabilities.supports_audio,
+            ) if conversation is not None else [ModelMessage(role="user", content=task.request_summary or "")]
             request = ModelRequest(
                 trace_id=str(task.id), task_id=task.id, conversation_id=task.conversation_id,
+                tenant_id=task.tenant_id,
                 agent_version_id=task.agent_version_id,
                 model=selection.model, temperature=selection.temperature, max_tokens=selection.max_tokens,
                 messages=messages,
@@ -337,7 +345,7 @@ class TaskRuntime:
             return self._fail_model_task(db, task, "AI_TOOL_MAPPING_INVALID", "tool execution requires an agent tool mapping")
         if not response.content:
             return self._fail_model_task(db, task, "AI_MODEL_RESPONSE_INVALID", "model returned an empty response")
-        await self._finish_chat_task(db, task, conversation, trigger, response)
+        await self._finish_chat_task(db, task, conversation, trigger, response, model=selection.model)
         self._cancellation_events.pop(task_id, None)
         return {"task_id": str(task_id), "status": "SUCCEEDED"}
 
@@ -393,6 +401,7 @@ class TaskRuntime:
         selection = self._resolve_selection(db, task.tenant_id, agent_version)
         request = ModelRequest(
             trace_id=str(task.id), task_id=task.id, conversation_id=conversation.id,
+            tenant_id=task.tenant_id,
             agent_version_id=task.agent_version_id,
             model=selection.model, temperature=selection.temperature, max_tokens=selection.max_tokens,
             messages=[], tools=tools, timeout_seconds=get_settings().model_timeout_seconds,
@@ -428,11 +437,11 @@ class TaskRuntime:
             return self._fail_model_task(db, task, "AI_TASK_FAILED", "chat task failed")
         if not response.content:
             return self._fail_model_task(db, task, "AI_MODEL_RESPONSE_INVALID", "model returned an empty response")
-        await self._finish_chat_task(db, task, conversation, trigger, response)
+        await self._finish_chat_task(db, task, conversation, trigger, response, model=selection.model)
         self._cancellation_events.pop(task_id, None)
         return {"task_id": str(task_id), "status": "SUCCEEDED"}
 
-    async def _finish_chat_task(self, db, task: Task, conversation: Conversation | None, trigger: Message | None, response) -> None:
+    async def _finish_chat_task(self, db, task: Task, conversation: Conversation | None, trigger: Message | None, response, *, model: str | None = None) -> None:
         """任务收尾：审计 + 写回复消息 + 触发消息置完成 + 任务成功 + 会话摘要维护。
 
         conversation 为 None 表示无会话任务（POST /tasks）：结果只落 task.result，
@@ -447,6 +456,7 @@ class TaskRuntime:
             actor_user_id=task.owner_user_id,
             summary="model call completed",
             detail={
+                "model": model,
                 "provider_request_id": response.provider_request_id,
                 "usage": response.usage.__dict__ if response.usage else None,
                 # 耗时 = 任务认领（started_at）→ 本次调用结束，供审计页"耗时"列展示
