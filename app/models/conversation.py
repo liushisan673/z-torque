@@ -15,4 +15,6 @@ class Conversation(TenantModel):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
     # 两列在迁移里是 timestamptz，模型同步声明 timezone=True
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 已读位：列表按 last_message_at 排序后，用它计算未读消息数（NULL 视为从未读过）
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

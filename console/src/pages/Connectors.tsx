@@ -4,10 +4,13 @@ import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import type {
   Connector,
+  ConnectorDiscoverResult,
   ConnectorDiscoveredToolSummary,
   ConnectorOpenapiImportResult,
   ConnectorTestResult,
+  ConnectorToolDrift,
   ConnectorToolLink,
+  ConnectorToolSyncResult,
 } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
@@ -15,6 +18,7 @@ import { SecretRefInput } from "../components/SecretRefInput";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { TruncatedDesc } from "../components/TruncatedDesc";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { useAuth } from "../stores/auth";
 
@@ -240,6 +244,9 @@ export function ConnectorsPage() {
   // MCP 工具发现（/discover 结果，切换连接时重置）
   const [discovering, setDiscovering] = useState(false);
   const [discovered, setDiscovered] = useState<ConnectorDiscoveredToolSummary[] | null>(null);
+  // 远端与本地登记的差异（只在发现时计算，供人工确认后一键同步）
+  const [drift, setDrift] = useState<ConnectorToolDrift | null>(null);
+  const [syncing, setSyncing] = useState(false);
 
   // OpenAPI 批量导入（REST 专用）：REST 没有自动发现协议，靠 spec 一次性录入 N 个接口
   const [oaOpen, setOaOpen] = useState(false);
@@ -417,6 +424,7 @@ export function ConnectorsPage() {
     setEditing(false);
     setTestFailure(null);
     setDiscovered(null);
+    setDrift(null);
     // 切换连接器时重置已注册工具的筛选与页码，避免残留上一连接的过滤条件
     setToolKeyword("");
     setToolType("all");
@@ -662,13 +670,39 @@ export function ConnectorsPage() {
     setDiscovering(true);
     setError(null);
     try {
-      const r = await request<{ connector_id: string; tools: ConnectorDiscoveredToolSummary[]; requires_approval: boolean }>(`${API}/${detail.id}/discover`, { method: "POST" });
+      const r = await request<ConnectorDiscoverResult>(`${API}/${detail.id}/discover`, { method: "POST" });
       setDiscovered(r.tools);
+      setDrift(r.drift ?? null);
     } catch (err) {
       setDiscovered(null);
+      setDrift(null);
       setError(errorText(err, "发现工具失败"));
     } finally {
       setDiscovering(false);
+    }
+  }
+
+  // MCP 漂移同步：把远端最新的说明/入参写回已登记工具（需人工点击确认，不自动执行）
+  async function syncDrift() {
+    if (!detail || !drift || drift.changed.length === 0) return;
+    setSyncing(true);
+    setError(null);
+    try {
+      const r = await request<ConnectorToolSyncResult>(`${API}/${detail.id}/tools/sync`, {
+        method: "POST",
+        body: { names: drift.changed.map((item) => item.name) },
+      });
+      await loadTools(detail.id);
+      await runDiscover();
+      if (r.updated.length === 0) {
+        toast("info", r.skipped.length > 0 ? `未同步：${r.skipped.map((s) => s.name).slice(0, 3).join("、")}` : "没有需要同步的变更");
+      } else {
+        toast("success", `已同步 ${r.updated.length} 个工具${r.skipped.length > 0 ? `，跳过 ${r.skipped.length} 个` : ""}`);
+      }
+    } catch (err) {
+      setError(errorText(err, "同步工具失败"));
+    } finally {
+      setSyncing(false);
     }
   }
 
@@ -1149,6 +1183,8 @@ export function ConnectorsPage() {
   const registeredNames = new Set(
     tools.map((t) => String(t.external_name ?? t.name ?? "").trim()).filter(Boolean),
   );
+  // 发现结果中与本地登记存在内容差异的工具名（仅用于打标提示）
+  const changedDiscoveredNames = new Set((drift?.changed ?? []).map((item) => item.name));
   // 业务封装可选子工具：仅取有已发布版本且未归档的工具
   const compositeCandidates = tools.filter((tool) => tool.published_version_id && tool.status !== "ARCHIVED");
   const enabled = selected?.status === "ENABLED";
@@ -1842,7 +1878,7 @@ export function ConnectorsPage() {
                                   )}
                                 </td>
                                 <td>{toolTypeLabel(t.tool_type)}{t.published_version_number ? <span className="connector-tool-ver">v{t.published_version_number}</span> : null}</td>
-                                <td>{t.description ?? "—"}</td>
+                                <td><TruncatedDesc text={t.description} modalTitle="工具说明" /></td>
                                 <td>
                                   <div className="connector-tool-tags">
                                     {(t.tags ?? []).length === 0
@@ -1918,6 +1954,45 @@ export function ConnectorsPage() {
                       {selected.connector_type === "MCP" && discovered !== null && (
                         <div className="connector-section" style={{ marginTop: 12, marginBottom: 0 }}>
                           <h3>发现结果 <span className="hint">来自 MCP 服务 tools/list · 需注册后才可用</span></h3>
+                          {drift && drift.has_drift && (
+                            <div className="skill-readonly-banner" style={{ marginBottom: 12 }}>
+                              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                                <strong>远端与本地登记存在差异</strong>
+                                <span>新增 {drift.added.length}</span>
+                                <span>已下线 {drift.removed.length}</span>
+                                <span>内容变更 {drift.changed.length}</span>
+                                <span className="hint">未变化 {drift.unchanged}</span>
+                                <div style={{ flex: 1 }} />
+                                {canManage && enabled && drift.changed.length > 0 && (
+                                  <button
+                                    className="btn btn-primary btn-sm"
+                                    disabled={busy || syncing}
+                                    onClick={() => void syncDrift()}
+                                    title="把远端最新的说明/入参写回已登记工具；入参变更会生成新的发布版本，既有 Skill 绑定不受影响"
+                                  >
+                                    {syncing ? "同步中…" : `同步更新（${drift.changed.length}）`}
+                                  </button>
+                                )}
+                              </div>
+                              {(drift.changed.length > 0 || drift.removed.length > 0) && (
+                                <ul style={{ margin: "8px 0 0 18px", padding: 0 }}>
+                                  {drift.changed.map((item) => (
+                                    <li key={`changed-${item.name}`}>
+                                      {item.name}：
+                                      {item.fields.map((field) => (field === "description" ? "说明" : "参数 Schema")).join("、")}
+                                      有更新
+                                    </li>
+                                  ))}
+                                  {drift.removed.map((item) => (
+                                    <li key={`removed-${item.name}`}>{item.name}：远端已下线，本地登记仍在，建议人工归档</li>
+                                  ))}
+                                </ul>
+                              )}
+                              {drift.added.length > 0 && (
+                                <div className="hint" style={{ marginTop: 6 }}>新增工具可直接逐个登记或批量登记。</div>
+                              )}
+                            </div>
+                          )}
                           {discovered.length === 0 ? (
                             <div className="skill-readonly-banner">MCP 服务未返回任何工具。</div>
                           ) : (
@@ -1934,8 +2009,13 @@ export function ConnectorsPage() {
                                   const already = registeredNames.has(t.name.trim());
                                   return (
                                     <tr key={t.name}>
-                                      <td className="op-name">{t.name}</td>
-                                      <td>{t.description || "—"}</td>
+                                      <td className="op-name">
+                                        {t.name}
+                                        {changedDiscoveredNames.has(t.name.trim()) && (
+                                          <span className="connector-tag connector-tag-warn">有变更</span>
+                                        )}
+                                      </td>
+                                      <td><TruncatedDesc text={t.description} modalTitle="工具说明" /></td>
                                       {canManage && enabled && (
                                         <td>
                                           {already ? (

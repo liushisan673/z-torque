@@ -1,5 +1,7 @@
+import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
@@ -22,6 +24,7 @@ from app.schemas.connector import (
     ConnectorPatchRequest,
     ConnectorToolReconfigureRequest,
     ConnectorToolRegisterRequest,
+    ConnectorToolSyncRequest,
 )
 from app.security.permissions import require_permissions
 
@@ -69,6 +72,137 @@ def _mcp_allow_private(item: Connector) -> bool:
     """连接器 target_policy 声明的内网/明文放行（探测与执行同源，语义对齐 REST）。"""
     config_policy = (item.config or {}).get("target_policy") if isinstance((item.config or {}).get("target_policy"), dict) else {}
     return bool(config_policy.get("allow_private_network") or (item.target_policy or {}).get("allow_private_network"))
+
+
+@dataclass(frozen=True)
+class _RegisteredMcpTool:
+    """已登记 MCP 工具的当前状态：漂移比对与同步都以它为本地基准。"""
+
+    name: str  # 连接器侧外部名（缺省回退工具名）
+    tool_id: UUID
+    tool_name: str
+    description: str
+    input_schema: dict
+    version: ToolVersion
+
+
+def _normalize_discovered_tools(listing: dict) -> list[dict]:
+    """MCP tools/list 原始结果 → 统一结构（MCP 规范为 camelCase inputSchema）。"""
+    return [
+        {
+            "name": str(t.get("name")),
+            "description": str(t.get("description") or ""),
+            "input_schema": t.get("inputSchema") if isinstance(t.get("inputSchema"), dict) else {},
+        }
+        for t in (listing.get("tools") or [])
+        if isinstance(t, dict) and t.get("name")
+    ]
+
+
+def _schema_signature(schema: Any) -> str:
+    """Schema 比对用规范化签名：键序差异不算变更，类型/必填/描述差异都算。"""
+    if not isinstance(schema, dict):
+        return "{}"
+    try:
+        return json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _load_registered_mcp_tools(db: Session, tenant_id: UUID, connector_id: UUID) -> dict[str, _RegisteredMcpTool]:
+    """加载连接器下已登记、可用于比对的 MCP 工具（归档工具与业务封装不参与）。"""
+    links = db.scalars(
+        select(ConnectorTool).where(ConnectorTool.connector_id == connector_id, ConnectorTool.tenant_id == tenant_id)
+    ).all()
+    tool_ids = [link.tool_id for link in links]
+    if not tool_ids:
+        return {}
+    tools = {
+        tool.id: tool
+        for tool in db.scalars(select(Tool).where(Tool.id.in_(tool_ids), Tool.tenant_id == tenant_id)).all()
+    }
+    # 每个工具取当前发布版本；缺失时回退到最新发布版本（与 GET /tools 的取值口径一致）
+    published_by_id: dict[UUID, ToolVersion] = {}
+    latest_by_tool: dict[UUID, ToolVersion] = {}
+    for version in db.scalars(
+        select(ToolVersion)
+        .where(ToolVersion.tool_id.in_(tool_ids), ToolVersion.tenant_id == tenant_id, ToolVersion.status == "PUBLISHED")
+        .order_by(ToolVersion.version_number)
+    ).all():
+        published_by_id[version.id] = version
+        latest_by_tool[version.tool_id] = version
+    registered: dict[str, _RegisteredMcpTool] = {}
+    for link in links:
+        tool = tools.get(link.tool_id)
+        if tool is None or tool.status != "ACTIVE" or tool.tool_type != "MCP":
+            continue
+        version = published_by_id.get(tool.current_published_version_id) if tool.current_published_version_id else None
+        version = version or latest_by_tool.get(tool.id)
+        if version is None:
+            continue
+        name = str(link.external_name or tool.name or "").strip()
+        if not name:
+            continue
+        registered[name] = _RegisteredMcpTool(
+            name=name,
+            tool_id=tool.id,
+            tool_name=tool.name,
+            description=str(tool.description or ""),
+            input_schema=version.input_schema if isinstance(version.input_schema, dict) else {},
+            version=version,
+        )
+    return registered
+
+
+def _diff_mcp_tools(discovered: list[dict], registered: dict[str, _RegisteredMcpTool]) -> dict:
+    """远端 tools/list 与本地登记比对：新增 / 已下线 / 内容变更（说明、入参 Schema）。"""
+    remote: dict[str, dict] = {}
+    for item in discovered:
+        name = str(item.get("name") or "").strip()
+        if name:
+            remote[name] = item
+    added = [
+        {"name": name, "description": str(item.get("description") or "")}
+        for name, item in remote.items()
+        if name not in registered
+    ]
+    removed = [
+        {"name": name, "tool_id": str(item.tool_id), "tool_name": item.tool_name}
+        for name, item in registered.items()
+        if name not in remote
+    ]
+    changed: list[dict] = []
+    unchanged = 0
+    for name, item in remote.items():
+        local = registered.get(name)
+        if local is None:
+            continue
+        remote_description = str(item.get("description") or "")
+        fields: list[str] = []
+        if remote_description != local.description:
+            fields.append("description")
+        if _schema_signature(item.get("input_schema")) != _schema_signature(local.input_schema):
+            fields.append("input_schema")
+        if not fields:
+            unchanged += 1
+            continue
+        changed.append(
+            {
+                "name": name,
+                "tool_id": str(local.tool_id),
+                "tool_name": local.tool_name,
+                "fields": fields,
+                "local_description": local.description,
+                "remote_description": remote_description,
+            }
+        )
+    return {
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+        "unchanged": unchanged,
+        "has_drift": bool(added or removed or changed),
+    }
 
 
 async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = None, allow_private_network: bool = False) -> dict:
@@ -594,18 +728,99 @@ async def discover_connector(connector_id: UUID, request: Request, user: ReadUse
     except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
         raise ApiError("AI_CONNECTOR_UNAVAILABLE", f"MCP 工具发现失败：{_mcp_error_reason(exc)}", 503) from exc
     # MCP 规范为 camelCase（inputSchema），统一转本项目 snake_case 返回
-    tools = [
-        {
-            "name": t.get("name"),
-            "description": str(t.get("description") or ""),
-            "input_schema": t.get("inputSchema") if isinstance(t.get("inputSchema"), dict) else {},
-        }
-        for t in (listing.get("tools") or [])
-        if isinstance(t, dict) and t.get("name")
-    ]
-    record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_DISCOVERED", resource_type="CONNECTOR", resource_id=item.id, summary="connector tools discovered", detail={"tool_count": len(tools)})
+    tools = _normalize_discovered_tools(listing)
+    # 发现结果与本地登记比对：只提示差异，不自动改写已登记工具（需人工确认后走 /tools/sync）
+    drift = _diff_mcp_tools(tools, _load_registered_mcp_tools(db, user.tenant_id, item.id))
+    record_audit(
+        db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_DISCOVERED",
+        resource_type="CONNECTOR", resource_id=item.id, summary="connector tools discovered",
+        detail={"tool_count": len(tools), "added": len(drift["added"]), "removed": len(drift["removed"]), "changed": len(drift["changed"])},
+    )
     db.commit()
-    return success_response(request, {"connector_id": str(item.id), "tools": tools, "requires_approval": True})
+    return success_response(request, {"connector_id": str(item.id), "tools": tools, "requires_approval": True, "drift": drift})
+
+
+@router.post("/{connector_id}/tools/sync", summary="同步 MCP 工具说明与入参")
+async def sync_connector_tools(connector_id: UUID, payload: ConnectorToolSyncRequest, request: Request, user: ManageUser, db: DbSession):
+    """把 MCP 服务最新的 description / input_schema 同步到已登记工具。
+
+    说明就地更新（不产生新版本）；入参 Schema 变更生成新的发布版本，
+    历史版本与既有 Skill 绑定不受影响（与手动"更新配置"语义一致）。
+    远端新增工具走登记流程，下线工具需人工归档——本接口都不自动处理。
+    """
+    connector = get_owned(db, user, connector_id)
+    if connector.status != "ENABLED":
+        raise ApiError("AI_CONNECTOR_UNAVAILABLE", "connector is disabled", 503)
+    if connector.connector_type != "MCP":
+        raise ApiError("AI_PARAM_INVALID", "只有 MCP 连接器支持工具同步", 400)
+    from app.kernel.ports.connector import McpProtocolError, McpTransportError
+
+    try:
+        listing = await _probe_mcp(request, dict(connector.config or {}), connector.secret_ref, allow_private_network=_mcp_allow_private(connector))
+    except ApiError:
+        raise
+    except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
+        raise ApiError("AI_CONNECTOR_UNAVAILABLE", f"MCP 工具同步失败：{_mcp_error_reason(exc)}", 503) from exc
+
+    discovered = {item["name"]: item for item in _normalize_discovered_tools(listing)}
+    registered = _load_registered_mcp_tools(db, user.tenant_id, connector.id)
+    requested = {name.strip() for name in payload.names if name and name.strip()}
+    updated: list[dict] = []
+    skipped: list[dict] = []
+    for name, remote in discovered.items():
+        if requested and name not in requested:
+            continue
+        local = registered.get(name)
+        if local is None:
+            continue  # 未登记的新工具不属于同步范围
+        tool = db.get(Tool, local.tool_id)
+        if tool is None or tool.status != "ACTIVE":
+            continue
+        if tool.official or tool.owner_user_id != user.id:
+            skipped.append({"name": name, "reason": "仅工具所有者可同步非官方工具"})
+            continue
+        fields: list[str] = []
+        if remote["description"] != local.description:
+            fields.append("description")
+        schema_changed = _schema_signature(remote["input_schema"]) != _schema_signature(local.input_schema)
+        if schema_changed:
+            fields.append("input_schema")
+        if not fields:
+            continue
+        version_number: int | None = None
+        if schema_changed:
+            # 入参属版本快照：生成 v(n+1) 并发布，旧版本仍可被既有 Skill 绑定
+            old_version = local.version
+            config_snapshot = dict(old_version.config_snapshot or {})
+            version_number = _next_version_number(db, tool.id)
+            new_version = ToolVersion(
+                tenant_id=user.tenant_id, tool_id=tool.id, version_number=version_number, status="PUBLISHED",
+                config_snapshot=config_snapshot, input_schema=remote["input_schema"],
+                output_schema=old_version.output_schema,
+                required_permissions=list(old_version.required_permissions or []),
+                requires_confirmation=bool(old_version.requires_confirmation),
+                timeout_seconds=old_version.timeout_seconds,
+                max_retries=old_version.max_retries,
+                retry_backoff_seconds=old_version.retry_backoff_seconds,
+                snapshot_hash=_snapshot_hash(config_snapshot),
+                published_at=datetime.now(timezone.utc),
+            )
+            db.add(new_version); db.flush()
+            tool.current_published_version_id = new_version.id
+        if "description" in fields:
+            tool.description = remote["description"] or None
+        db.add(tool)
+        updated.append({"name": name, "tool_id": str(tool.id), "fields": fields, "version_number": version_number})
+    # 显式点名但远端已不再提供：不自动归档，只回报原因（避免误删仍被 Skill 绑定的工具）
+    for name in sorted(requested - set(discovered)):
+        skipped.append({"name": name, "reason": "MCP 服务已不再提供该工具，需人工归档"})
+    record_audit(
+        db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_TOOLS_SYNCED",
+        resource_type="CONNECTOR", resource_id=connector.id, summary="connector tools synced",
+        detail={"updated": len(updated), "skipped": len(skipped)},
+    )
+    db.commit()
+    return success_response(request, {"connector_id": str(connector.id), "updated": updated, "skipped": skipped})
 
 
 def _resolve_tool_register_config(connector: Connector, *, tool_type: str, payload_config: dict, sql_template: str | None, input_schema: dict | None, external_name: str | None, fallback_name: str) -> tuple[dict, str, bool, dict]:

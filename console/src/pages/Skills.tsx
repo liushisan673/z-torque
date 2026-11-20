@@ -6,6 +6,7 @@ import type { SkillListItem, SkillDetail, SkillVersionDetail, SkillToolLink, Ski
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { TruncatedDesc } from "../components/TruncatedDesc";
 import { useToast } from "../components/Toast";
 import { GuideCallout } from "../components/GuideCallout";
 import { isAdminUser } from "../components/AppTopbar";
@@ -123,6 +124,10 @@ export function SkillsPage() {
   const [loadingVersion, setLoadingVersion] = useState(false);
   const [tools, setTools] = useState<SkillToolLink[]>([]);
   const [loadingTools, setLoadingTools] = useState(false);
+  // 关联工具列表：关键字筛选 + 客户端分页（页大小与连接器工具列表保持一致）
+  const [toolKeyword, setToolKeyword] = useState("");
+  const [toolPage, setToolPage] = useState(1);
+  const [toolPageInput, setToolPageInput] = useState("");
 
   // 绑定 Tool（分组选择器 + 多选 + 顺序/角色/备注）
   const [bindOpen, setBindOpen] = useState(false);
@@ -228,6 +233,9 @@ export function SkillsPage() {
     setDetail(null);
     setVersionDetail(null);
     setTools([]);
+    setToolKeyword("");
+    setToolPage(1);
+    setToolPageInput("");
     setEditing(null);
     setActiveAnchor("overview");
     if (detailBodyRef.current) detailBodyRef.current.scrollTop = 0;
@@ -255,6 +263,7 @@ export function SkillsPage() {
     try {
       const list = await request<SkillToolLink[]>(`/api/z-torque/skills-tools/skill-versions/${versionId}/tools`);
       setTools(list);
+      setToolPage(1);
     } catch {
       setTools([]);
     } finally {
@@ -555,6 +564,23 @@ export function SkillsPage() {
 
   // 当前草稿版本已绑定的 tool_version_id，用于选择器禁用重复项
   const boundVersionIds = useMemo(() => new Set(tools.map((t) => t.tool_version_id)), [tools]);
+
+  // 关联工具筛选 + 分页：filtered 保留原始数组下标（顺序调整按全局 sort_order 操作，不受筛选影响）
+  const TOOL_PAGE_SIZE = 10;
+  const filteredToolItems = useMemo(() => {
+    const kw = toolKeyword.trim().toLowerCase();
+    const items = tools.map((t, index) => ({ t, index }));
+    if (!kw) return items;
+    return items.filter(({ t }) =>
+      [t.tool_name, t.description, t.note, ...(t.tags ?? [])].some((v) => (v ?? "").toLowerCase().includes(kw)),
+    );
+  }, [tools, toolKeyword]);
+  const toolTotalPages = Math.max(1, Math.ceil(filteredToolItems.length / TOOL_PAGE_SIZE));
+  const toolPageSafe = Math.min(toolPage, toolTotalPages);
+  const pagedToolItems = useMemo(
+    () => filteredToolItems.slice((toolPageSafe - 1) * TOOL_PAGE_SIZE, toolPageSafe * TOOL_PAGE_SIZE),
+    [filteredToolItems, toolPageSafe],
+  );
 
   // 选择器标签候选：来自工具持久化 tags，用于前端快速过滤
   const bindTagOptions = useMemo(() => {
@@ -1331,6 +1357,16 @@ export function SkillsPage() {
                           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void openBindModal()}>绑定工具</button>
                         )}
                       </h3>
+                      {tools.length > 0 && (
+                        <div className="skill-tools-toolbar">
+                          <input
+                            className="input"
+                            placeholder="搜索工具名 / 说明 / 备注 / 标签"
+                            value={toolKeyword}
+                            onChange={(e) => { setToolKeyword(e.target.value); setToolPage(1); }}
+                          />
+                        </div>
+                      )}
                       {loadingTools ? (
                         <Loading />
                       ) : tools.length === 0 ? (
@@ -1339,6 +1375,8 @@ export function SkillsPage() {
                             ? "当前草稿版本尚未绑定任何工具，点击右上角「绑定工具」添加。"
                             : "当前技能版本未绑定任何工具。"}
                         </div>
+                      ) : pagedToolItems.length === 0 ? (
+                        <div className="skill-readonly-banner">没有匹配「{toolKeyword}」的工具。</div>
                       ) : (
                         <table className="skill-tool-table">
                           <thead>
@@ -1352,7 +1390,7 @@ export function SkillsPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {tools.map((t, index) => (
+                            {pagedToolItems.map(({ t, index }) => (
                               <tr key={t.tool_version_id}>
                                 <td className="skill-tool-order-col">{index + 1}</td>
                                 <td className="tool-name">
@@ -1386,7 +1424,7 @@ export function SkillsPage() {
                                 </td>
                                 <td>
                                   <div className="skill-tool-note">
-                                    <span>{t.note || t.description || "—"}</span>
+                                    <TruncatedDesc text={t.note || t.description} modalTitle="工具备注/说明" />
                                   </div>
                                 </td>
                                 <td><span className={`skill-tag ${statusInfo(t.status).cls}`}>{statusInfo(t.status).label}</span></td>
@@ -1423,6 +1461,43 @@ export function SkillsPage() {
                             ))}
                           </tbody>
                         </table>
+                      )}
+                      {filteredToolItems.length > TOOL_PAGE_SIZE && (
+                        <div className="connector-tool-pager">
+                          <span>第 {toolPageSafe} / {toolTotalPages} 页 · 共 {filteredToolItems.length} 条</span>
+                          <div className="spacer" />
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            disabled={toolPageSafe <= 1}
+                            onClick={() => setToolPage(toolPageSafe - 1)}
+                          >
+                            上一页
+                          </button>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            disabled={toolPageSafe >= toolTotalPages}
+                            onClick={() => setToolPage(toolPageSafe + 1)}
+                          >
+                            下一页
+                          </button>
+                          <span className="skill-tool-page-jump">
+                            跳至
+                            <input
+                              className="input"
+                              style={{ width: 56 }}
+                              value={toolPageInput}
+                              placeholder={String(toolPageSafe)}
+                              onChange={(e) => setToolPageInput(e.target.value.replace(/\D/g, ""))}
+                              onKeyDown={(e) => {
+                                if (e.key !== "Enter") return;
+                                const n = parseInt(toolPageInput, 10);
+                                if (n >= 1 && n <= toolTotalPages) setToolPage(n);
+                                setToolPageInput("");
+                              }}
+                            />
+                            页
+                          </span>
+                        </div>
                       )}
                       <p className="skill-tool-foot">
                         {canEditTools
@@ -1717,7 +1792,9 @@ export function SkillsPage() {
                             ))}
                             {alreadyBound && <span className="t-bound">已绑定</span>}
                           </div>
-                          <div className="t-desc">{tool.description || tool.param_summary || "—"}</div>
+                          <div className="t-desc">
+                            <TruncatedDesc text={tool.description || tool.param_summary} modalTitle="工具说明" maxWidth={520} />
+                          </div>
                           {tool.params && tool.params.length > 0 && (
                             <div className="t-params-list">
                               {tool.params.slice(0, 6).map((p) => (

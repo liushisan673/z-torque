@@ -54,6 +54,16 @@ class ConnectorToolReconfigureRequest(BaseModel):
     requires_confirmation: bool | None = None
 
 
+class ConnectorToolSyncRequest(BaseModel):
+    """把 MCP 服务最新的说明/入参同步到已登记工具。
+
+    只处理显式指定的工具（为空则处理全部发生变更的工具）；远端新增/下线工具
+    不在此接口处理，新增走登记、下线需人工归档，由 discover 的 drift 提示。
+    """
+
+    names: list[str] = Field(default_factory=list)
+
+
 class CompositeStep(BaseModel):
     key: str = Field(min_length=1, max_length=32)
     tool_version_id: UUID

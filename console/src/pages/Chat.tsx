@@ -238,6 +238,37 @@ export function ChatPage() {
     }
   }, []);
 
+  // 已读回执：本地先归零让角标即刻消失，再写服务端已读位（失败不阻塞阅读）
+  const markConversationRead = useCallback(async (id: string) => {
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, unread_count: 0 } : c)));
+    try {
+      await request(`/api/z-torque/conversations/${id}/read`, { method: "POST" });
+    } catch {
+      /* 已读回执失败忽略；下次打开会话或收到消息会重试 */
+    }
+  }, []);
+
+  // 连续到达的消息（外部回调常一次推两条）合并为一次已读请求
+  const readTimersRef = useRef<Record<string, number>>({});
+  const scheduleRead = useCallback(
+    (id: string) => {
+      const timer = readTimersRef.current[id];
+      if (timer) window.clearTimeout(timer);
+      readTimersRef.current[id] = window.setTimeout(() => {
+        delete readTimersRef.current[id];
+        void markConversationRead(id);
+      }, 400);
+    },
+    [markConversationRead],
+  );
+
+  useEffect(
+    () => () => {
+      Object.values(readTimersRef.current).forEach((timer) => window.clearTimeout(timer));
+    },
+    [],
+  );
+
   useEffect(() => {
     void loadAgentsAndConversations();
   }, [loadAgentsAndConversations]);
@@ -251,6 +282,12 @@ export function ChatPage() {
     }
     void loadConversations(showArchived);
   }, [showArchived, loadConversations]);
+
+  // 当前打开的会话视为已读：切换会话或消息列表增长（新消息到达/加载完成）都写一次已读位
+  useEffect(() => {
+    if (!conversationId) return;
+    scheduleRead(conversationId);
+  }, [conversationId, messages.length, scheduleRead]);
 
   // ⋯ 菜单展开时监听全局点击：点击菜单外任意位置自动收起
   useEffect(() => {
@@ -1209,6 +1246,19 @@ export function ChatPage() {
               startRun(payload.pending_task_id);
               subscribeTask(payload.pending_task_id, { convId: payload.conversation_id });
             }
+          } else {
+            // 非当前会话：本地先 +1 让角标即刻可见（随后由列表接口校准未读数与排序）
+            setConversations((prev) =>
+              prev.map((c) =>
+                c.id === payload.conversation_id
+                  ? {
+                      ...c,
+                      unread_count: (c.unread_count ?? 0) + 1,
+                      last_message_at: payload.created_at ?? c.last_message_at,
+                    }
+                  : c,
+              ),
+            );
           }
           // 会话列表只需要刷新标题/最新会话（不轮询）
           void loadConversations(showArchived);
@@ -1367,7 +1417,7 @@ export function ChatPage() {
                 return (
                   <div
                     key={c.id}
-                    className={`chat-session-item${isActive ? " active" : ""}${archived ? " archived" : ""}`}
+                    className={`chat-session-item${isActive ? " active" : ""}${archived ? " archived" : ""}${!isActive && !archived && (c.unread_count ?? 0) > 0 ? " has-unread" : ""}`}
                     onClick={() => { if (renamingId !== c.id) { selectConversation(c); setSidebarOpen(false); } }}
                   >
                     {renamingId === c.id ? (
@@ -1388,8 +1438,13 @@ export function ChatPage() {
                         <span className={`chat-status-dot${showRunning ? " " + dotCls : ""}`} title={waitingConfirm ? "等待确认" : taskRunning ? "任务进行中" : undefined} />
                         <div className="chat-session-body">
                           <div className="chat-session-name">
-                            {c.title ?? "未命名会话"}
+                            <span className="chat-session-title">{c.title ?? "未命名会话"}</span>
                             {archived && <span className="chat-session-archived-tag">已归档</span>}
+                            {!isActive && !archived && (c.unread_count ?? 0) > 0 && (
+                              <span className="chat-session-unread" title={`${c.unread_count} 条未读消息`}>
+                                {c.unread_count > 99 ? "99+" : c.unread_count}
+                              </span>
+                            )}
                           </div>
                           <div className="chat-session-time">{c.last_message_at ? new Date(c.last_message_at).toLocaleString() : "—"}</div>
                         </div>

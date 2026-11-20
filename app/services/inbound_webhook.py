@@ -570,6 +570,12 @@ class InboundWebhookService:
                     event_part["quote"] = parsed.quote
                 if parsed.quote_message_id:
                     event_part["quote_message_id"] = parsed.quote_message_id
+                # 回写目标直接注入模型上下文：智能体调 send 工具时原样透传，
+                # 不必再靠 list_accounts / list_recent_peers 反查（跨会话易发错人）
+                if parsed.reply_account:
+                    event_part["account_id"] = parsed.reply_account
+                if parsed.reply_peer:
+                    event_part["peer_id"] = parsed.reply_peer
             content_parts: list[dict[str, Any]] = [event_part]
             content_parts.extend(await self._ingest_media(db, config, conversation, parsed))
             result = await self._handle_chat(db, ctx, config, conversation, event_id, text, conversation_key, content_parts)

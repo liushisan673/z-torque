@@ -39,6 +39,9 @@ export interface Conversation {
   title: string | null;
   status: string;
   last_message_at: string | null;
+  /** 已读位之后的消息数：列表角标用，当前打开的会话由 /read 归零 */
+  unread_count: number;
+  last_read_at: string | null;
 }
 
 export type MessageContentPartType = "image" | "file" | "audio" | "video" | string;
@@ -545,6 +548,39 @@ export interface ConnectorDiscoveredToolSummary {
   name: string;
   description: string;
   input_schema?: Record<string, unknown>;
+}
+
+// /discover 返回的漂移比对：远端 tools/list 与本地已登记工具的差异（只提示，不自动改写）
+export interface ConnectorToolDriftChange {
+  name: string;
+  tool_id: string;
+  tool_name: string;
+  /** 变更字段：description（说明）/ input_schema（入参 Schema） */
+  fields: string[];
+  local_description: string;
+  remote_description: string;
+}
+
+export interface ConnectorToolDrift {
+  added: { name: string; description: string }[];
+  removed: { name: string; tool_id: string; tool_name: string }[];
+  changed: ConnectorToolDriftChange[];
+  unchanged: number;
+  has_drift: boolean;
+}
+
+export interface ConnectorDiscoverResult {
+  connector_id: string;
+  tools: ConnectorDiscoveredToolSummary[];
+  requires_approval: boolean;
+  drift: ConnectorToolDrift;
+}
+
+// POST /connectors/{id}/tools/sync 返回：说明就地更新，入参变更生成新发布版本
+export interface ConnectorToolSyncResult {
+  connector_id: string;
+  updated: { name: string; tool_id: string; fields: string[]; version_number: number | null }[];
+  skipped: { name: string; reason: string }[];
 }
 
 // GET /connectors/{id}/tools 返回（联查 Tool 后的已注册工具）

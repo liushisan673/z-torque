@@ -1362,14 +1362,36 @@ body {
 
 .chat-session-body { flex: 1; min-width: 0; }
 .chat-session-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: var(--skill-font-size);
   font-weight: 500;
   color: var(--text);
-  white-space: nowrap;
+  min-width: 0;
+}
+.chat-session-title {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat-session-item.active .chat-session-name { color: var(--primary); }
+.chat-session-item.has-unread .chat-session-title { font-weight: 600; }
+/* 未读角标：外部回调/新消息落在非当前会话时提示用户点开 */
+.chat-session-unread {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
 .chat-session-time {
   font-size: 11px;
   color: var(--text-muted);
@@ -3659,6 +3681,21 @@ body {
   width: var(--skill-tool-op-col-w);
   text-align: right;
 }
+/* 关联工具列表工具条：关键字筛选输入框 */
+.skill-tools-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+}
+.skill-tools-toolbar .input {
+  max-width: 240px;
+}
+.skill-tool-page-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
 .skill-tool-table td.skill-tool-op-col {
   text-align: right;
   white-space: nowrap;
@@ -3897,6 +3934,26 @@ body {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+}
+/* 长说明单行省略：表格/列表内默认截断展示，避免长文本撑高行、挤乱布局 */
+.trunc-desc {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.trunc-desc-more {
+  margin-left: 6px;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+.trunc-desc-full {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
 }
 .skill-tool-upgrade {
   display: inline-flex;

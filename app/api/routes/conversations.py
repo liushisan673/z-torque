@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -23,6 +23,30 @@ def conv(db, user, ident):
     if not value: raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
     return value
 
+
+def _unread_counts(db: Session, tenant_id: UUID, conversation_ids: list[UUID]) -> dict[UUID, int]:
+    """每条会话在已读位之后的消息数：一次聚合查询，避免列表 N+1。"""
+    if not conversation_ids:
+        return {}
+    last_read = func.coalesce(Conversation.last_read_at, datetime(1970, 1, 1, tzinfo=timezone.utc))
+    rows = db.execute(
+        select(Message.conversation_id, func.count(Message.id))
+        .join(Conversation, Conversation.id == Message.conversation_id)
+        .where(
+            Message.tenant_id == tenant_id,
+            Message.conversation_id.in_(conversation_ids),
+            Message.created_at > last_read,
+        )
+        .group_by(Message.conversation_id)
+    ).all()
+    return {row[0]: int(row[1]) for row in rows}
+
+
+def serialize_conversation(item: Conversation, unread_count: int = 0) -> dict:
+    data = ConversationResponse.model_validate(item).model_dump(mode="json")
+    data["unread_count"] = unread_count
+    return data
+
 @router.post("", summary="创建会话")
 async def create(payload: ConversationCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     query = select(Agent).where(
@@ -39,7 +63,7 @@ async def create(payload: ConversationCreate, request: Request, user: User = Dep
     if not agent: raise ApiError("AI_AGENT_NOT_FOUND", "agent not found", 404)
     item = Conversation(tenant_id=user.tenant_id, owner_user_id=user.id, agent_id=agent.id, title=payload.title, status="ACTIVE")
     db.add(item); db.commit(); db.refresh(item)
-    return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
+    return success_response(request, serialize_conversation(item))
 
 @router.get("", summary="获取会话列表")
 async def list_all(
@@ -52,28 +76,40 @@ async def list_all(
     query = select(Conversation).where(Conversation.tenant_id == user.tenant_id, Conversation.owner_user_id == user.id)
     if not include_archived:
         query = query.where(Conversation.status != "ARCHIVED")
-    rows = db.scalars(query.order_by(Conversation.created_at.desc())).all()
-    return success_response(request, [ConversationResponse.model_validate(x).model_dump(mode="json") for x in rows])
+    # 按最后消息时间倒序：新消息让会话自动置顶；无消息的新会话回退到创建时间
+    rows = db.scalars(query.order_by(func.coalesce(Conversation.last_message_at, Conversation.created_at).desc())).all()
+    counts = _unread_counts(db, user.tenant_id, [x.id for x in rows])
+    return success_response(request, [serialize_conversation(x, counts.get(x.id, 0)) for x in rows])
 
 @router.get("/{conversation_id}", summary="获取会话详情")
 async def detail(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return success_response(request, ConversationResponse.model_validate(conv(db, user, conversation_id)).model_dump(mode="json"))
+    item = conv(db, user, conversation_id)
+    return success_response(request, serialize_conversation(item, _unread_counts(db, user.tenant_id, [item.id]).get(item.id, 0)))
 
 @router.patch("/{conversation_id}", summary="重命名会话")
 async def update(conversation_id: UUID, payload: ConversationUpdate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = conv(db, user, conversation_id); item.title = payload.title; db.commit(); db.refresh(item)
-    return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
+    return success_response(request, serialize_conversation(item))
 
 @router.post("/{conversation_id}/archive", summary="归档会话")
 async def archive(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = conv(db, user, conversation_id); item.status = "ARCHIVED"; item.archived_at = datetime.now(timezone.utc); db.commit()
-    return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
+    return success_response(request, serialize_conversation(item))
 
 @router.post("/{conversation_id}/restore", summary="恢复会话")
 async def restore(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     # 归档可恢复：与智能体/技能不同，会话是用户的"工作现场"，误归档必须能找回
     item = conv(db, user, conversation_id); item.status = "ACTIVE"; item.archived_at = None; db.commit()
-    return success_response(request, ConversationResponse.model_validate(item).model_dump(mode="json"))
+    return success_response(request, serialize_conversation(item))
+
+
+@router.post("/{conversation_id}/read", summary="标记会话已读")
+async def mark_read(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """幂等写已读位：前端打开会话或当前会话收到新消息时调用，未读数随之归零。"""
+    item = conv(db, user, conversation_id)
+    item.last_read_at = datetime.now(timezone.utc)
+    db.commit()
+    return success_response(request, {"conversation_id": str(item.id), "last_read_at": iso_utc(item.last_read_at), "unread_count": 0})
 
 @router.get("/{conversation_id}/messages", summary="获取会话消息列表")
 async def messages(conversation_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
