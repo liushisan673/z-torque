@@ -9,6 +9,8 @@ class MessageResponse(BaseModel):
     id: UUID
     conversation_id: UUID
     sender_type: str
+    source: str | None = None
+    external_sender: str | None = None
     content: str
     content_parts: list[dict] | None
     status: str

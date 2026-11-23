@@ -43,6 +43,8 @@ class ChatWriteResult:
     conversation_id: UUID
     message_id: UUID
     sender_type: str
+    source: str | None
+    external_sender: str | None
     content: str
     title: str
     created_at: datetime
@@ -74,7 +76,7 @@ class WeComChatBridge:
         return bool(self.settings.wecom_chat_enabled)
 
     async def record_inbound(self, event: "WeComEvent") -> UUID | None:
-        """写入一条 USER 消息，返回本地 conversation_id；跳过/失败返回 None。"""
+        """写入一条 EXTERNAL 消息，返回本地 conversation_id；跳过/失败返回 None。"""
         if not self.enabled or not event.text:
             return None
         result = await asyncio.to_thread(self._record_inbound_sync, event)
@@ -98,6 +100,8 @@ class WeComChatBridge:
                 conversation_id=ref.conversation_id,
                 message_id=message.id,
                 sender_type=message.sender_type,
+                source=message.source,
+                external_sender=message.external_sender,
                 content=message.content,
                 content_parts=message.content_parts,
                 title=ref.title,
@@ -123,6 +127,8 @@ class WeComChatBridge:
                 conversation_id=result.conversation_id,
                 message_id=result.message_id,
                 sender_type=result.sender_type,
+                source=result.source,
+                external_sender=result.external_sender,
                 content=result.content,
                 content_parts=result.content_parts,
                 title=result.title,
@@ -226,7 +232,9 @@ class WeComChatBridge:
                             id=message_id,
                             tenant_id=owner.tenant_id,
                             conversation_id=conversation.id,
-                            sender_type="USER",
+                            sender_type="EXTERNAL",
+                            source="wecom",
+                            external_sender=(event.external_user_id or event.conversation_key or event.event_id)[:128],
                             content=event.text,
                             content_parts=None,
                             status="COMPLETED",
@@ -238,7 +246,9 @@ class WeComChatBridge:
                     owner_user_id=owner.id,
                     conversation_id=conversation.id,
                     message_id=message_id,
-                    sender_type="USER",
+                    sender_type="EXTERNAL",
+                    source="wecom",
+                    external_sender=(event.external_user_id or event.conversation_key or event.event_id)[:128],
                     content=event.text or "",
                     title=title,
                     created_at=now,
@@ -265,6 +275,7 @@ class WeComChatBridge:
                             tenant_id=conversation.tenant_id,
                             conversation_id=conversation.id,
                             sender_type="ASSISTANT",
+                            source="wecom",
                             content=text,
                             content_parts=None,
                             status="COMPLETED",
@@ -278,6 +289,8 @@ class WeComChatBridge:
                     conversation_id=conversation.id,
                     message_id=message_id,
                     sender_type="ASSISTANT",
+                    source="wecom",
+                    external_sender=None,
                     content=text,
                     title=title,
                     created_at=now,
@@ -324,7 +337,7 @@ class WeComChatBridge:
                 Agent.status == "ACTIVE",
                 Agent.current_published_version_id.is_not(None),
             )
-            .order_by(Agent.is_default_parent.desc(), Agent.created_at)
+            .order_by(Agent.is_default.desc(), Agent.is_default_parent.desc(), Agent.created_at)
             .limit(1)
         )
         if agent is None:

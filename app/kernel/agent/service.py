@@ -61,6 +61,8 @@ def archive_agent(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID
     if agent.is_default_parent:
         raise ApiError("AI_REQUEST_INVALID", "default parent cannot be archived", 422)
     agent.status = "ARCHIVED"
+    # 归档的智能体不再作为默认项（会话页/企微桥接 fallback 会跳过非 ACTIVE 的默认项，这里直接清标记）
+    agent.is_default = False
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="AGENT_ARCHIVED", resource_type="AGENT", resource_id=agent.id, summary="agent archived")
     return agent
 
@@ -89,6 +91,23 @@ def delete_agent(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID)
     )
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="AGENT_DELETED", resource_type="AGENT", resource_id=agent.id, summary="agent deleted")
     db.delete(agent)
+
+
+def set_default_agent(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID) -> Agent:
+    """M12-4：设为用户默认智能体（同租户互斥，设置新默认时清掉旧的）。
+
+    与 set_default_parent 不同：不限定 OFFICIAL，任何可见且 ACTIVE 的智能体均可设为默认；
+    是否已发布不做硬校验（未发布的默认项在会话页 fallback 中会被自然跳过）。
+    """
+    agent = _agent(db, tenant_id, user_id, agent_id)
+    if agent.status != "ACTIVE":
+        raise ApiError("AI_REQUEST_INVALID", "default agent must be active", 422)
+    db.query(Agent).filter(Agent.tenant_id == tenant_id, Agent.is_default.is_(True), Agent.id != agent.id).update(
+        {Agent.is_default: False}, synchronize_session="fetch"
+    )
+    agent.is_default = True
+    record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="AGENT_DEFAULT_SET", resource_type="AGENT", resource_id=agent.id, summary="default agent set")
+    return agent
 
 
 def set_default_parent(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID) -> Agent:

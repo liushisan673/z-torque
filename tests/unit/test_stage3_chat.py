@@ -255,3 +255,15 @@ def test_trigger_alias_mapping_and_conflict():
             create_task(db, ctx=SecurityContext(tenant_id=tenant.id, user_id=user.id), agent_id=agent.id, agent_version_id=version.id, idempotency_key=str(uuid4()), request_summary="run", conversation_id=conversation.id, trigger_message_id=message.id, message_id=uuid4())
         assert error.value.code == "AI_REQUEST_INVALID"
         db.rollback()
+
+
+def test_external_trigger_message_can_create_task():
+    """阶段12：外部来源（Webhook/企微）EXTERNAL 消息同样可触发任务，且携带 source/external_sender。"""
+    with SessionLocal() as db:
+        tenant, user, agent, version, conversation = _fixture(db)
+        external = Message(tenant_id=tenant.id, conversation_id=conversation.id, sender_type="EXTERNAL", source="webhook", external_sender="demo:conv-1", content="run", status="PROCESSING")
+        db.add(external)
+        db.flush()
+        task = create_task(db, ctx=SecurityContext(tenant_id=tenant.id, user_id=user.id), agent_id=agent.id, agent_version_id=version.id, idempotency_key=str(uuid4()), request_summary="run", conversation_id=conversation.id, trigger_message_id=external.id)
+        assert task.trigger_message_id == external.id
+        db.rollback()

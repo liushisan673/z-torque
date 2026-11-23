@@ -6,6 +6,7 @@ import type { IamRole, IamUser } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
+import { Pagination, usePager } from "../components/Pagination";
 
 const API = "/api/z-torque/admin/iam";
 
@@ -115,6 +116,9 @@ export function UsersPage() {
       return true;
     });
   }, [users, keyword, roleFilter, stateFilter]);
+
+  // 列表统一分页：接入公共分页条组件（客户端分页，每页默认 10；筛选变少时页码自动收敛）
+  const pager = usePager(filtered, 10);
 
   function openCreate() {
     setTarget(null);
@@ -297,7 +301,7 @@ export function UsersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((u) => {
+                  {pager.paged.map((u) => {
                     const st = stateOf(u);
                     return (
                       <tr key={u.id} className={selected?.id === u.id ? "active" : ""} onClick={() => setSelected(u)}>
@@ -344,6 +348,8 @@ export function UsersPage() {
               </table>
             )}
           </div>
+          {/* 列表统一分页：接入公共分页条组件 */}
+          <Pagination total={pager.total} page={pager.page} pageSize={pager.pageSize} onChange={pager.onChange} />
         </div>
 
         {/* 左右分栏拖拽把手（反向：调整右侧详情宽度） */}

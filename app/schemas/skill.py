@@ -56,6 +56,25 @@ class SkillVersionUpdateRequest(BaseModel):
     requires_confirmation: bool | None = None
 
 
+class SkillPublishBindingItem(BaseModel):
+    """一键保存并发布：发布请求体内整体替换的工具绑定项。"""
+
+    tool_version_id: UUID
+    role: str | None = Field(default=None, max_length=16)
+    note: str | None = None
+
+
+class SkillVersionPublishRequest(BaseModel):
+    """一键保存并发布：发布前原子落库的未保存修改（全部可选，未提供=不修改）。"""
+
+    instructions: str | None = None
+    orchestration_hint: str | None = None
+    script_source: str | None = None
+    required_permissions: list[str] | None = None
+    requires_confirmation: bool | None = None
+    bindings: list[SkillPublishBindingItem] | None = None
+
+
 class AttachToolRequest(BaseModel):
     tool_version_id: UUID
     sort_order: int | None = Field(default=None, ge=0)

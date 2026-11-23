@@ -101,7 +101,7 @@ def publish_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: 
     for link in db.query(AgentVersionSkill).filter(AgentVersionSkill.agent_version_id == version.id).all():
         skill = db.get(SkillVersion, link.skill_version_id)
         if not skill or skill.tenant_id != tenant_id or skill.status != "PUBLISHED":
-            raise ApiError("AI_REQUEST_INVALID", "agent version references an unpublished skill version", 422)
+            raise ApiError("AI_AGENT_SKILL_VERSION_NOT_PUBLISHED", "agent version references an unpublished skill version", 422)
         bound_skill_ids.append(skill.id)
     # 双闸门之二：AgentVersion 发布时按去重后的工具版本数限制模型侧暴露规模
     exposed_tool_ids: set[str] = set()

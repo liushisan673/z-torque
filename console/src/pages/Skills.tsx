@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { request, uploadFile } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
@@ -12,6 +13,8 @@ import { GuideCallout } from "../components/GuideCallout";
 import { isAdminUser } from "../components/AppTopbar";
 import { useAuth } from "../stores/auth";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
+// 列表统一分页：前端切片 + 公共分页条
+import { Pagination, usePager } from "../components/Pagination";
 
 // 选中记忆：跳转页面后返回时恢复上次选中的技能（sessionStorage 按标签页隔离）
 const SELECTED_KEY = "zt.skills.selectedId";
@@ -108,6 +111,10 @@ function fmtTime(iso: string | null | undefined): string {
 export function SkillsPage() {
   const { user } = useAuth();
   const { push: toast } = useToast();
+  // M12-3 B-5：跨页引导——已发布技能跳智能体页绑定（携带 bindSkill 预选）
+  const navigate = useNavigate();
+  // M12-3 B-4：/skills?bindTool=id1,id2 —— 连接器批量登记后的引导跳转，预填新建向导的工具勾选
+  const [searchParams, setSearchParams] = useSearchParams();
   // 危险操作（停用 / 级联删除）统一走 ConfirmDialog，避免 window.confirm
   const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
@@ -124,10 +131,8 @@ export function SkillsPage() {
   const [loadingVersion, setLoadingVersion] = useState(false);
   const [tools, setTools] = useState<SkillToolLink[]>([]);
   const [loadingTools, setLoadingTools] = useState(false);
-  // 关联工具列表：关键字筛选 + 客户端分页（页大小与连接器工具列表保持一致）
+  // 关联工具列表：关键字筛选 + 客户端分页（列表统一分页：前端切片 + 公共分页条）
   const [toolKeyword, setToolKeyword] = useState("");
-  const [toolPage, setToolPage] = useState(1);
-  const [toolPageInput, setToolPageInput] = useState("");
 
   // 绑定 Tool（分组选择器 + 多选 + 顺序/角色/备注）
   const [bindOpen, setBindOpen] = useState(false);
@@ -150,10 +155,13 @@ export function SkillsPage() {
   const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
   const detailBodyRef = useRef<HTMLDivElement | null>(null);
 
-  // 创建 Skill
+  // 创建 Skill（M12-3 B-4 向导：创建技能 + 首版本 + 绑定工具单次提交）
   const [createOpen, setCreateOpen] = useState(false);
-  // 发布预检：指令内容为空时提示（可强制跳过）
-  const [publishCheck, setPublishCheck] = useState<{ versionId: string; missing: string[] } | null>(null);
+  // 向导内勾选的绑定工具（提交时随发布请求整体写入）
+  const [wizardPicks, setWizardPicks] = useState<BindPick[]>([]);
+  const [createToolQuery, setCreateToolQuery] = useState("");
+  // 发布预检：指令内容为空时提示（可强制跳过）；payload 为编辑态随发布原子提交的未保存修改
+  const [publishCheck, setPublishCheck] = useState<{ versionId: string; missing: string[]; payload?: Record<string, unknown> } | null>(null);
   const [createName, setCreateName] = useState("");
   const [createDesc, setCreateDesc] = useState("");
   const [createType, setCreateType] = useState("STANDARD");
@@ -208,6 +216,20 @@ export function SkillsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, skills, selectedId]);
 
+  // M12-3 B-4/B-5：/skills?bindTool=id1,id2 —— 连接器页批量登记完成后的引导跳转，
+  // 直接打开新建技能向导并预填工具勾选；引导参数只消费一次（清除 query），
+  // 优先级高于 sessionStorage 选中恢复（不写入选中记忆，取消向导即回到原选中）
+  const bindToolParam = searchParams.get("bindTool");
+  const bindToolConsumedRef = useRef(false);
+  useEffect(() => {
+    if (bindToolConsumedRef.current || !bindToolParam) return;
+    bindToolConsumedRef.current = true;
+    const ids = bindToolParam.split(",").map((x) => x.trim()).filter(Boolean);
+    setSearchParams({}, { replace: true });
+    if (ids.length > 0) void openCreateWizard(ids);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bindToolParam]);
+
   const selected = useMemo(
     () => skills.find((s) => s.id === selectedId) ?? null,
     [skills, selectedId],
@@ -234,8 +256,8 @@ export function SkillsPage() {
     setVersionDetail(null);
     setTools([]);
     setToolKeyword("");
-    setToolPage(1);
-    setToolPageInput("");
+    // 切换技能时回第 1 页（保持原行为）
+    toolPager.setPage(1);
     setEditing(null);
     setActiveAnchor("overview");
     if (detailBodyRef.current) detailBodyRef.current.scrollTop = 0;
@@ -263,7 +285,8 @@ export function SkillsPage() {
     try {
       const list = await request<SkillToolLink[]>(`/api/z-torque/skills-tools/skill-versions/${versionId}/tools`);
       setTools(list);
-      setToolPage(1);
+      // 刷新工具列表后回第 1 页（保持原行为）
+      toolPager.setPage(1);
     } catch {
       setTools([]);
     } finally {
@@ -335,10 +358,71 @@ export function SkillsPage() {
     setCreateFile(file);
   }
 
+  // M12-3 B-4：打开新建技能向导（可选预填绑定工具，配合连接器页 ?bindTool= 引导）
+  async function openCreateWizard(prefillToolIds?: string[]) {
+    setCreateOpen(true);
+    setCreateName("");
+    setCreateDesc("");
+    setCreateType("STANDARD");
+    setCreateFile(null);
+    setWizardPicks([]);
+    setCreateToolQuery("");
+    setError(null);
+    setLoadingAvail(true);
+    try {
+      const data = await request<SelectableToolResponse>("/api/z-torque/skills-tools/tools/selectable?size=1000");
+      setSelectableGroups(data.groups);
+      setBindLimit(data.limit || 30);
+      if (prefillToolIds && prefillToolIds.length > 0) {
+        const picks: BindPick[] = [];
+        for (const group of data.groups) {
+          for (const tool of group.tools) {
+            if (!prefillToolIds.includes(tool.tool_id)) continue;
+            const version =
+              tool.published_versions.find((v) => v.tool_version_id === tool.default_tool_version_id) ??
+              tool.published_versions[tool.published_versions.length - 1];
+            if (version) picks.push({ tool, tool_version_id: version.tool_version_id, version_number: version.version_number, note: "" });
+          }
+        }
+        setWizardPicks(picks);
+        if (picks.length === 0) toast("info", "引导指定的工具暂无可绑定版本，可稍后手动选择");
+      }
+    } catch (err) {
+      setError(errorText(err, "加载可用工具失败"));
+      setSelectableGroups([]);
+    } finally {
+      setLoadingAvail(false);
+    }
+  }
+
+  // 向导内勾选/取消一个绑定工具（无「已绑定」概念，仅受单版本上限约束）
+  function toggleWizardPick(tool: SelectableTool) {
+    if (wizardPicks.some((pick) => pick.tool.tool_id === tool.tool_id)) {
+      setWizardPicks((prev) => prev.filter((pick) => pick.tool.tool_id !== tool.tool_id));
+      return;
+    }
+    if (wizardPicks.length >= bindLimit) {
+      toast("info", `单个技能版本最多绑定 ${bindLimit} 个工具`);
+      return;
+    }
+    const version =
+      tool.published_versions.find((v) => v.tool_version_id === tool.default_tool_version_id) ??
+      tool.published_versions[tool.published_versions.length - 1];
+    if (!version) return;
+    setWizardPicks((prev) => [
+      ...prev,
+      { tool, tool_version_id: version.tool_version_id, version_number: version.version_number, note: "" },
+    ]);
+  }
+
   async function createSkill() {
     if (createType === "MD_SKILL" ? !createFile : !createName.trim()) return;
     setBusy(true);
     setError(null);
+    // M12-3 B-4：按序调用三个接口（创建技能 → 首个草稿版本 → 发布，绑定随发布原子提交），
+    // 前序步骤已成功的失败不回滚，提示用户到技能页继续完成
+    let createdSkillId: string | null = null;
+    let createdVersionId: string | null = null;
     try {
       let uploaded: SkillUploadResult | null = null;
       if (createType === "MD_SKILL") {
@@ -347,9 +431,17 @@ export function SkillsPage() {
         // 上传技能包：后端解析 front matter，落盘 md-skills/ 并创建草稿版本
         uploaded = await uploadFile<SkillUploadResult>("/api/z-torque/skills/upload", file);
       } else {
-        await request("/api/z-torque/skills-tools/skills", {
+        const s = await request<{ id: string }>("/api/z-torque/skills-tools/skills", {
           method: "POST",
           body: { name: createName.trim(), description: createDesc.trim() || null, skill_type: createType },
+        });
+        createdSkillId = s.id;
+        const v = await request<{ id: string }>(`/api/z-torque/skills-tools/skills/${s.id}/versions`, { method: "POST", body: {} });
+        createdVersionId = v.id;
+        const bindings = wizardPicks.map((pick) => ({ tool_version_id: pick.tool_version_id, note: pick.note.trim() || null }));
+        await request(`/api/z-torque/skills-tools/skill-versions/${v.id}/publish`, {
+          method: "POST",
+          body: bindings.length > 0 ? { bindings } : {},
         });
       }
       setCreateOpen(false);
@@ -357,16 +449,35 @@ export function SkillsPage() {
       setCreateDesc("");
       setCreateType("STANDARD");
       setCreateFile(null);
-      toast("success", uploaded ? "MD-Skill 已上传并生成草稿" : "Skill 已创建");
+      setWizardPicks([]);
+      setCreateToolQuery("");
+      toast(
+        "success",
+        uploaded
+          ? "MD-Skill 已上传并生成草稿"
+          : wizardPicks.length > 0
+            ? `技能已创建并发布，已绑定 ${wizardPicks.length} 个工具`
+            : "技能已创建并发布",
+      );
       await load();
       if (uploaded) {
         setSelectedId(uploaded.skill_id);
         if (uploaded.status === "unchanged") {
           setNotice(`MD-Skill「${uploaded.name}」内容无变化，未创建新版本`);
         }
+      } else if (createdSkillId) {
+        // 新技能直接选中展示，避免整列表回退到第一项
+        void openDetail({ id: createdSkillId } as SkillListItem);
       }
     } catch (err) {
-      setError(errorText(err, "创建失败"));
+      const msg = errorText(err, "创建失败");
+      setError(
+        createdVersionId
+          ? `技能与首个草稿版本已创建，但发布失败：${msg}。可到技能页编辑该草稿并「保存并发布」。`
+          : createdSkillId
+            ? `技能已创建，但草稿版本创建失败：${msg}。可到技能页继续完成版本创建。`
+            : msg,
+      );
     } finally {
       setBusy(false);
     }
@@ -474,77 +585,47 @@ export function SkillsPage() {
     scrollToSection("content");
   }
 
-  // 持久化草稿表单（不含 busy 管理，供"保存草稿"与"发布"共用）
-  async function persistVersion(): Promise<SkillVersionDetail | null> {
-    if (!editing) return null;
-    const perms = editPerms
-      .split("\n")
-      .map((p) => p.trim())
-      .filter(Boolean);
-    try {
-      const v = await request<SkillVersionDetail>(
-        `/api/z-torque/skills-tools/skill-versions/${editing.id}`,
-        {
-          method: "PATCH",
-          body: {
-            instructions: editInstructions.trim() || null,
-            orchestration_hint: editOrchestration.trim() || null,
-            script_source: editScript.trim() || null,
-            required_permissions: perms,
-            requires_confirmation: editConfirm,
-          },
-        },
-      );
-      setEditing(v);
-      setVersionDetail(v);
-      setError(null);
-      return v;
-    } catch (err) {
-      setError(errorText(err, "保存失败"));
-      return null;
-    }
+  // 编辑态「保存并发布」请求体：未保存修改随发布请求一并原子提交（后端先落库再校验发布，同一事务）
+  function buildEditPayload(): Record<string, unknown> {
+    return {
+      instructions: editInstructions.trim() || null,
+      orchestration_hint: editOrchestration.trim() || null,
+      script_source: editScript.trim() || null,
+      required_permissions: editPerms
+        .split("\n")
+        .map((p) => p.trim())
+        .filter(Boolean),
+      requires_confirmation: editConfirm,
+    };
   }
 
-  async function saveVersion() {
-    if (!editing) return;
-    setBusy(true);
-    await persistVersion();
-    setBusy(false);
-  }
-
-  // 发布前预检：指令内容为空时给出提示（可强制跳过）
-  function publishVersion(versionId: string) {
+  // 发布前预检：指令内容为空时给出提示（可强制跳过）；编辑态以表单内容为准
+  function publishVersion(versionId: string, payload?: Record<string, unknown>) {
     const vd = versionDetail && versionDetail.id === versionId ? versionDetail : null;
+    const instructions =
+      payload && "instructions" in payload ? String((payload.instructions as string | null) ?? "") : (vd?.instructions ?? "");
     const missing: string[] = [];
-    if (vd && !(vd.instructions ?? "").trim()) {
+    if (!instructions.trim()) {
       missing.push("指令内容为空——技能被调用时将无法产生有效输出");
     }
     if (missing.length > 0) {
-      setPublishCheck({ versionId, missing });
+      setPublishCheck({ versionId, missing, payload });
       return;
     }
-    void doPublish(versionId);
+    void doPublish(versionId, payload);
   }
 
-  // 编辑态发布：先持久化表单（确认开关、指令等未保存修改），再走发布预检——
-  // 避免"勾选确认后直接点发布"导致开关只存在于内存、发布版本不带确认
+  // 编辑态发布：合并「保存草稿 / 发布」为单按钮，草稿表单随发布请求原子提交
   async function saveAndPublish() {
     if (!editing) return;
-    setBusy(true);
-    const saved = await persistVersion();
-    setBusy(false);
-    if (!saved) {
-      toast("error", "草稿保存失败，已取消发布");
-      return;
-    }
-    publishVersion(saved.id);
+    publishVersion(editing.id, buildEditPayload());
   }
 
-  async function doPublish(versionId: string) {
+  async function doPublish(versionId: string, payload?: Record<string, unknown>) {
     setBusy(true);
     setError(null);
     try {
-      await request(`/api/z-torque/skills-tools/skill-versions/${versionId}/publish`, { method: "POST" });
+      await request(`/api/z-torque/skills-tools/skill-versions/${versionId}/publish`, { method: "POST", body: payload ?? {} });
       setEditing(null);
       if (selected) await openDetail(selected);
       await load();
@@ -565,7 +646,7 @@ export function SkillsPage() {
   // 当前草稿版本已绑定的 tool_version_id，用于选择器禁用重复项
   const boundVersionIds = useMemo(() => new Set(tools.map((t) => t.tool_version_id)), [tools]);
 
-  // 关联工具筛选 + 分页：filtered 保留原始数组下标（顺序调整按全局 sort_order 操作，不受筛选影响）
+  // 关联工具筛选：filtered 保留原始数组下标（顺序调整按全局 sort_order 操作，不受筛选影响）
   const TOOL_PAGE_SIZE = 10;
   const filteredToolItems = useMemo(() => {
     const kw = toolKeyword.trim().toLowerCase();
@@ -575,12 +656,8 @@ export function SkillsPage() {
       [t.tool_name, t.description, t.note, ...(t.tags ?? [])].some((v) => (v ?? "").toLowerCase().includes(kw)),
     );
   }, [tools, toolKeyword]);
-  const toolTotalPages = Math.max(1, Math.ceil(filteredToolItems.length / TOOL_PAGE_SIZE));
-  const toolPageSafe = Math.min(toolPage, toolTotalPages);
-  const pagedToolItems = useMemo(
-    () => filteredToolItems.slice((toolPageSafe - 1) * TOOL_PAGE_SIZE, toolPageSafe * TOOL_PAGE_SIZE),
-    [filteredToolItems, toolPageSafe],
-  );
+  // 列表统一分页：前端切片 + 公共分页条；切换技能/筛选变更回第 1 页的行为由上方 toolPager.setPage(1) 保持
+  const toolPager = usePager(filteredToolItems, TOOL_PAGE_SIZE);
 
   // 选择器标签候选：来自工具持久化 tags，用于前端快速过滤
   const bindTagOptions = useMemo(() => {
@@ -624,8 +701,31 @@ export function SkillsPage() {
       .filter((group) => group.tools.length > 0);
   }, [selectableGroups, bindQuery, bindConnector, bindTag]);
 
+  // 列表统一分页：对分组数组前端切片 + 公共分页条
+  const bindGroupPager = usePager(filteredBindGroups, 10);
+
   // 已选上限：已绑定 + 本次已选 不能超过单版本上限
   const bindTotalCount = tools.length + selectedBindings.length;
+
+  // M12-3 B-4：新建向导内的工具候选（复用 selectableGroups，仅按关键字过滤）
+  const filteredWizardGroups = useMemo(() => {
+    const kw = createToolQuery.trim().toLowerCase();
+    if (!kw) return selectableGroups;
+    return selectableGroups
+      .map((group) => ({
+        ...group,
+        tools: group.tools.filter(
+          (tool) =>
+            tool.name.toLowerCase().includes(kw) ||
+            (tool.description ?? "").toLowerCase().includes(kw) ||
+            (tool.tags ?? []).some((tag) => tag.toLowerCase().includes(kw)),
+        ),
+      }))
+      .filter((group) => group.tools.length > 0);
+  }, [selectableGroups, createToolQuery]);
+
+  // 列表统一分页：对分组数组前端切片 + 公共分页条（每页 10 组）
+  const wizardGroupPager = usePager(filteredWizardGroups, 10);
 
   async function openBindModal() {
     if (!viewVersion) return;
@@ -782,6 +882,9 @@ export function SkillsPage() {
     });
   }, [skills, filter, keyword]);
 
+  // 列表统一分页：前端切片 + 公共分页条（sessionStorage 选中恢复逻辑不受影响）
+  const skillPager = usePager(filteredSkills, 10);
+
   // 详情操作按钮（状态驱动，对齐 skill.html 按钮组）
   const detailActions = useMemo(() => {
     if (!selected) return null;
@@ -845,6 +948,16 @@ export function SkillsPage() {
       <>
         {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>基础信息</button>}
         {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>}
+        {/* 原详情区引导卡片入口收敛为按钮：携带 bindSkill 跳智能体页（新建弹窗自动预选最新发布版本） */}
+        {sourceOf(selected, meId) === "mine" && (
+          <button
+            className="btn btn-primary btn-sm"
+            onClick={() => navigate(`/agents?bindSkill=${selected.id}`)}
+            title="智能体创建弹窗会自动预选该技能的最新发布版本"
+          >
+            前往智能体页绑定
+          </button>
+        )}
         <button className="skill-btn-danger-outline" disabled={busy} onClick={() => void archiveSkill(selected.id)}>停用</button>
       </>
     );
@@ -935,7 +1048,7 @@ export function SkillsPage() {
               >
                 {scanning ? <span className="spinner" style={{ width: 14, height: 14 }} /> : "⟳"} 同步 MD-Skill
               </button>
-              <button className="btn btn-primary btn-sm" type="button" onClick={() => setCreateOpen(true)}>+ 新建技能</button>
+              <button className="btn btn-primary btn-sm" type="button" onClick={() => void openCreateWizard()}>+ 新建技能</button>
             </div>
             {scanResult && (
               <div className="skill-alert skill-alert-info skill-scan-result">
@@ -1000,12 +1113,12 @@ export function SkillsPage() {
                   title="还没有技能"
                   why="技能需创建并发布版本后，才能被智能体绑定使用"
                   actionLabel="新建技能"
-                  onAction={() => { setCreateName(""); setCreateDesc(""); setCreateType("STANDARD"); setCreateFile(null); setCreateOpen(true); }}
-                  hint="推荐路径：新建技能 → 新建草稿版本 → 填写指令 → 发布 → 到智能体绑定"
+                  onAction={() => void openCreateWizard()}
+                  hint="推荐路径：新建技能（可同时绑定工具）→ 保存并发布 → 到智能体绑定"
                 />
               </div>
             ) : (
-              filteredSkills.map((s) => {
+              skillPager.paged.map((s) => {
                 const isActive = s.id === selectedId;
                 const isOfficial = sourceOf(s, meId) === "official";
                 const mode = modeOf(s);
@@ -1046,6 +1159,9 @@ export function SkillsPage() {
               })
             )}
           </div>
+
+          {/* 列表统一分页：前端切片 + 公共分页条（total<=0 时自动不渲染） */}
+          <Pagination total={skillPager.total} page={skillPager.page} pageSize={skillPager.pageSize} onChange={skillPager.onChange} />
         </aside>
 
         {/* 左右分栏拖拽把手 */}
@@ -1121,8 +1237,7 @@ export function SkillsPage() {
 
                     {editing && (
                       <div className="skill-section" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                        <button className="btn btn-secondary" disabled={busy} onClick={() => void saveVersion()}>保存草稿</button>
-                        <button className="btn btn-primary" disabled={busy} onClick={() => void saveAndPublish()}>发布</button>
+                        <button className="btn btn-primary" disabled={busy} onClick={() => void saveAndPublish()}>保存并发布</button>
                         <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
                       </div>
                     )}
@@ -1171,6 +1286,7 @@ export function SkillsPage() {
                         </div>
                       </div>
                     </div>
+                    {/* M12-3 B-5 的引导卡片已按用户要求删除（难看）；入口移到上方详情操作区「前往智能体页绑定」按钮 */}
 { /*
                     {detailIsMd && (
                       <>
@@ -1363,19 +1479,26 @@ export function SkillsPage() {
                             className="input"
                             placeholder="搜索工具名 / 说明 / 备注 / 标签"
                             value={toolKeyword}
-                            onChange={(e) => { setToolKeyword(e.target.value); setToolPage(1); }}
+                            onChange={(e) => { setToolKeyword(e.target.value); toolPager.setPage(1); }}
                           />
                         </div>
                       )}
                       {loadingTools ? (
                         <Loading />
                       ) : tools.length === 0 ? (
-                        <div className="skill-readonly-banner">
-                          {canEditTools
-                            ? "当前草稿版本尚未绑定任何工具，点击右上角「绑定工具」添加。"
-                            : "当前技能版本未绑定任何工具。"}
-                        </div>
-                      ) : pagedToolItems.length === 0 ? (
+                        canEditTools ? (
+                          /* M12-3 B-5：技能无绑定 → 引导打开已注册工具选择器 */
+                          <GuideCallout
+                            compact
+                            title="当前草稿版本尚未绑定工具"
+                            why="绑定已发布的工具后，技能执行时才能调用外部能力"
+                            actionLabel="绑定工具"
+                            onAction={() => void openBindModal()}
+                          />
+                        ) : (
+                          <div className="skill-readonly-banner">当前技能版本未绑定任何工具。</div>
+                        )
+                      ) : toolPager.paged.length === 0 ? (
                         <div className="skill-readonly-banner">没有匹配「{toolKeyword}」的工具。</div>
                       ) : (
                         <table className="skill-tool-table">
@@ -1390,7 +1513,7 @@ export function SkillsPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {pagedToolItems.map(({ t, index }) => (
+                            {toolPager.paged.map(({ t, index }) => (
                               <tr key={t.tool_version_id}>
                                 <td className="skill-tool-order-col">{index + 1}</td>
                                 <td className="tool-name">
@@ -1462,43 +1585,8 @@ export function SkillsPage() {
                           </tbody>
                         </table>
                       )}
-                      {filteredToolItems.length > TOOL_PAGE_SIZE && (
-                        <div className="connector-tool-pager">
-                          <span>第 {toolPageSafe} / {toolTotalPages} 页 · 共 {filteredToolItems.length} 条</span>
-                          <div className="spacer" />
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            disabled={toolPageSafe <= 1}
-                            onClick={() => setToolPage(toolPageSafe - 1)}
-                          >
-                            上一页
-                          </button>
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            disabled={toolPageSafe >= toolTotalPages}
-                            onClick={() => setToolPage(toolPageSafe + 1)}
-                          >
-                            下一页
-                          </button>
-                          <span className="skill-tool-page-jump">
-                            跳至
-                            <input
-                              className="input"
-                              style={{ width: 56 }}
-                              value={toolPageInput}
-                              placeholder={String(toolPageSafe)}
-                              onChange={(e) => setToolPageInput(e.target.value.replace(/\D/g, ""))}
-                              onKeyDown={(e) => {
-                                if (e.key !== "Enter") return;
-                                const n = parseInt(toolPageInput, 10);
-                                if (n >= 1 && n <= toolTotalPages) setToolPage(n);
-                                setToolPageInput("");
-                              }}
-                            />
-                            页
-                          </span>
-                        </div>
-                      )}
+                      {/* 列表统一分页：前端切片 + 公共分页条（替代旧 connector-tool-pager / skill-tool-page-jump 跳页 UI） */}
+                      <Pagination total={toolPager.total} page={toolPager.page} pageSize={toolPager.pageSize} onChange={toolPager.onChange} />
                       <p className="skill-tool-foot">
                         {canEditTools
                           ? "仅草稿版本可绑定/解绑；发布后随快照固化，不可原地修改。"
@@ -1629,13 +1717,15 @@ export function SkillsPage() {
         </section>
       </div>
 
-      {/* 创建 Skill 弹窗 */}
+      {/* 创建 Skill 弹窗（M12-3 B-4 向导：创建 + 首版本 + 绑定工具单次提交） */}
       <Modal
         open={createOpen}
         title="新建 Skill"
         onClose={() => {
           setCreateOpen(false);
           setCreateFile(null);
+          setWizardPicks([]);
+          setCreateToolQuery("");
           setError(null);
         }}
         footer={
@@ -1646,7 +1736,7 @@ export function SkillsPage() {
               disabled={busy || (createType === "MD_SKILL" ? !createFile : !createName.trim())}
               onClick={() => void createSkill()}
             >
-              {createType === "MD_SKILL" ? "上传并解析" : "创建"}
+              {createType === "MD_SKILL" ? "上传并解析" : "创建并发布"}
             </button>
           </>
         }
@@ -1709,6 +1799,66 @@ export function SkillsPage() {
               <label>说明</label>
               <textarea className="textarea" value={createDesc} onChange={(e) => setCreateDesc(e.target.value)} placeholder="描述该 Skill 的用途（可选）" />
             </div>
+            {/* M12-3 B-4：向导第三步——勾选绑定工具（可选），随创建发布原子写入首个版本 */}
+            <div className="form-field">
+              <label>绑定工具（可选）</label>
+              {loadingAvail ? (
+                <Loading />
+              ) : filteredWizardGroups.length === 0 ? (
+                <div className="skill-readonly-banner">
+                  当前没有可绑定的工具（需要有已发布版本的工具；可先到「连接器管理」登记并发布）。
+                </div>
+              ) : (
+                <>
+                  <input
+                    className="input"
+                    value={createToolQuery}
+                    onChange={(e) => setCreateToolQuery(e.target.value)}
+                    placeholder="搜索工具名称、说明或标签"
+                    aria-label="搜索工具"
+                  />
+                  <div className="skill-bind-list" style={{ maxHeight: 260, marginTop: 8 }}>
+                    {wizardGroupPager.paged.map((group) => (
+                      <div key={group.connector_id ?? "none"} className="skill-bind-group">
+                        <div className="skill-bind-group-title">
+                          <span>{group.connector_name}</span>
+                          <span className="hint">{group.tools.length} 个</span>
+                        </div>
+                        {group.tools.map((tool) => {
+                          const picked = wizardPicks.some((pick) => pick.tool.tool_id === tool.tool_id);
+                          return (
+                            <label key={tool.tool_id} className={`skill-tool-picker-item${picked ? " selected" : ""}`}>
+                              <input type="checkbox" checked={picked} onChange={() => toggleWizardPick(tool)} />
+                              <div className="t-main">
+                                <div className="t-row">
+                                  <span className="t-name">{tool.name}</span>
+                                  {tool.is_business_tool && <span className="skill-tag skill-tag-mine">业务封装</span>}
+                                  {tool.requires_confirmation && <span className="skill-tag skill-tag-confirm">需审批</span>}
+                                  {(tool.tags ?? []).map((tag) => (
+                                    <span key={tag} className="skill-tag skill-tag-neutral">{tag}</span>
+                                  ))}
+                                </div>
+                                <div className="t-desc">
+                                  <TruncatedDesc text={tool.description || tool.param_summary} modalTitle="工具说明" maxWidth={520} />
+                                </div>
+                              </div>
+                              <span className="t-ver">v{tool.published_versions[tool.published_versions.length - 1]?.version_number ?? 1}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                  {/* 列表统一分页：对分组数组前端切片 + 公共分页条（列表容器继续滚动，分页条放容器底部） */}
+                  <Pagination total={wizardGroupPager.total} page={wizardGroupPager.page} pageSize={wizardGroupPager.pageSize} onChange={wizardGroupPager.onChange} />
+                  {wizardPicks.length > 0 && (
+                    <div className="hint" style={{ marginTop: 6 }}>
+                      已选 {wizardPicks.length} 个工具（上限 {bindLimit}），创建发布时随首个版本固化绑定。
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </>
         )}
       </Modal>
@@ -1759,8 +1909,10 @@ export function SkillsPage() {
           <div className="skill-readonly-banner">当前没有可绑定的工具（需要有已发布版本的工具，或调整筛选条件）。</div>
         ) : (
           <div className="skill-bind-layout">
+            {/* 列表统一分页：外层包裹占 grid 第一列（滚动列表 + 底部分页条） */}
+            <div>
             <div className="skill-bind-list">
-              {filteredBindGroups.map((group) => (
+              {bindGroupPager.paged.map((group) => (
                 <div key={group.connector_id ?? "none"} className="skill-bind-group">
                   <div className="skill-bind-group-title">
                     <span>{group.connector_name}</span>
@@ -1817,6 +1969,9 @@ export function SkillsPage() {
                   })}
                 </div>
               ))}
+            </div>
+            {/* 列表统一分页：对分组数组前端切片 + 公共分页条（列表容器继续滚动，分页条放容器底部） */}
+            <Pagination total={bindGroupPager.total} page={bindGroupPager.page} pageSize={bindGroupPager.pageSize} onChange={bindGroupPager.onChange} />
             </div>
 
             <div className="skill-bind-picked">
@@ -1934,9 +2089,9 @@ export function SkillsPage() {
         onCancel={() => setPublishCheck(null)}
         onConfirm={() => {
           if (publishCheck) {
-            const { versionId } = publishCheck;
+            const { versionId, payload } = publishCheck;
             setPublishCheck(null);
-            void doPublish(versionId);
+            void doPublish(versionId, payload);
           }
         }}
       >

@@ -58,7 +58,11 @@ export interface MessageContentPart {
 export interface Message {
   id: string;
   conversation_id: string;
-  sender_type: "USER" | "ASSISTANT" | string;
+  sender_type: "USER" | "ASSISTANT" | "EXTERNAL" | string;
+  // 消息来源渠道：console / webhook / wecom（外部来源消息渲染独立样式）
+  source?: string | null;
+  // 外部发送者标识（企微 userId / 外部系统 key）
+  external_sender?: string | null;
   content: string;
   content_parts: MessageContentPart[] | null;
   status: string;
@@ -193,6 +197,7 @@ export interface Agent {
   current_published_version_id: string | null;
   status: string;
   is_default_parent: boolean;
+  is_default: boolean;
   owner_user_id: string | null;
   created_at: string;
   // 当前发布版本是否绑定了技能（工具）：前端据此路由「流式直答」或「任务执行链路」

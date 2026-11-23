@@ -5,6 +5,7 @@ import { errorText } from "../services/errorText";
 import type { AuditEvent, AuditListResponse } from "../types";
 import { Loading } from "../components/Loading";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
+import { Pagination, usePager } from "../components/Pagination";
 import { useAuth } from "../stores/auth";
 
 const API = "/api/z-torque/audit";
@@ -767,7 +768,6 @@ export function AuditPage() {
   const [keyword, setKeyword] = useState("");
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(20);
-  const [pageJump, setPageJump] = useState("");
   // 用户名下拉数据源（管理员专用；普通用户该项禁用）
   const [users, setUsers] = useState<string[]>([]);
 
@@ -776,6 +776,8 @@ export function AuditPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [traceChain, setTraceChain] = useState<AuditEvent[] | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
+  // 列表统一分页：同 Trace 链路记录接入公共分页条组件（客户端分页，切换链路后回第 1 页）
+  const tracePager = usePager(traceChain ?? [], 10);
 
   // 时间范围边界：列表查询与导出共用同一口径，避免"看到的"与"导出的"不一致
   const rangeBounds = useCallback((): { start?: string; end?: string } => {
@@ -861,19 +863,10 @@ export function AuditPage() {
       || username !== "" || agentId !== "" || traceInput !== "" || keyword !== "";
     setRange("7d"); setStartCustom(""); setEndCustom(""); setCategory("");
     setUsername(""); setAgentId(""); setTraceInput(""); setKeyword("");
-    setPage(0); setPageJump("");
+    setPage(0);
     // 有筛选变更：防抖 effect 会自动重查（固定 offset 0），无需手动请求，避免双请求；
     // 无变更：effect 不会触发，仅当停留在非首页时手动拉回第 1 页数据
     if (!changed && page !== 0) void load(0);
-  }
-
-  // 跳页：夹在有效页码范围内
-  function jumpToPage() {
-    const totalPages = Math.max(1, Math.ceil(total / pageSize));
-    const target = Math.min(Math.max(1, Number(pageJump) || 1), totalPages);
-    setPage(target - 1);
-    setPageJump(String(target));
-    void load((target - 1) * pageSize);
   }
 
   // 智能体资源 ID → 名称（复用筛选下拉已加载的缓存；无法解析时返回 null 不显示该行）
@@ -903,6 +896,7 @@ export function AuditPage() {
     try {
       const resp = await request<{ items: AuditEvent[]; trace_id: string }>(`${API}/by-trace/${encodeURIComponent(traceId)}`);
       setTraceChain(resp.items);
+      tracePager.setPage(1); // 切换链路后回到第 1 页
     } catch (err) {
       setError(errorText(err, "加载链路失败"));
     } finally {
@@ -1093,28 +1087,24 @@ export function AuditPage() {
               </table>
             )}
           </div>
+          {/* 列表统一分页：接入公共分页条组件（受控用法；翻页/跳页立即按 offset-limit 重查，
+              改每页条数时组件固定回调 page=1，沿用既有防抖重查路径天然回到第 1 页） */}
           <div className="audit-pager">
-            <span>共 {total} 条 · 第 {Math.floor(offset / pageSize) + 1} / {Math.max(1, Math.ceil(total / pageSize))} 页</span>
-            <div className="spacer" />
-            <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))} title="每页条数">
-              {PAGE_SIZE_OPTIONS.map((s) => (
-                <option key={s} value={s}>{s} 条/页</option>
-              ))}
-            </select>
-            <button className="btn btn-secondary btn-sm" disabled={loading || offset <= 0} onClick={() => { const p = Math.max(0, page - 1); setPage(p); setPageJump(String(p + 1)); void load(p * pageSize); }}>上一页</button>
-            <input
-              className="input"
-              style={{ width: 64 }}
-              type="number"
-              min={1}
-              max={Math.max(1, Math.ceil(total / pageSize))}
-              value={pageJump}
-              placeholder="页码"
-              onChange={(e) => setPageJump(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") jumpToPage(); }}
+            <Pagination
+              total={total}
+              page={Math.floor(offset / pageSize) + 1}
+              pageSize={pageSize}
+              pageSizeOptions={PAGE_SIZE_OPTIONS}
+              onChange={(p, s) => {
+                if (s !== pageSize) {
+                  setPageSize(s);
+                  setPage(0);
+                } else {
+                  setPage(p - 1);
+                  void load((p - 1) * s);
+                }
+              }}
             />
-            <button className="btn btn-secondary btn-sm" disabled={loading} onClick={() => jumpToPage()}>跳转</button>
-            <button className="btn btn-secondary btn-sm" disabled={loading || offset + pageSize >= total} onClick={() => { const p = page + 1; setPage(p); setPageJump(String(p + 1)); void load(p * pageSize); }}>下一页</button>
           </div>
         </div>
 
@@ -1260,19 +1250,23 @@ export function AuditPage() {
                     {traceChain.length === 0 ? (
                       <span style={{ fontSize: 12, color: "var(--text-muted)" }}>该 Trace 下无其他相关事件。</span>
                     ) : (
-                      traceChain.map((s) => (
-                        <div
-                          key={s.id}
-                          className={`audit-trace-step${s.id === detail.id ? " current" : ""}`}
-                          style={{ cursor: "pointer" }}
-                          title="点击查看该事件详情"
-                          onClick={() => void openDetail(s, true)}
-                        >
-                          <span className="t">{fmtTime(s.created_at)}</span>
-                          <span className={`audit-tag ${categoryTag(s).cls}`}>{categoryTag(s).label}</span>
-                          <span className="s">{summaryLabel(s.summary)}</span>
-                        </div>
-                      ))
+                      <>
+                        {tracePager.paged.map((s) => (
+                          <div
+                            key={s.id}
+                            className={`audit-trace-step${s.id === detail.id ? " current" : ""}`}
+                            style={{ cursor: "pointer" }}
+                            title="点击查看该事件详情"
+                            onClick={() => void openDetail(s, true)}
+                          >
+                            <span className="t">{fmtTime(s.created_at)}</span>
+                            <span className={`audit-tag ${categoryTag(s).cls}`}>{categoryTag(s).label}</span>
+                            <span className="s">{summaryLabel(s.summary)}</span>
+                          </div>
+                        ))}
+                        {/* 列表统一分页：接入公共分页条组件 */}
+                        <Pagination total={tracePager.total} page={tracePager.page} pageSize={tracePager.pageSize} onChange={tracePager.onChange} />
+                      </>
                     )}
                   </div>
                 )}

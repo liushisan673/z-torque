@@ -300,6 +300,12 @@ async def receive_webhook(webhook_id: UUID, request: Request):
     except ValueError:
         return JSONResponse(status_code=400, content={"ok": False, "error": "invalid json"})
 
+    # Bridge 探测包（weixin.test_callback）：{"event": "callback.ping", ...} 无 message 字段，
+    # 验签通过即 ACK，不进入消息处理
+    if isinstance(payload, dict) and payload.get("event") == "callback.ping":
+        logger.info("inbound webhook ping acknowledged webhook_id=%s", webhook_id)
+        return JSONResponse(status_code=200, content={"ok": True, "ping": True})
+
     parsed = service.parse(config, payload, request.headers, raw_body)
     if parsed is None:
         return JSONResponse(status_code=422, content={"ok": False, "error": "message field is empty"})

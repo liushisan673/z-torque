@@ -33,6 +33,7 @@ const CODE_TEXT: Record<string, string> = {
   AI_AGENT_NAME_CONFLICT: "同名智能体已存在，请换一个名称",
   AI_AGENT_IN_USE: "该智能体仍被会话引用，请先删除相关会话或将会话改绑其他智能体后再删除",
   AI_AGENT_VERSION_NOT_PUBLISHED: "该智能体没有可用的已发布版本，请先在智能体管理中发布版本",
+  AI_AGENT_SKILL_VERSION_NOT_PUBLISHED: "绑定的技能版本未发布，请先在技能页发布后再创建/发布智能体",
   AI_CONVERSATION_AGENT_CONFLICT: "当前会话绑定了其他智能体，请新建会话或切回原智能体后再发送",
   // ---- 技能 / 工具 ----
   AI_SKILL_NOT_FOUND: "技能不存在或已被删除",

@@ -106,7 +106,8 @@ def _validate_stage3_context(
         _validate_conversation(db, tenant_id, owner_user_id, agent_id, conversation_id)
     if trigger_message_id is None:
         return None
-    message = db.scalar(select(Message).where(Message.id == trigger_message_id, Message.tenant_id == tenant_id, Message.conversation_id == conversation_id, Message.sender_type == "USER"))
+    # EXTERNAL：外部系统（Webhook/企微）触发的消息同样可以发起任务（阶段12）
+    message = db.scalar(select(Message).where(Message.id == trigger_message_id, Message.tenant_id == tenant_id, Message.conversation_id == conversation_id, Message.sender_type.in_(("USER", "EXTERNAL"))))
     if message is None:
         raise ApiError("AI_RESOURCE_NOT_FOUND", "trigger message not found", 404)
     if message.task_id is not None:

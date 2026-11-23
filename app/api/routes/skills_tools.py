@@ -23,6 +23,7 @@ from app.kernel.skill_service import (
     publish_skill_version,
     publish_tool_version,
     reorder_tool_bindings,
+    set_skill_tool_bindings,
     update_skill,
     update_skill_version,
     update_tool_binding,
@@ -44,6 +45,7 @@ from app.schemas.skill import (
     SkillCreateRequest,
     SkillUpdateRequest,
     SkillVersionCreateRequest,
+    SkillVersionPublishRequest,
     SkillVersionUpdateRequest,
     ToolBindingOrderRequest,
     ToolBindingUpdateRequest,
@@ -530,10 +532,18 @@ async def reorder_tools(version_id: UUID, payload: ToolBindingOrderRequest, requ
     return out(request, [{"tool_version_id": str(item.tool_version_id), "sort_order": item.sort_order} for item in items])
 
 
-@router.post("/skill-versions/{version_id}/publish", summary="发布技能版本")
-async def publish_skill(version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+@router.post("/skill-versions/{version_id}/publish", summary="发布技能版本（支持一并提交未保存修改）")
+async def publish_skill(version_id: UUID, request: Request, payload: SkillVersionPublishRequest | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # 一键保存并发布：请求体可选；提供的未保存修改先原子落库，再校验发布，同一事务提交
+    if payload is not None:
+        values = payload.model_dump(exclude_unset=True)
+        bindings = values.pop("bindings", None)
+        if any(v is not None for v in values.values()):
+            update_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id, **values)
+        if bindings is not None:
+            set_skill_tool_bindings(db, tenant_id=user.tenant_id, user_id=user.id, skill_version_id=version_id, bindings=bindings)
     item = publish_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id); db.commit()
-    return out(request, {"id": str(item.id), "status": item.status, "snapshot_hash": item.snapshot_hash})
+    return out(request, {"id": str(item.id), "status": item.status, "snapshot_hash": item.snapshot_hash, "requires_confirmation": item.requires_confirmation})
 
 
 @router.patch("/skill-versions/{version_id}", summary="更新技能版本")

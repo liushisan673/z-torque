@@ -74,7 +74,10 @@ def _published_agent_version(db: Session, agent_id: UUID | None) -> AgentVersion
     return agent_version
 
 
-async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None, commit_before_generate: bool = False) -> ChatResult:
+async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None, commit_before_generate: bool = False, source: str = "console", external_sender: str | None = None) -> ChatResult:
+    # 外部链路（webhook/wecom）的消息以 EXTERNAL 角色落库，不再冒充 owner 用户；
+    # owner 仅作为会话归属人（权限隔离），消息身份与真人（console）区分。
+    sender_type = "USER" if source == "console" else "EXTERNAL"
     tenant_id = ctx.tenant_id
     user_id = ctx.user_id
     trace_id = trace_id or ctx.trace_id
@@ -94,7 +97,7 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             raise ApiError("AI_CONVERSATION_AGENT_CONFLICT", "conversation agent cannot be changed", 409)
     if content_parts:
         _enrich_bridge_paths(db, content_parts, conversation)
-    user_message = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="USER", content=content, content_parts=content_parts, status="PROCESSING")
+    user_message = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type=sender_type, source=source, external_sender=external_sender, content=content, content_parts=content_parts, status="PROCESSING")
     db.add(user_message)
     db.flush()
     ensure_conversation_title(conversation, content)
@@ -151,7 +154,7 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
                 user_message.status = "FAILED"
                 raise ApiError(exc.code, exc.message, 502) from exc
             reply = response.content or ""
-            assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content=reply, content_parts=assistant_reasoning_parts(response.reasoning_content), status="COMPLETED")
+            assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", source=source, content=reply, content_parts=assistant_reasoning_parts(response.reasoning_content), status="COMPLETED")
             db.add(assistant)
             db.flush()
             user_message.status = "COMPLETED"

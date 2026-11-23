@@ -47,6 +47,8 @@ async def stream(request: Request, user: User = Depends(get_current_user)) -> St
                     "conversation_id": str(event.conversation_id),
                     "message_id": str(event.message_id),
                     "sender_type": event.sender_type,
+                    "source": event.source,
+                    "external_sender": event.external_sender,
                     "content": event.content,
                     "content_parts": event.content_parts,
                     "title": event.title,

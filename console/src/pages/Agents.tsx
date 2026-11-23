@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { request } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
@@ -12,6 +13,7 @@ import { useToast } from "../components/Toast";
 import { GuideCallout } from "../components/GuideCallout";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
+import { Pagination, usePager } from "../components/Pagination";
 import { useAuth } from "../stores/auth";
 
 // Agent 绑定技能：单个 Agent 版本最多引用的去重工具数（与后端发布闸门一致）
@@ -74,6 +76,10 @@ function fmtTime(iso: string | null | undefined): string {
 export function AgentsPage() {
   const { user } = useAuth();
   const meId = user?.id;
+  // M12-3 B-5：跨页引导——已发布智能体跳会话页使用（携带 agentId 预选），
+  // 并消费 /agents?bindSkill= 技能页引导（新建弹窗预选该技能）
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -102,6 +108,10 @@ export function AgentsPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  // 新建弹窗一步创建并发布：系统规则 + 模型 + 已发布技能版本勾选（M12-2）
+  const [createPrompt, setCreatePrompt] = useState("");
+  const [createModel, setCreateModel] = useState("");
+  const [createLoadingSkills, setCreateLoadingSkills] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editName, setEditName] = useState("");
   const [editDescription, setEditDescription] = useState("");
@@ -213,6 +223,16 @@ export function AgentsPage() {
       .filter((group) => group.versions.length > 0);
   }, [skillGroups, skillQuery, skillSource]);
 
+  // M12 后列表统一分页：前端切片 + 公共分页条（新建弹窗与绑定技能弹窗各自独立分页，均对分组数组每页 10 组）
+  const createSkillPager = usePager(filteredSkillGroups, 10);
+  const bindSkillPager = usePager(filteredSkillGroups, 10);
+  // 子智能体候选列表：筛选逻辑与原弹窗内一致（按名称或版本搜索），先筛后分页
+  const filteredChildOptions = useMemo(() => {
+    const kw = childQuery.trim().toLowerCase();
+    return kw ? childOptions.filter((o) => o.label.toLowerCase().includes(kw)) : childOptions;
+  }, [childOptions, childQuery]);
+  const childPager = usePager(filteredChildOptions, 10);
+
   // 已绑定技能的工具数合计（按技能计；去重后的最终校验在发布时执行）
   const boundToolTotal = useMemo(() => {
     const toolCountByVersion = new Map<string, number>();
@@ -298,19 +318,62 @@ export function AgentsPage() {
     }
   }
 
+  // 打开新建弹窗：重置表单并加载已发布技能版本（勾选后随创建一并绑定并发布）；
+  // M12-3 B-5：携带 ?bindSkill=<skill_id> 时（技能页引导跳转）自动预选该技能的最新发布版本
+  async function openCreate() {
+    setCreateOpen(true);
+    setName("");
+    setDescription("");
+    setCreatePrompt("");
+    setCreateModel("");
+    setSkillPicks([]);
+    setSkillQuery("");
+    setSkillSource("all");
+    setCreateLoadingSkills(true);
+    try {
+      const groups = await loadSelectableSkills();
+      const bindSkillParam = searchParams.get("bindSkill");
+      if (bindSkillParam) {
+        setSearchParams({}, { replace: true });
+        const picks: { group: SelectableSkillGroup; version: SelectableSkillVersion }[] = [];
+        for (const g of groups) {
+          if (g.skill_id !== bindSkillParam) continue;
+          // versions 按 version_number 倒序返回，首项即最新发布版本
+          const ver = g.versions[0];
+          if (ver) picks.push({ group: g, version: ver });
+        }
+        if (picks.length > 0) setSkillPicks(picks);
+        else toast("info", "引导指定的技能暂无已发布版本，可到技能页完成发布后再绑定");
+      }
+    } finally {
+      setCreateLoadingSkills(false);
+    }
+  }
+
+  // 一步创建并发布：创建智能体 + 首版本 + 绑定技能 + 发布一次提交（后端同事务，失败整体回滚）
   async function createAgent() {
-    if (!name.trim()) return;
+    if (!name.trim() || !createModel) return;
     setBusy(true);
     setError(null);
     try {
+      const snapshot: Record<string, unknown> = { system_prompt: createPrompt.trim(), model: createModel };
       await request("/api/z-torque/agents", {
         method: "POST",
-        body: { name: name.trim(), description: description.trim() || null },
+        body: {
+          name: name.trim(),
+          description: description.trim() || null,
+          publish: true,
+          config_snapshot: snapshot,
+          skill_version_ids: skillPicks.map((pick) => pick.version.skill_version_id),
+        },
       });
       setCreateOpen(false);
       setName("");
       setDescription("");
-      toast("success", "智能体已创建");
+      setCreatePrompt("");
+      setCreateModel("");
+      setSkillPicks([]);
+      toast("success", "智能体已创建并发布，可到「会话」选择使用");
       await load();
     } catch (err) {
       setError(errorText(err, "创建失败"));
@@ -347,6 +410,22 @@ export function AgentsPage() {
     } finally {
       setBusy(false);
       setConfirmArchive(null);
+    }
+  }
+
+  // M12-4：设为默认智能体（同租户互斥，后端自动清掉旧默认）；会话页/企微桥接无明确目标时优先使用
+  async function setDefaultAgent(agent: Agent) {
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/agents/${agent.id}/set-default`, { method: "POST" });
+      await load();
+      if (selectedId === agent.id) await openDetail(agent);
+      toast("success", "已设为默认智能体，会话页将优先选用");
+    } catch (err) {
+      setError(errorText(err, "设置默认失败"));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -448,13 +527,15 @@ export function AgentsPage() {
   }
 
   // 可选技能版本：后端按技能分组一次性返回，替代逐技能详情请求（避免 N+1）；
-  // 失败时置空列表（选择器显示空态），不阻塞绑定主流程
-  async function loadSelectableSkills() {
+  // 失败时置空列表（选择器显示空态），不阻塞绑定主流程；返回分组供引导预填使用
+  async function loadSelectableSkills(): Promise<SelectableSkillGroup[]> {
     try {
       const data = await request<SelectableSkillResponse>("/api/z-torque/skills-tools/skill-versions/selectable?size=200");
       setSkillGroups(data.groups);
+      return data.groups;
     } catch {
       setSkillGroups([]);
+      return [];
     }
   }
 
@@ -704,10 +785,27 @@ export function AgentsPage() {
       <>
         <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEdit(selected)}>编辑信息</button>
         <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>
+        {selected.is_default ? (
+          <button className="btn btn-secondary btn-sm" disabled title="当前已是默认智能体">当前默认</button>
+        ) : (
+          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void setDefaultAgent(selected)} title="设为默认后，会话页与企微消息未指定目标时优先使用">设为默认</button>
+        )}
+        <button
+          className="btn btn-primary btn-sm"
+          disabled={!selected.current_published_version_id}
+          onClick={() => navigate(`/chat?agentId=${selected.id}`)}
+          title="前往会话页，会自动选中该智能体"
+        >
+          前往会话页
+        </button>
         <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>归档</button>
       </>
     );
   }, [selected, busy]);
+
+  // M12 后列表统一分页：前端切片 + 公共分页条（左侧智能体列表与详情版本列表，均每页 10 条）
+  const agentPager = usePager(filteredAgents, 10);
+  const versionPager = usePager(versions, 10);
 
   return (
     <div className="agent-page">
@@ -724,7 +822,7 @@ export function AgentsPage() {
           <div className="agent-list-header">
             <h1>智能体</h1>
             <div className="agent-list-actions">
-              <button className="btn btn-primary" type="button" onClick={() => setCreateOpen(true)}>
+              <button className="btn btn-primary" type="button" onClick={() => void openCreate()}>
                 + 创建智能体
               </button>
               <button className="btn btn-secondary btn-sm" type="button" onClick={() => void load()} title="刷新">刷新</button>
@@ -769,12 +867,12 @@ export function AgentsPage() {
                   title="还没有智能体"
                   why="创建后需绑定模型并发布版本，才能在会话中使用"
                   actionLabel="新建智能体"
-                  onAction={() => { setName(""); setDescription(""); setCreateOpen(true); }}
-                  hint="推荐路径：新建智能体 → 新建草稿版本 → 绑定模型 → 发布"
+                  onAction={() => void openCreate()}
+                  hint="推荐路径：新建智能体（可勾选已发布技能）→ 创建并发布 → 到会话使用"
                 />
               </div>
             ) : (
-              filteredAgents.map((a) => {
+              agentPager.paged.map((a) => {
                 const isActive = a.id === selectedId;
                 const isOfficial = sourceOf(a, meId) === "official";
                 const si = statusInfo(a.status);
@@ -787,7 +885,7 @@ export function AgentsPage() {
                     onClick={() => void openDetail(a)}
                   >
                     <div className="row1">
-                      <span className="name">{a.name}{a.is_default_parent && " · 默认父"}</span>
+                      <span className="name">{a.name}{a.is_default_parent && " · 默认父"}{!a.is_default_parent && a.is_default && " · 默认"}</span>
                       <span className={`agent-tag ${si.cls}`}>{si.label}</span>
                     </div>
                     <div className="desc">{a.description ?? "—"}</div>
@@ -802,6 +900,13 @@ export function AgentsPage() {
               })
             )}
           </div>
+          {/* M12 后列表统一分页：前端切片 + 公共分页条（列表本身继续滚动，分页条固定在滚动容器外底部） */}
+          <Pagination
+            total={agentPager.total}
+            page={agentPager.page}
+            pageSize={agentPager.pageSize}
+            onChange={agentPager.onChange}
+          />
         </aside>
 
         {/* 左右分栏拖拽把手 */}
@@ -873,7 +978,7 @@ export function AgentsPage() {
                           <label>描述</label>
                           <textarea value={selected.description ?? ""} disabled />
                         </div>
-                        
+
 
                       </div>
                     </div>
@@ -1162,8 +1267,10 @@ export function AgentsPage() {
                       {versions.length === 0 ? (
                         <div className="agent-readonly-banner">暂无版本。</div>
                       ) : (
+                        <>
+                        {/* M12 后列表统一分页：前端切片 + 公共分页条（放在版本列表下方） */}
                         <div className="agent-version-list">
-                          {versions.map((v) => {
+                          {versionPager.paged.map((v) => {
                             const isCurrent = currentPublishedVersion?.id === v.id;
                             const readOnly = sourceOf(selected, meId) === "official" || selected.status === "ARCHIVED";
                             const archived = v.status === "ARCHIVED";
@@ -1205,6 +1312,14 @@ export function AgentsPage() {
                             );
                           })}
                         </div>
+                        {/* M12 后列表统一分页：前端切片 + 公共分页条（放在版本列表下方） */}
+                        <Pagination
+                          total={versionPager.total}
+                          page={versionPager.page}
+                          pageSize={versionPager.pageSize}
+                          onChange={versionPager.onChange}
+                        />
+                        </>
                       )}
                     </div>
                     <div className="agent-alert agent-alert-info">
@@ -1221,15 +1336,21 @@ export function AgentsPage() {
         </section>
       </div>
 
-      {/* 新建 Agent 弹窗 */}
+      {/* 新建 Agent 弹窗：一步创建并发布（创建 + 首版本 + 绑定技能 + 发布） */}
       <Modal
         open={createOpen}
         title="新建智能体"
         onClose={() => setCreateOpen(false)}
+        width={640}
         footer={
           <>
+            <span className="skill-bind-count">
+              {skillPicks.length > 0 ? `已选 ${skillPicks.length} 个技能 · 工具合计 ${skillPicks.reduce((sum, pick) => sum + pick.version.tool_count, 0)} / ${MAX_AGENT_TOOLS}` : "保存后立即可在「会话」使用"}
+            </span>
             <button className="btn btn-secondary" onClick={() => setCreateOpen(false)}>取消</button>
-            <button className="btn btn-primary" disabled={busy || !name.trim()} onClick={() => void createAgent()}>创建</button>
+            <button className="btn btn-primary" disabled={busy || !name.trim() || !createModel} onClick={() => void createAgent()}>
+              {busy ? "发布中…" : "创建并发布"}
+            </button>
           </>
         }
       >
@@ -1240,6 +1361,85 @@ export function AgentsPage() {
         <div className="form-field">
           <label>说明</label>
           <textarea className="textarea" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="描述该智能体的职责（可选）" />
+        </div>
+        <div className="form-field">
+          <label>供应商 / 模型</label>
+          <select className="input" value={createModel} onChange={(e) => setCreateModel(e.target.value)}>
+            <option value="">请选择模型</option>
+            {models.map((m) => {
+              // 健康标注：供应商缺密钥的模型选了也跑不通，直接在选项里提示
+              const noSecret = m.provider ? m.provider.secret_configured === false : false;
+              return (
+                <option key={m.id} value={m.model_identifier || m.id}>
+                  {m.name}{m.model_identifier ? `（${m.model_identifier}）` : ""}{noSecret ? " · 密钥未配置" : ""}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+        <div className="form-field">
+          <label>系统规则</label>
+          <textarea className="textarea" value={createPrompt} onChange={(e) => setCreatePrompt(e.target.value)} placeholder="定义智能体的人设与行为约束（可选，后续可在版本编辑中完善）" />
+        </div>
+        <div className="form-field">
+          <label>绑定技能（可选，仅已发布版本）</label>
+          {createLoadingSkills ? (
+            <div className="skill-readonly-banner">技能加载中…</div>
+          ) : filteredSkillGroups.length === 0 ? (
+            <div className="skill-readonly-banner">当前没有可绑定的已发布技能版本，可稍后在版本编辑中绑定。</div>
+          ) : (
+            <>
+            {/* M12 后列表统一分页：对分组数组前端切片（每页 10 组）+ 公共分页条 */}
+            <div className="skill-bind-list" style={{ maxHeight: 220, overflowY: "auto" }}>
+              {createSkillPager.paged.map((group) => (
+                <div key={group.skill_id} className="skill-bind-group">
+                  <div className="skill-bind-group-title">
+                    <span>
+                      {group.skill_name}
+                      {group.official && <span className="skill-tag skill-tag-official">平台</span>}
+                    </span>
+                    <span className="hint">{group.versions.length} 个已发布版本</span>
+                  </div>
+                  {group.versions.map((version) => {
+                    const picked = skillPicks.some((pick) => pick.version.skill_version_id === version.skill_version_id);
+                    const projected = skillPicks.reduce((sum, pick) => sum + pick.version.tool_count, 0);
+                    const disabled = !picked && projected + version.tool_count > MAX_AGENT_TOOLS;
+                    return (
+                      <label
+                        key={version.skill_version_id}
+                        className={`skill-tool-picker-item${picked ? " selected" : ""}${disabled ? " disabled" : ""}`}
+                        title={version.orchestration_hint ?? undefined}
+                      >
+                        <input
+                          type="checkbox"
+                          disabled={disabled || busy}
+                          checked={picked}
+                          onChange={() => toggleSkillPick(group, version)}
+                        />
+                        <div className="t-main">
+                          <div className="t-row">
+                            <span className="t-name">v{version.version_number}</span>
+                            <span className="skill-tag skill-tag-neutral">{version.mode === "script" ? "脚本" : "纯指令"}</span>
+                            <span className="skill-tag skill-tag-neutral">{version.tool_count} 个工具</span>
+                            {version.requires_confirmation && <span className="skill-tag skill-tag-confirm">需审批</span>}
+                          </div>
+                          <div className="t-desc">{group.description || version.orchestration_hint || "—"}</div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+            {/* M12 后列表统一分页：前端切片 + 公共分页条（放在勾选列表下方） */}
+            <Pagination
+              total={createSkillPager.total}
+              page={createSkillPager.page}
+              pageSize={createSkillPager.pageSize}
+              onChange={createSkillPager.onChange}
+            />
+            </>
+          )}
         </div>
       </Modal>
 
@@ -1308,7 +1508,8 @@ export function AgentsPage() {
         ) : (
           <div className="skill-bind-layout">
             <div className="skill-bind-list">
-              {filteredSkillGroups.map((group) => (
+              {/* M12 后列表统一分页：对分组数组前端切片（每页 10 组） */}
+              {bindSkillPager.paged.map((group) => (
                 <div key={group.skill_id} className="skill-bind-group">
                   <div className="skill-bind-group-title">
                     <span>
@@ -1381,6 +1582,13 @@ export function AgentsPage() {
                 ))
               )}
             </div>
+            {/* M12 后列表统一分页：前端切片 + 公共分页条（放在弹窗列表区域底部） */}
+            <Pagination
+              total={bindSkillPager.total}
+              page={bindSkillPager.page}
+              pageSize={bindSkillPager.pageSize}
+              onChange={bindSkillPager.onChange}
+            />
           </div>
         )}
       </Modal>
@@ -1409,17 +1617,17 @@ export function AgentsPage() {
           />
         </div>
         {(() => {
-          const kw = childQuery.trim().toLowerCase();
-          const filtered = kw ? childOptions.filter((o) => o.label.toLowerCase().includes(kw)) : childOptions;
+          // M12 后列表统一分页：筛选逻辑原样保留（filteredChildOptions 由 useMemo 提供），前端切片（每页 10）
           if (childOptions.length === 0) {
             return <div className="agent-readonly-banner">暂无其他智能体的已发布版本。</div>;
           }
-          if (filtered.length === 0) {
+          if (filteredChildOptions.length === 0) {
             return <div className="agent-readonly-banner">没有匹配的子智能体版本。</div>;
           }
           return (
+            <>
             <div className="skill-bind-list">
-              {filtered.map((o) => {
+              {childPager.paged.map((o) => {
                 const picked = childPicks.includes(o.version_id);
                 return (
                   <label key={o.version_id} className={`skill-tool-picker-item${picked ? " selected" : ""}`}>
@@ -1434,6 +1642,14 @@ export function AgentsPage() {
                 );
               })}
             </div>
+            {/* M12 后列表统一分页：前端切片 + 公共分页条（放在弹窗候选列表下方） */}
+            <Pagination
+              total={childPager.total}
+              page={childPager.page}
+              pageSize={childPager.pageSize}
+              onChange={childPager.onChange}
+            />
+            </>
           );
         })()}
       </Modal>

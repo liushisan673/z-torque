@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
@@ -21,6 +22,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TruncatedDesc } from "../components/TruncatedDesc";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { useAuth } from "../stores/auth";
+import { Pagination, usePager } from "../components/Pagination";
 
 const API = "/api/z-torque/connectors";
 // 已注册工具列表分页大小（客户端分页）
@@ -188,6 +190,8 @@ function restTestHeadline(r: ConnectorTestResult): string {
 export function ConnectorsPage() {
   const { user } = useAuth();
   const { push: toast } = useToast();
+  // M12-3 B-3：跨页引导——批量登记完成后跳技能页绑定（携带 tool_id 预填）
+  const navigate = useNavigate();
   // 危险操作三连：停用 / 归档 / 删除统一走 ConfirmDialog
   const [confirmDisable, setConfirmDisable] = useState<{ id: string; name: string } | null>(null);
   const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null);
@@ -210,7 +214,6 @@ export function ConnectorsPage() {
   // 已注册工具筛选与分页：关键字匹配名称/说明/标签，类型下拉筛选，每页 10 条
   const [toolKeyword, setToolKeyword] = useState("");
   const [toolType, setToolType] = useState("all");
-  const [toolPage, setToolPage] = useState(1);
 
   const [filter, setFilter] = useState<Filter>("all");
   const [keyword, setKeyword] = useState("");
@@ -244,6 +247,10 @@ export function ConnectorsPage() {
   // MCP 工具发现（/discover 结果，切换连接时重置）
   const [discovering, setDiscovering] = useState(false);
   const [discovered, setDiscovered] = useState<ConnectorDiscoveredToolSummary[] | null>(null);
+  // M12-3 B-3：发现结果勾选（存未登记工具名），支持全选 + 批量一键注册
+  const [discSelected, setDiscSelected] = useState<string[]>([]);
+  // M12-3 B-3：批量登记结果（引导卡片数据源，重新发现/切换连接时清空）
+  const [regGuide, setRegGuide] = useState<{ count: number; toolIds: string[]; failed: string[] } | null>(null);
   // 远端与本地登记的差异（只在发现时计算，供人工确认后一键同步）
   const [drift, setDrift] = useState<ConnectorToolDrift | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -383,13 +390,9 @@ export function ConnectorsPage() {
       return hay.includes(kw);
     });
   }, [tools, toolKeyword, toolType]);
-  const toolTotalPages = Math.max(1, Math.ceil(filteredTools.length / TOOL_PAGE_SIZE));
-  // 筛选结果变少时页码自动收敛，避免停留在空页
-  const toolPageSafe = Math.min(toolPage, toolTotalPages);
-  const pagedTools = useMemo(
-    () => filteredTools.slice((toolPageSafe - 1) * TOOL_PAGE_SIZE, toolPageSafe * TOOL_PAGE_SIZE),
-    [filteredTools, toolPageSafe],
-  );
+  // 列表统一分页：已注册工具改用公共 usePager（前端切片 + 公共分页条；筛选结果变少时页码自动收敛，改每页条数自动回第 1 页）
+  const toolPager = usePager(filteredTools, TOOL_PAGE_SIZE);
+  const pagedTools = toolPager.paged;
 
   // 锚点跳转：平滑滚动到对应区块（CSS scroll-margin-top 预留吸顶导航高度）
   function scrollToSection(id: string) {
@@ -425,10 +428,12 @@ export function ConnectorsPage() {
     setTestFailure(null);
     setDiscovered(null);
     setDrift(null);
+    setDiscSelected([]);
+    setRegGuide(null);
     // 切换连接器时重置已注册工具的筛选与页码，避免残留上一连接的过滤条件
     setToolKeyword("");
     setToolType("all");
-    setToolPage(1);
+    toolPager.setPage(1);
     setLoadingDetail(true);
     setError(null);
     try {
@@ -546,6 +551,9 @@ export function ConnectorsPage() {
       return (c.name + " " + (c.description ?? "") + " " + target).toLowerCase().includes(kw);
     });
   }, [items, filter, keyword]);
+
+  // 列表统一分页：左侧连接器列表前端切片 + 公共分页条（每页 10）
+  const listPager = usePager(filtered, 10);
 
   async function saveEdit() {
     if (!detail || !editName.trim()) return;
@@ -673,6 +681,9 @@ export function ConnectorsPage() {
       const r = await request<ConnectorDiscoverResult>(`${API}/${detail.id}/discover`, { method: "POST" });
       setDiscovered(r.tools);
       setDrift(r.drift ?? null);
+      // 重新发现：清空上一轮的勾选与登记引导
+      setDiscSelected([]);
+      setRegGuide(null);
     } catch (err) {
       setDiscovered(null);
       setDrift(null);
@@ -997,11 +1008,13 @@ export function ConnectorsPage() {
     }
   }
 
-  // MCP 批量注册：把发现结果中尚未登记的工具按默认名称一次性注册，免去逐个弹窗
-  async function registerAllDiscovered() {
+  // MCP 批量注册：把发现结果中尚未登记的工具按默认名称一次性注册，免去逐个弹窗；
+  // 传入 only（勾选的工具名列表）时仅登记勾选项（M12-3 B-3 批量勾选注册）
+  async function registerDiscovered(only?: string[]) {
     if (!detail || !discovered) return;
     const pending = discovered.filter((t) => !registeredNames.has(t.name.trim()));
-    if (pending.length === 0) {
+    const targets = only ? pending.filter((t) => only.includes(t.name.trim())) : pending;
+    if (targets.length === 0) {
       toast("info", "发现结果均已登记");
       return;
     }
@@ -1009,21 +1022,26 @@ export function ConnectorsPage() {
     setError(null);
     let ok = 0;
     const failed: string[] = [];
-    for (const t of pending) {
+    const toolIds: string[] = [];
+    for (const t of targets) {
       try {
-        await request(`${API}/${detail.id}/tools/register`, {
+        const r = await request<{ tool_id: string }>(`${API}/${detail.id}/tools/register`, {
           method: "POST",
           // 透传发现结果自带的参数 Schema：模型据此自动传参
           body: { name: t.name.trim(), description: t.description || null, tool_type: "MCP", external_name: t.name.trim(), input_schema: t.input_schema ?? {} },
         });
         ok += 1;
+        toolIds.push(r.tool_id);
       } catch {
         failed.push(t.name);
       }
     }
     await loadTools(detail.id);
+    setDiscSelected([]);
     setBusy(false);
-    if (failed.length === 0) toast("success", `已批量登记 ${ok} 个工具`);
+    // 登记成功后展示跨页引导卡片：前往技能页绑定（携带 tool_id 预填）
+    setRegGuide(ok > 0 ? { count: ok, toolIds, failed } : null);
+    if (failed.length === 0) toast("success", `已登记 ${ok} 个工具`);
     else toast("info", `已登记 ${ok} 个，失败 ${failed.length} 个：${failed.slice(0, 3).join("、")}${failed.length > 3 ? "…" : ""}`);
   }
 
@@ -1185,6 +1203,14 @@ export function ConnectorsPage() {
   );
   // 发现结果中与本地登记存在内容差异的工具名（仅用于打标提示）
   const changedDiscoveredNames = new Set((drift?.changed ?? []).map((item) => item.name));
+  // M12-3 B-3：发现结果中未登记的工具（勾选批量注册的候选）
+  const pendingDiscovered = useMemo(
+    () => (discovered ?? []).filter((t) => !registeredNames.has(t.name.trim())),
+    [discovered, registeredNames],
+  );
+  const allPendingSelected = pendingDiscovered.length > 0 && pendingDiscovered.every((t) => discSelected.includes(t.name.trim()));
+  // 列表统一分页：发现结果前端切片（每页 10）；勾选列与已登记禁选逻辑不变
+  const discoverPager = usePager(discovered ?? [], 10);
   // 业务封装可选子工具：仅取有已发布版本且未归档的工具
   const compositeCandidates = tools.filter((tool) => tool.published_version_id && tool.status !== "ARCHIVED");
   const enabled = selected?.status === "ENABLED";
@@ -1276,7 +1302,8 @@ export function ConnectorsPage() {
                 />
               </div>
             ) : (
-              filtered.map((c) => {
+              // 列表统一分页：仅渲染当前页切片
+              listPager.paged.map((c) => {
                 const ti = typeInfo(c.connector_type);
                 const si = statusInfo(c.status);
                 return (
@@ -1301,6 +1328,8 @@ export function ConnectorsPage() {
               })
             )}
           </div>
+          {/* 列表统一分页：前端切片 + 公共分页条（滚动容器外底部） */}
+          <Pagination total={listPager.total} page={listPager.page} pageSize={listPager.pageSize} onChange={listPager.onChange} />
         </aside>
 
         {/* 左右分栏拖拽把手 */}
@@ -1806,14 +1835,25 @@ export function ConnectorsPage() {
                             </button>
                           )}
                           {selected.connector_type === "MCP" && discovered !== null && (
-                            <button
-                              className="btn btn-primary btn-sm"
-                              disabled={busy || discovering || discovered.every((t) => registeredNames.has(t.name.trim()))}
-                              onClick={() => void registerAllDiscovered()}
-                              title="把发现结果中尚未登记的工具按默认名称一次性注册"
-                            >
-                              批量登记未注册工具（{discovered.filter((t) => !registeredNames.has(t.name.trim())).length}）
-                            </button>
+                            discSelected.length > 0 ? (
+                              <button
+                                className="btn btn-primary btn-sm"
+                                disabled={busy || discovering}
+                                onClick={() => void registerDiscovered(discSelected)}
+                                title="把勾选的工具按默认名称一次性注册"
+                              >
+                                登记所选（{discSelected.length}）
+                              </button>
+                            ) : (
+                              <button
+                                className="btn btn-primary btn-sm"
+                                disabled={busy || discovering || pendingDiscovered.length === 0}
+                                onClick={() => void registerDiscovered()}
+                                title="把发现结果中尚未登记的工具按默认名称一次性注册"
+                              >
+                                批量登记未注册工具（{pendingDiscovered.length}）
+                              </button>
+                            )
                           )}
                         </div>
                       )}
@@ -1824,12 +1864,12 @@ export function ConnectorsPage() {
                               type="text"
                               placeholder="搜索工具名称 / 说明 / 标签"
                               value={toolKeyword}
-                              onChange={(e) => { setToolKeyword(e.target.value); setToolPage(1); }}
+                              onChange={(e) => { setToolKeyword(e.target.value); toolPager.setPage(1); }}
                             />
                           </div>
                           <select
                             value={toolType}
-                            onChange={(e) => { setToolType(e.target.value); setToolPage(1); }}
+                            onChange={(e) => { setToolType(e.target.value); toolPager.setPage(1); }}
                             aria-label="按工具类型筛选"
                           >
                             <option value="all">全部类型</option>
@@ -1841,7 +1881,35 @@ export function ConnectorsPage() {
                         </div>
                       )}
                       {tools.length === 0 ? (
-                        <div className="skill-readonly-banner">当前连接尚未注册任何工具。</div>
+                        <GuideCallout
+                          compact
+                          title="当前连接尚未注册任何工具"
+                          why={
+                            selected.connector_type === "MCP"
+                              ? "MCP 连接可先「从 MCP 服务发现工具」，再勾选批量登记"
+                              : "工具登记并发布后，才能被技能绑定调用"
+                          }
+                          actionLabel={selected.connector_type === "MCP" ? "从 MCP 服务发现工具" : "登记工具"}
+                          onAction={() => {
+                            if (selected.connector_type === "MCP") void runDiscover();
+                            else {
+                              setRegType("HTTP");
+                              setRegName("");
+                              setRegDesc("");
+                              setRegExternal("");
+                              setRegMethod("GET");
+                              setRegUrl("");
+                              setRegHeaders("");
+                              setRegQuery("");
+                              setRegSchema("");
+                              setRegSql("");
+                              setRegTags("");
+                              setRegBusiness(false);
+                              setRegOpen(true);
+                            }
+                          }}
+                          hint="登记完成后可到「技能管理」绑定调用"
+                        />
                       ) : filteredTools.length === 0 ? (
                         <div className="skill-readonly-banner">没有符合筛选条件的工具。</div>
                       ) : (
@@ -1930,26 +1998,8 @@ export function ConnectorsPage() {
                           </tbody>
                         </table>
                       )}
-                      {filteredTools.length > TOOL_PAGE_SIZE && (
-                        <div className="connector-tool-pager">
-                          <span>第 {toolPageSafe} / {toolTotalPages} 页 · 共 {filteredTools.length} 条</span>
-                          <div className="spacer" />
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            disabled={toolPageSafe <= 1}
-                            onClick={() => setToolPage(toolPageSafe - 1)}
-                          >
-                            上一页
-                          </button>
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            disabled={toolPageSafe >= toolTotalPages}
-                            onClick={() => setToolPage(toolPageSafe + 1)}
-                          >
-                            下一页
-                          </button>
-                        </div>
-                      )}
+                      {/* 列表统一分页：公共分页条替代旧 connector-tool-pager（每页条数下拉 10/50/80/100 可用） */}
+                      <Pagination total={toolPager.total} page={toolPager.page} pageSize={toolPager.pageSize} onChange={toolPager.onChange} />
                       {/* MCP 发现结果：发现 ≠ 已授权，注册后才能被 Skill 绑定调用 */}
                       {selected.connector_type === "MCP" && discovered !== null && (
                         <div className="connector-section" style={{ marginTop: 12, marginBottom: 0 }}>
@@ -1999,16 +2049,45 @@ export function ConnectorsPage() {
                             <table className="connector-op-table">
                               <thead>
                                 <tr>
+                                  {canManage && enabled && (
+                                    <th style={{ width: 36 }}>
+                                      {/* 列表已分页：全选仍作用于全部未登记工具（跨页生效），勾选/已登记禁选逻辑不变 */}
+                                      <input
+                                        type="checkbox"
+                                        aria-label="全选未登记工具"
+                                        disabled={pendingDiscovered.length === 0}
+                                        checked={allPendingSelected}
+                                        onChange={(e) => setDiscSelected(e.target.checked ? pendingDiscovered.map((t) => t.name.trim()) : [])}
+                                      />
+                                    </th>
+                                  )}
                                   <th>工具</th>
                                   <th>说明</th>
                                   {canManage && enabled && <th>操作</th>}
                                 </tr>
                               </thead>
                               <tbody>
-                                {discovered.map((t) => {
+                                {/* 列表统一分页：仅渲染当前页切片 */}
+                                {discoverPager.paged.map((t) => {
                                   const already = registeredNames.has(t.name.trim());
+                                  const checked = discSelected.includes(t.name.trim());
                                   return (
                                     <tr key={t.name}>
+                                      {canManage && enabled && (
+                                        <td>
+                                          <input
+                                            type="checkbox"
+                                            aria-label={`选择 ${t.name}`}
+                                            disabled={already}
+                                            checked={already || checked}
+                                            onChange={() =>
+                                              setDiscSelected((prev) =>
+                                                checked ? prev.filter((n) => n !== t.name.trim()) : [...prev, t.name.trim()],
+                                              )
+                                            }
+                                          />
+                                        </td>
+                                      )}
                                       <td className="op-name">
                                         {t.name}
                                         {changedDiscoveredNames.has(t.name.trim()) && (
@@ -2043,6 +2122,24 @@ export function ConnectorsPage() {
                                 })}
                               </tbody>
                             </table>
+                          )}
+                          {/* 列表统一分页：前端切片 + 公共分页条（每页 10） */}
+                          <Pagination total={discoverPager.total} page={discoverPager.page} pageSize={discoverPager.pageSize} onChange={discoverPager.onChange} />
+                          {/* M12-3 B-3：批量登记完成后的跨页引导——前往技能页绑定（携带 tool_id 预填） */}
+                          {regGuide && regGuide.count > 0 && (
+                            <div style={{ marginTop: 12 }}>
+                              <GuideCallout
+                                title={`已登记 ${regGuide.count} 个工具`}
+                                why={
+                                  regGuide.failed.length > 0
+                                    ? `另有 ${regGuide.failed.length} 个登记失败：${regGuide.failed.slice(0, 3).join("、")}${regGuide.failed.length > 3 ? "…" : ""}`
+                                    : "工具已发布为可调用版本，下一步到技能中绑定"
+                                }
+                                actionLabel="前往技能页绑定"
+                                onAction={() => navigate(`/skills?bindTool=${regGuide.toolIds.join(",")}`)}
+                                hint="技能页会自动预选这些工具，新建技能或绑定到已有草稿均可"
+                              />
+                            </div>
                           )}
                         </div>
                       )}

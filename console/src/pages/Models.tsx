@@ -11,6 +11,7 @@ import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { useAuth } from "../stores/auth";
+import { Pagination, usePager } from "../components/Pagination";
 
 // 选中记忆：跳转页面后返回时恢复上次选中的模型（sessionStorage 按标签页隔离）
 const SELECTED_KEY = "zt.models.selectedId";
@@ -77,6 +78,30 @@ const PROBE_MODE_OPTIONS: { value: string; label: string }[] = [
   { value: "models_list", label: "模型列表探测" },
   { value: "minimal_chat", label: "最小 Chat 请求" },
 ];
+
+// 列表统一分页：供应商分组内的模型列表（前端切片 + 公共分页条，每页 10）
+function ProviderModelList({ models, selectedId, onOpen }: { models: ModelResource[]; selectedId: string | null; onOpen: (m: ModelResource) => void }) {
+  const pager = usePager(models, 10);
+  return (
+    <>
+      {pager.paged.map((m) => {
+        const tag = modelTag(m);
+        return (
+          <div
+            key={m.id}
+            className={`model-item${m.id === selectedId ? " active" : ""}`}
+            onClick={() => onOpen(m)}
+          >
+            <span>{m.name}</span>
+            {tag && <span className="mini-tag">{tag.text}</span>}
+          </div>
+        );
+      })}
+      {/* 列表统一分页：前端切片 + 公共分页条 */}
+      <Pagination total={pager.total} page={pager.page} pageSize={pager.pageSize} onChange={pager.onChange} />
+    </>
+  );
+}
 
 export function ModelsPage() {
   const { user } = useAuth();
@@ -483,6 +508,10 @@ export function ModelsPage() {
 
   const selected = useMemo(() => models.find((m) => m.id === selectedId) ?? null, [models, selectedId]);
   const detailEndpoints = detail?.endpoints ?? [];
+  // 列表统一分页：左侧供应商列表前端切片（每页 10）；分组内模型列表由 ProviderModelList 内部分页
+  const providerPager = usePager(providers, 10);
+  // 列表统一分页：接入点表前端切片（每页 10）
+  const epPager = usePager(detailEndpoints, 10);
 
   return (
     <div className="model-page">
@@ -514,7 +543,8 @@ export function ModelsPage() {
                 />
               </div>
             ) : (
-              providers.map((p) => {
+              // 列表统一分页：仅渲染当前页切片
+              providerPager.paged.map((p) => {
                 const dot = providerDot(p, models);
                 const mine = models.filter((m) => m.provider_id === p.id);
                 return (
@@ -559,25 +589,16 @@ export function ModelsPage() {
                         )}
                       </div>
                     ) : (
-                      mine.map((m) => {
-                        const tag = modelTag(m);
-                        return (
-                          <div
-                            key={m.id}
-                            className={`model-item${m.id === selectedId ? " active" : ""}`}
-                            onClick={() => void openModel(m)}
-                          >
-                            <span>{m.name}</span>
-                            {tag && <span className="mini-tag">{tag.text}</span>}
-                          </div>
-                        );
-                      })
+                      // 列表统一分页：分组内模型列表由 ProviderModelList 前端切片 + 公共分页条
+                      <ProviderModelList models={mine} selectedId={selectedId} onOpen={(m) => void openModel(m)} />
                     )}
                   </div>
                 );
               })
             )}
           </div>
+          {/* 列表统一分页：前端切片 + 公共分页条（滚动容器外底部） */}
+          <Pagination total={providerPager.total} page={providerPager.page} pageSize={providerPager.pageSize} onChange={providerPager.onChange} />
         </aside>
 
         {/* 左右分栏拖拽把手 */}
@@ -813,7 +834,8 @@ export function ModelsPage() {
                             </tr>
                           </thead>
                           <tbody>
-                            {detailEndpoints.map((ep) => (
+                            {/* 列表统一分页：仅渲染当前页切片 */}
+                            {epPager.paged.map((ep) => (
                               <tr key={ep.id}>
                                 <td className="ep-name">{ep.name}</td>
                                 <td className="url" title={ep.endpoint_url}>{ep.endpoint_url}</td>
@@ -840,6 +862,8 @@ export function ModelsPage() {
                           </tbody>
                         </table>
                       )}
+                      {/* 列表统一分页：前端切片 + 公共分页条（每页 10） */}
+                      <Pagination total={epPager.total} page={epPager.page} pageSize={epPager.pageSize} onChange={epPager.onChange} />
                     </div>
                   </div>
                 </section>

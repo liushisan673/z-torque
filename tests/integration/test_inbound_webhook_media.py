@@ -142,7 +142,7 @@ async def test_webhook_media_is_ingested_into_content_parts(webhook_media_env):
     await service.process(config, ids["event"], parsed.event_id, parsed.text, parsed.conversation_key, parsed=parsed)
 
     with SessionLocal() as db:
-        message = db.scalar(select(Message).where(Message.tenant_id == ids["tenant"], Message.sender_type == "USER"))
+        message = db.scalar(select(Message).where(Message.tenant_id == ids["tenant"], Message.sender_type == "EXTERNAL"))
         assert message is not None and message.content == ""
         image_parts = [part for part in (message.content_parts or []) if part.get("type") == "image"]
         assert image_parts and image_parts[0]["file_name"] == "photo.jpg"
@@ -256,7 +256,7 @@ async def test_turn_with_image_and_text_is_one_message(webhook_media_env):
 
     with SessionLocal() as db:
         user_messages = db.scalars(
-            select(Message).where(Message.tenant_id == ids["tenant"], Message.sender_type == "USER")
+            select(Message).where(Message.tenant_id == ids["tenant"], Message.sender_type == "EXTERNAL")
         ).all()
         assert len(user_messages) == 1
         parts = user_messages[0].content_parts or []
@@ -289,7 +289,7 @@ async def test_turn_with_three_images_processes_all(webhook_media_env):
 
     with SessionLocal() as db:
         message = db.scalar(
-            select(Message).where(Message.tenant_id == ids["tenant"], Message.sender_type == "USER")
+            select(Message).where(Message.tenant_id == ids["tenant"], Message.sender_type == "EXTERNAL")
         )
         assert message is not None
         image_parts = [part for part in (message.content_parts or []) if part.get("type") == "image"]

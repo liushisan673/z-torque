@@ -31,6 +31,9 @@ class ChatMessageEvent:
     task_id: UUID | None = None
     # 该消息触发的后台任务（用户消息）：控制台据此订阅任务事件流，展示执行过程
     pending_task_id: UUID | None = None
+    # 消息来源渠道（console/webhook/wecom）与外部发送者标识：外部来源前端渲染独立样式
+    source: str | None = None
+    external_sender: str | None = None
 
 
 class ChatMessageEventBus:

@@ -8,6 +8,10 @@ from app.core.servertime import UTCDatetime
 class AgentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     description: str | None = None
+    # 一步创建并发布（M12-2）：publish=true 时创建智能体 + 首版本 + 绑定技能 + 发布一次完成
+    publish: bool = False
+    config_snapshot: dict | None = None
+    skill_version_ids: list[UUID] | None = None
 
 class AgentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
@@ -39,6 +43,7 @@ class AgentResponse(BaseModel):
     current_published_version_id: UUID | None
     status: str
     is_default_parent: bool
+    is_default: bool
     owner_user_id: UUID | None = None
     created_at: UTCDatetime
     model_config = {"from_attributes": True}

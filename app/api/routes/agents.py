@@ -13,6 +13,7 @@ from app.kernel.agent.service import (
     copy_agent,
     create_agent,
     delete_agent,
+    set_default_agent,
     update_agent,
 )
 from app.kernel.agent.skill_service import attach_skill_version, detach_skill_version
@@ -59,9 +60,24 @@ async def list_agents(request: Request, include_archived: bool = False, user: Us
     rows = db.scalars(select(Agent).where(Agent.tenant_id == user.tenant_id, (Agent.owner_user_id == user.id) | (Agent.source_type == "OFFICIAL") | admin_owned_clause(Agent.owner_user_id, user.tenant_id), status_filter).order_by(Agent.created_at.desc())).all()
     return out(request, _with_has_tools(db, rows))
 
-@router.post("", summary="创建智能体")
+@router.post("", summary="创建智能体（可选一步创建并发布）")
 async def create(payload: AgentCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    item = create_agent(db, tenant_id=user.tenant_id, user_id=user.id, **payload.model_dump()); db.commit(); db.refresh(item)
+    values = payload.model_dump()
+    publish_flag = values.pop("publish")
+    snapshot = values.pop("config_snapshot")
+    skill_version_ids = values.pop("skill_version_ids")
+    item = create_agent(db, tenant_id=user.tenant_id, user_id=user.id, **values)
+    if publish_flag:
+        # 一步创建并发布：同一事务内完成 创建智能体 + 首版本 + 绑定技能 + 发布；任一步失败整体回滚
+        version = create_version(db, tenant_id=user.tenant_id, user_id=user.id, agent_id=item.id, snapshot=snapshot or {})
+        for skill_version_id in skill_version_ids or []:
+            # 前置校验：明确拒绝未发布/不存在的技能版本（比 attach 的 NOT_FOUND 更直观）
+            skill = db.scalar(select(SkillVersion).where(SkillVersion.id == skill_version_id, SkillVersion.tenant_id == user.tenant_id))
+            if not skill or skill.status != "PUBLISHED":
+                raise ApiError("AI_AGENT_SKILL_VERSION_NOT_PUBLISHED", "agent version references an unpublished skill version", 422)
+            attach_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, agent_version_id=version.id, skill_version_id=skill_version_id)
+        publish_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version.id)
+    db.commit(); db.refresh(item)
     return out(request, AgentResponse.model_validate(item).model_dump(mode="json"))
 
 def get_agent(db, user, agent_id):
@@ -85,6 +101,11 @@ async def update(agent_id: UUID, payload: AgentUpdate, request: Request, user: U
 @router.post("/{agent_id}/copy", summary="复制智能体")
 async def copy(agent_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = copy_agent(db, tenant_id=user.tenant_id, user_id=user.id, agent_id=agent_id); db.commit(); db.refresh(item)
+    return out(request, AgentResponse.model_validate(item).model_dump(mode="json"))
+
+@router.post("/{agent_id}/set-default", summary="设为默认智能体（同租户互斥）")
+async def set_default(agent_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item = set_default_agent(db, tenant_id=user.tenant_id, user_id=user.id, agent_id=agent_id); db.commit(); db.refresh(item)
     return out(request, AgentResponse.model_validate(item).model_dump(mode="json"))
 
 @router.post("/{agent_id}/archive", summary="归档智能体")

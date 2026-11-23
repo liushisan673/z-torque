@@ -33,6 +33,15 @@ class Agent(TenantModel):
             sqlite_where=text("is_default_parent = 1"),
             postgresql_where=text("is_default_parent"),
         ),
+        # M12-4：用户指定的默认智能体，同租户最多一行 true（部分唯一索引，写法同 is_default_parent）
+        Index(
+            "uq_zr_agent_default",
+            "tenant_id",
+            "is_default",
+            unique=True,
+            sqlite_where=text("is_default = 1"),
+            postgresql_where=text("is_default"),
+        ),
     )
     owner_user_id: Mapped[UUID | None] = mapped_column(ForeignKey("zr_user.id"), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -45,6 +54,9 @@ class Agent(TenantModel):
     current_published_version_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
     is_default_parent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    # M12-4：用户指定的默认智能体（区别于平台默认父 Agent）；会话页/企微桥接在无明确目标时优先使用。
+    # 不建普通索引：低基数布尔列收益有限，查询走 is_default=1 的部分唯一索引
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class AgentVersion(TenantModel):

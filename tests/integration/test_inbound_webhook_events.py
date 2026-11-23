@@ -99,11 +99,12 @@ async def test_inbound_webhook_publishes_user_and_reply():
     finally:
         chat_event_bus.unsubscribe(queue)
 
-    assert user_event.sender_type == "USER"
+    assert user_event.sender_type == "EXTERNAL"
+    assert user_event.source == "webhook"
     assert user_event.content == "回调内容"
     assert reply_event.sender_type == "ASSISTANT"
     assert reply_event.content == "这是回调智能体的回答"
     assert user_event.conversation_id == reply_event.conversation_id
     with SessionLocal() as db:
         rows = db.scalars(select(Message).where(Message.conversation_id == user_event.conversation_id)).all()
-        assert {row.sender_type for row in rows} == {"USER", "ASSISTANT"}
+        assert {row.sender_type for row in rows} == {"EXTERNAL", "ASSISTANT"}

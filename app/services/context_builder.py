@@ -278,13 +278,14 @@ def build_context(
     files = _load_files(db, conversation, _media_file_ids(messages))
     store = try_port("object.store")
     # 图片只注入当前用户消息；messages 已按时间倒序，取最近 1 + N 条用户消息
-    user_message_ids = [message.id for message in messages if message.sender_type == "USER"]
+    # EXTERNAL（Webhook/企微外部来源）与 USER 同属用户侧消息
+    user_message_ids = [message.id for message in messages if message.sender_type in ("USER", "EXTERNAL")]
     inject_limit = 1 + max(0, settings.model_image_history_limit)
     image_message_ids = set(user_message_ids[:inject_limit])
     image_counter = [0]
     doc_texts: list[tuple[UUID, str]] = []
     for message in reversed(messages):
-        if message.sender_type == "USER":
+        if message.sender_type in ("USER", "EXTERNAL"):
             # 入站事件元数据（企微 / 通用 Webhook / 渠道接入）只给模型看，不污染 Chat 气泡；
             # 前端按 file_id 过滤 content_parts，天然忽略该片段。
             for part in message.content_parts or []:
@@ -303,7 +304,7 @@ def build_context(
                 meta_text = label + ":\n" + json.dumps(meta, ensure_ascii=False)
                 if _context_chars(context) + len(meta_text) <= max_chars:
                     context.append(ModelMessage("system", meta_text))
-        role = 'user' if message.sender_type == 'USER' else 'assistant'
+        role = 'user' if message.sender_type in ('USER', 'EXTERNAL') else 'assistant'
         image_parts, hints, docs = _media_content(
             message,
             files,

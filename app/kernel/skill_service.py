@@ -260,6 +260,41 @@ def attach_tool(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id
     db.add(link); db.flush(); return link
 
 
+def set_skill_tool_bindings(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id: UUID, bindings: list[dict]) -> list[SkillVersionTool]:
+    """整体替换草稿版本的工具绑定列表（一键保存并发布用）：先全量校验再重建，失败不产生半成品。"""
+    skill = _locked_draft_skill_version(db, tenant_id=tenant_id, user_id=user_id, skill_version_id=skill_version_id)
+    wanted: list[tuple[UUID, str | None, str | None]] = []
+    seen: set[UUID] = set()
+    for item in bindings:
+        tool_version_id = item.get("tool_version_id")
+        tool = db.get(ToolVersion, tool_version_id)
+        if not tool or tool.tenant_id != tenant_id or tool.status != "PUBLISHED":
+            raise ApiError("AI_TOOL_VERSION_NOT_FOUND", "published tool version not found", 404)
+        if tool.id in seen:
+            raise ApiError("AI_REQUEST_INVALID", "duplicate tool version binding", 422)
+        seen.add(tool.id)
+        wanted.append((tool.id, item.get("role"), item.get("note")))
+    if len(wanted) > MAX_SKILL_BOUND_TOOLS:
+        raise ApiError("AI_SKILL_TOOL_LIMIT_EXCEEDED", f"a skill version can bind at most {MAX_SKILL_BOUND_TOOLS} tools", 409)
+    for link in _binding_links(db, skill.id):
+        db.delete(link)
+    db.flush()
+    rebuilt: list[SkillVersionTool] = []
+    for index, (tool_version_id, role, note) in enumerate(wanted):
+        link = SkillVersionTool(
+            tenant_id=tenant_id,
+            skill_version_id=skill.id,
+            tool_version_id=tool_version_id,
+            sort_order=index,
+            role=validate_binding_role(role),
+            note=(note.strip() or None) if note is not None else None,
+        )
+        db.add(link)
+        rebuilt.append(link)
+    db.flush()
+    return rebuilt
+
+
 def detach_tool(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id: UUID, tool_version_id: UUID) -> SkillVersionTool:
     skill = _locked_draft_skill_version(db, tenant_id=tenant_id, user_id=user_id, skill_version_id=skill_version_id)
     link = db.scalar(select(SkillVersionTool).where(SkillVersionTool.skill_version_id == skill.id, SkillVersionTool.tool_version_id == tool_version_id))

@@ -326,7 +326,8 @@ async def test_inbound_message_is_written_to_chat_conversation(settings, monkeyp
 
     assert response.status_code == 200
     assert len(calls) == 1
-    assert inbound_event.sender_type == "USER"
+    assert inbound_event.sender_type == "EXTERNAL"
+    assert inbound_event.source == "wecom"
     assert inbound_event.content == "企微消息入站"
     assert reply_event.sender_type == "ASSISTANT"
     assert "已收到：企微消息入站" in reply_event.content
@@ -341,7 +342,8 @@ async def test_inbound_message_is_written_to_chat_conversation(settings, monkeyp
         assert conversation.agent_id == agent_id
         messages = db.scalars(select(Message).where(Message.conversation_id == conversation.id)).all()
         by_type = {message.sender_type: message for message in messages}
-        assert by_type["USER"].content == "企微消息入站"
+        assert by_type["EXTERNAL"].content == "企微消息入站"
+        assert by_type["EXTERNAL"].source == "wecom"
         assert "已收到：企微消息入站" in by_type["ASSISTANT"].content
 
 

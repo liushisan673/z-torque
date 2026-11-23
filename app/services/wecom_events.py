@@ -365,6 +365,8 @@ class WeComEventService:
                     content_parts=self._event_parts(event),
                     idempotency_key=event.event_id,
                     trace_id=ctx.trace_id,
+                    source="wecom",
+                    external_sender=(event.external_user_id or event.conversation_key or event.event_id)[:128],
                     model_gateway=self.model_gateway,
                     skill_gateway=self.skill_gateway,
                     short_memory=self.short_memory,

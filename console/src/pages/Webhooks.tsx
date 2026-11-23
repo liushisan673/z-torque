@@ -7,6 +7,7 @@ import { Modal } from "../components/Modal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { StatusTag } from "../components/ui";
 import { useToast } from "../components/Toast";
+import { Pagination, usePager } from "../components/Pagination";
 import { useAuth } from "../stores/auth";
 
 interface FormState {
@@ -111,6 +112,9 @@ export function WebhooksPage() {
     () => agents.filter((a) => a.status === "ACTIVE" && a.current_published_version_id),
     [agents],
   );
+
+  // 列表统一分页：接入公共分页条组件（客户端分页，每页默认 10）
+  const pager = usePager(items, 10);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -688,7 +692,7 @@ export function WebhooksPage() {
             </tr>
           </thead>
           <tbody>
-            {items.map((item) => {
+            {pager.paged.map((item) => {
               const endpoint = `${apiBaseUrl()}${item.inbound_path}`;
               return (
                 <tr key={item.id}>
@@ -736,6 +740,9 @@ export function WebhooksPage() {
           </tbody>
         </table>
       )}
+
+      {/* 列表统一分页：接入公共分页条组件 */}
+      <Pagination total={pager.total} page={pager.page} pageSize={pager.pageSize} onChange={pager.onChange} />
 
       <Modal
         open={createOpen}

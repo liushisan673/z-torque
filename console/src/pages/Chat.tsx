@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -47,6 +47,46 @@ const AGENT_KEY = "zt.chat.agentId";
 
 const MEDIA_PLACEHOLDER_RE = /^\[(图片|语音|视频|文件)\]$/;
 const MEDIA_KINDS = new Set(["image", "audio", "video"]);
+
+// 外部来源消息（Webhook/企微）的徽标文案
+const EXTERNAL_SOURCE_LABELS: Record<string, string> = {
+  webhook: "Webhook",
+  wecom: "企微",
+  api: "API",
+};
+function externalSourceLabel(m: Message): string {
+  const label = EXTERNAL_SOURCE_LABELS[String(m.source ?? "")] ?? "外部";
+  // external_sender 存储格式为「Webhook接入名称:会话标识」，徽标只展示接入名称（冒号前的部分）；
+  // 企微来源的 sender 为 userId（无冒号），原样展示
+  const sender = m.external_sender ? m.external_sender.split(":")[0] : "";
+  return sender ? `${label} · ${sender}` : label;
+}
+
+// 外部来源消息头像：按渠道展示对应图标（Webhook=链接、企微=对话气泡、API=代码），替代固定"外"字
+function ExternalSourceAvatar({ source }: { source: string }) {
+  const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  if (source === "wecom") {
+    return (
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" {...stroke} />
+      </svg>
+    );
+  }
+  if (source === "api") {
+    return (
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <polyline points="16 18 22 12 16 6" {...stroke} />
+        <polyline points="8 6 2 12 8 18" {...stroke} />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" {...stroke} />
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" {...stroke} />
+    </svg>
+  );
+}
 
 function partKind(part: MessageContentPart): "image" | "file" | "audio" | "video" {
   const kind = String(part.type ?? "");
@@ -1141,7 +1181,7 @@ export function ChatPage() {
   const lastAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
-      if (m.sender_type !== "USER" && m.status !== "FAILED" && m.content) return m.id;
+      if (m.sender_type === "ASSISTANT" && m.status !== "FAILED" && m.content) return m.id;
     }
     return null;
   }, [messages]);
@@ -1213,6 +1253,8 @@ export function ChatPage() {
                 conversation_id?: string;
                 message_id?: string;
                 sender_type?: string;
+                source?: string | null;
+                external_sender?: string | null;
                 content?: string;
                 content_parts?: MessageContentPart[] | null;
                 created_at?: string;
@@ -1232,6 +1274,8 @@ export function ChatPage() {
                       id: payload.message_id as string,
                       conversation_id: payload.conversation_id as string,
                       sender_type: payload.sender_type ?? "USER",
+                      source: payload.source ?? null,
+                      external_sender: payload.external_sender ?? null,
                       content: payload.content ?? "",
                       content_parts: payload.content_parts ?? null,
                       status: "COMPLETED",
@@ -1241,8 +1285,8 @@ export function ChatPage() {
                     },
                   ],
             );
-            // 后台 Webhook 触发的任务：像手动发送一样展示内联执行块并订阅任务事件流
-            if (payload.sender_type === "USER" && payload.pending_task_id) {
+            // 后台 Webhook/企微触发的任务：像手动发送一样展示内联执行块并订阅任务事件流
+            if ((payload.sender_type === "USER" || payload.sender_type === "EXTERNAL") && payload.pending_task_id) {
               startRun(payload.pending_task_id);
               subscribeTask(payload.pending_task_id, { convId: payload.conversation_id });
             }
@@ -1568,6 +1612,10 @@ export function ChatPage() {
                 )}
                 {visibleMessages.map((m) => {
                   const isUser = m.sender_type === "USER";
+                  // 外部来源（Webhook/企微）消息：用户侧内容 + 独立虚线气泡与来源徽标（样式见 .chat-msg.external）
+                  const isExternal = m.sender_type === "EXTERNAL";
+                  // 头像/底色按渠道区分：webhook=琥珀、wecom=企微绿、api=品牌蓝，见 .chat-msg.external.src-*
+                  const externalSource = isExternal ? String(m.source ?? "") : "";
                   const failed = !isUser && m.status === "FAILED";
                   const parts = Array.isArray(m.content_parts)
                     ? m.content_parts.filter((p) => p?.file_id)
@@ -1576,11 +1624,14 @@ export function ChatPage() {
                   // 占位文本只在没有附件时兜底显示
                   const hidePlaceholder = hasAttachment && MEDIA_PLACEHOLDER_RE.test(m.content.trim());
                   return (
-                    <div key={m.id} className={`chat-msg ${isUser ? "user" : "assistant"}`}>
-                      <div className="chat-msg-avatar">{isUser ? "我" : "Z"}</div>
+                    <div key={m.id} className={`chat-msg ${isUser ? "user" : "assistant"}${isExternal ? ` external${externalSource ? ` src-${externalSource}` : ""}` : ""}`}>
+                      <div className="chat-msg-avatar" title={isExternal ? externalSourceLabel(m) : undefined}>
+                        {isUser ? "我" : isExternal ? <ExternalSourceAvatar source={externalSource} /> : "Z"}
+                      </div>
                       <div className="chat-msg-main">
                         <div className="chat-msg-bubble">
-                          {isUser ? (
+                          {isExternal && <div className="chat-msg-source-badge">{externalSourceLabel(m)}</div>}
+                          {isUser || isExternal ? (
                             <div className="chat-msg-content">{hidePlaceholder ? "" : m.content}</div>
                           ) : (
                             <div className="chat-msg-content chat-md">
@@ -1622,7 +1673,7 @@ export function ChatPage() {
                         </div>
                         {/* 操作按钮独立在气泡下方：比融在气泡内更醒目（复制 / 重新生成 / 编辑重发 / 重试） */}
                         {(failed
-                          || (!isUser && !failed && m.content)
+                          || ((!isUser || isExternal) && !failed && m.content)
                           || (isUser && !sending && streamingText === null && !activeRun)) && (
                           <div className="chat-msg-actions">
                             {failed && (
@@ -1635,8 +1686,8 @@ export function ChatPage() {
                                 {copiedId === m.id ? "已复制" : "复制"}
                               </button>
                             )}
-                            {/* 重新生成：仅最新一条正常助手回复提供，且当前没有进行中的流/执行块 */}
-                            {!isUser && !failed && m.id === lastAssistantId && !sending
+                            {/* 重新生成：仅最新一条正常助手回复提供，且当前没有进行中的流/执行块（外部来源消息不参与） */}
+                            {!isUser && !isExternal && !failed && m.id === lastAssistantId && !sending
                               && streamingText === null && !activeRun && runAnswer === null && (
                               <button className="chat-msg-action" type="button" onClick={() => regenerateAnswer(m)} title="基于你上一条消息重新生成一份回答（原回答保留）">
                                 重新生成
