@@ -19,7 +19,7 @@ def cleanup():
         fk_off(db)
         db.execute(delete(AgentVersion))
         db.execute(delete(Agent))
-        db.execute(delete(User))
+        db.execute(delete(User).where(User.username.like('owner-%') | User.username.like('other-%')))
         db.execute(delete(Tenant))
         fk_on(db)
 
