@@ -230,10 +230,26 @@ class AgentExecutionLoop:
                 if mapping is None:
                     raise ApiError("AI_TOOL_MAPPING_INVALID", "tool name is not allowed for this agent version", 422)
                 _progress_event(db, task, "TASK_TOOL_CALL", f"calling tool {call.name}", trace_id=request.trace_id, payload={"tool_name": call.name, "arguments": _brief(arguments)})
+                is_site_a2a = mapping.dispatch_agent_version_id is not None or mapping.dispatch_candidate_ids is not None
                 dispatch_target = mapping.child_agent_version_id or mapping.dispatch_agent_version_id
-                if dispatch_target is not None:
-                    is_site_a2a = mapping.dispatch_agent_version_id is not None
-                    if is_site_a2a and a2a_dispatch_count >= MAX_A2A_DISPATCHES_PER_RUN:
+                route_error: dict[str, Any] | None = None
+                if mapping.dispatch_candidate_ids is not None:
+                    try:
+                        selected_id = UUID(str(arguments.get("agent_version_id") or ""))
+                    except (ValueError, TypeError, AttributeError):
+                        selected_id = None
+                    if selected_id is None or selected_id not in mapping.dispatch_candidate_ids:
+                        route_error = {
+                            "status": "FAILED",
+                            "error_code": "AI_A2A_ROUTE_FAILED",
+                            "error_message": "router selected an Agent outside the server-provided candidate set",
+                        }
+                    else:
+                        dispatch_target = selected_id
+                if dispatch_target is not None or is_site_a2a:
+                    if route_error is not None:
+                        child_result = route_error
+                    elif is_site_a2a and a2a_dispatch_count >= MAX_A2A_DISPATCHES_PER_RUN:
                         child_result = {
                             "status": "SKIPPED",
                             "agent_version_id": str(dispatch_target),
