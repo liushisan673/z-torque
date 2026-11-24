@@ -16,7 +16,14 @@ from app.builtin_plugins.a2a_gateway.federated import FederatedPrincipalRegistry
 from app.builtin_plugins.a2a_gateway.gateway import A2AGateway
 from app.builtin_plugins.a2a_gateway.identity import InboundIdentity
 from app.builtin_plugins.a2a_gateway.peers import PeerRegistry
-from app.plugin_sdk import ENGINE_PERMISSION, SKILL_GATEWAY_KEY, AssemblyError, PluginManifest
+from app.plugin_sdk import (
+    ENGINE_PERMISSION,
+    SKILL_GATEWAY_KEY,
+    AssemblyError,
+    CapabilityDeclaration,
+    CapabilityLevel,
+    PluginManifest,
+)
 
 SERVICE_A2A_GATEWAY = "a2a_gateway"
 NETWORK_OUTBOUND_PERMISSION = "network.outbound"
@@ -36,6 +43,10 @@ class A2AGatewayPlugin:
         ),
         # network.outbound：每次出站前 require_permission 自证；db.query：仅 identity/discovery
         permissions=(NETWORK_OUTBOUND_PERMISSION, ENGINE_PERMISSION),
+        published_services=(SERVICE_A2A_GATEWAY,),
+        capabilities=(
+            CapabilityDeclaration("a2a.dispatch", CapabilityLevel.EXTEND_EXISTING, "站内智能体派发：复用 skill.executor 的子代理链路"),
+        ),
         # 结构化 JSON Schema：装配期按 Settings 投影校验（类型/枚举/必填）；
         # 跨字段语义（remote_peers 非空时白名单不得为空、base_url 必须 https）在 A2AConfig.validate()。
         config_schema={

@@ -40,7 +40,7 @@ def cleanup():
     with SessionLocal.begin() as db:
         # FTS 表由应用侧双写（无 SQL 触发器），测试清理需显式清空，避免跨用例污染
         db.execute(text("DELETE FROM zr_knowledge_fts"))
-        for model in (Message, KnowledgeChunk, KnowledgeDoc, File, AuditLog, AuthSession, Conversation, User, Tenant):
+        for model in (Message, KnowledgeChunk, KnowledgeDoc, File, AuditLog, AuthSession, Conversation, Agent, User, Tenant):
             db.execute(delete(model))
     _DEGRADED_AUDITED.clear()
 
@@ -231,3 +231,36 @@ async def test_degraded_state_is_visible_and_audited(monkeypatch):
     with SessionLocal() as db:
         audit = db.scalar(select(AuditLog).where(AuditLog.action == "KNOWLEDGE_DEGRADED"))
         assert audit is not None and audit.detail["state"] == "DEGRADED"
+
+
+@pytest.mark.asyncio
+async def test_message_level_search_is_enabled_and_scoped_to_owner():
+    """消息级检索已全量开启：按登录用户隔离会话，capabilities 上报 + metadata-only 审计。"""
+    tenant_a, user_a = _bootstrap()
+    tenant_b, user_b = _bootstrap()
+    with SessionLocal.begin() as db:
+        for tenant_id, user_id, token in (
+            (tenant_a, user_a, "zqmsgalpha-owner-a"),
+            (tenant_b, user_b, "zqmsgbeta-owner-b"),
+        ):
+            agent = Agent(tenant_id=tenant_id, owner_user_id=None, name=f"msg-{uuid4()}", source_type="OFFICIAL", status="ACTIVE")
+            db.add(agent)
+            db.flush()
+            conversation = Conversation(tenant_id=tenant_id, owner_user_id=user_id, agent_id=agent.id, title="msg")
+            db.add(conversation)
+            db.flush()
+            db.add(Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="USER", content=token, status="COMPLETED"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers_a = await _login(client, user_a)
+        hit = await client.post("/api/z-torque/knowledge/search", headers=headers_a, json={"query": "zqmsgalpha", "top_k": 5})
+        cross = await client.post("/api/z-torque/knowledge/search", headers=headers_a, json={"query": "zqmsgbeta", "top_k": 5})
+        capabilities = await client.get("/api/z-torque/capabilities")
+    assert hit.status_code == 200, hit.text
+    messages = [item for item in hit.json()["data"]["chunks"] if item.get("source_type") == "message"]
+    assert messages and "zqmsgalpha-owner-a" in messages[0]["content"]
+    assert all("zqmsgbeta" not in item["content"] for item in cross.json()["data"]["chunks"])
+    assert capabilities.json()["data"]["knowledge"]["message_search"] == "AVAILABLE"
+    with SessionLocal() as db:
+        audit = db.scalar(select(AuditLog).where(AuditLog.action == "KNOWLEDGE_MESSAGE_SEARCH"))
+        assert audit is not None
+        assert "query" not in audit.detail and len(audit.detail["query_hash"]) == 64

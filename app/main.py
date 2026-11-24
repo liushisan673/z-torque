@@ -15,19 +15,21 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, get_optional_user
 from app.api.router import router as api_router
 from app.api.routes.webhooks import inbound_router as webhook_inbound_router
-from app.api.routes.wecom_events import build_router as build_wecom_events_router
 from app.assembly import assemble, resolve_profile
 from app.config import get_settings
 from app.core.errors import ApiError
 from app.core.responses import error_response, success_response
 from app.db.session import SessionLocal, check_database, engine
+from app.kernel.agent.service import ensure_system_agent
 from app.kernel.audit.service import set_request_trace_id
 from app.kernel.capabilities import derive_stage
+from app.kernel.local_scheduler import LocalScheduler
 from app.kernel.md_skill_watcher import MdSkillWatcher
 from app.kernel.registry.port_registry import PortState
 from app.kernel.task.runtime import TaskRuntime
 from app.models import Tenant, User
 from app.security.permissions import is_admin_user
+from app.services.capability_presentation import build_capability_cards
 
 logger = logging.getLogger("z_torque")
 
@@ -42,6 +44,8 @@ async def lifespan(app: FastAPI):
     app.state.assembly_result = result
     # 能力面按"插件名"派生（v1.3 §7.3）：静态 features 清单不足以表达三个新能力
     app.state.assembly_plugins = tuple(manifest.name for manifest in result.plugins)
+    # Phase 2：能力声明治理摘要（manifest-first + capability ladder）
+    app.state.capability_governance = result.capability_governance
     # 插件经 sdk.publish 发布的领域服务（audit_export / a2a）转挂 app.state，
     # 受控 API 只读访问，不反向 import 插件包（阶段00 §3.8）
     for object_key, object_value in result.objects.items():
@@ -52,22 +56,36 @@ async def lifespan(app: FastAPI):
     app.state.mcp_stdio_registry = result.stdio_registry
     app.state.mcp_connectors = []
     app.state.md_skill_watchers = {}
+    # Phase 2：统一本机调度器；watcher 等周期任务统一注册到这里，退出时一次收口
+    scheduler = LocalScheduler()
+    app.state.scheduler = scheduler
     with SessionLocal() as bootstrap_db:
         tenants = bootstrap_db.query(Tenant).all()
         for tenant in tenants:
-            watcher = MdSkillWatcher(settings.md_skills_dir, tenant.id, interval_seconds=settings.md_skill_scan_interval, enabled=settings.md_skill_watch_enabled, session_factory=SessionLocal)
+            # 系统自带智能体：首次启动即为每个租户创建并发布，用户只需配置模型即可使用
+            ensure_system_agent(bootstrap_db, tenant_id=tenant.id)
+            bootstrap_db.commit()
+            watcher = MdSkillWatcher(settings.md_skills_dir, tenant.id, interval_seconds=settings.md_skill_scan_interval, enabled=settings.md_skill_watch_enabled, session_factory=SessionLocal, scheduler=scheduler)
             app.state.md_skill_watchers[str(tenant.id)] = watcher
             await watcher.start()
+    await scheduler.start()
     runtime = TaskRuntime(result.skill_gateway, result.model_gateway, queue=result.registry.get("queue.driver"), session_factory=SessionLocal, model_selector=result.registry.try_get("model.selector"), lock_provider=result.registry.try_get("lock.provider"), short_memory=result.registry.get("memory.short"))
     await runtime.start()
     app.state.task_runtime = runtime
     try:
         yield
     finally:
+        # 调度器先停：cancel 所有周期任务并确认退出，再让 watcher 做幂等注销
+        await scheduler.stop()
         for watcher in getattr(app.state, "md_skill_watchers", {}).values():
             await watcher.stop()
         for connector in getattr(app.state, "mcp_connectors", []):
             await connector.close()
+        # MCP 连接由创建方统一收口：网关缓存会话 + 生命周期注册表 owner
+        await result.skill_gateway.aclose_mcp_sessions()
+        lifecycle = getattr(app.state, "mcp_lifecycle", None)
+        if lifecycle is not None and hasattr(lifecycle, "aclose"):
+            lifecycle.aclose()
         await runtime.stop()
         # 插件收尾（逆序）：释放导出线程池 / 归档定时器；插件不得自行注册 atexit
         result.shutdown()
@@ -118,9 +136,6 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
-# 企微能力服务事件 Webhook：路径由 WECOM_EVENT_PATH 决定（默认 /wecom/events），
-# 不挂 /api/z-torque 前缀 —— 能力服务按订阅配置直接推送到根路径。
-app.include_router(build_wecom_events_router(get_settings().wecom_event_path))
 # 通用入站 Webhook：外部系统按配置调用 POST /webhooks/{id}，与用户鉴权链路隔离
 app.include_router(webhook_inbound_router)
 
@@ -207,8 +222,16 @@ def _sandbox_capability(registry, plugins: tuple[str, ...], settings) -> dict:
     assembled = "sandbox_driver" in plugins and resolution is not None and resolution.state == PortState.RESOLVED
     # §2.3：Scope 显式贯穿 + gateway 唯一入口 + 事务式补丁，如实上报（不暴露绝对路径）
     scope_capability = {"explicit": True, "modes": ["restricted", "full"], "full_requires_container": True, "gateway_only": True}
+    # 闸门声明与装配状态无关：即使未装配，也如实上报"若要执行脚本必须满足的约束"，
+    # 保证 capabilities 结构稳定，前端不会因缺字段误判为放行。
+    script = {
+        "enabled": bool(settings.md_skill_script_enabled),
+        "windows_process": bool(settings.md_skill_windows_process_enabled) and sys.platform == "win32",
+        "windows_requires_trusted": True,
+        "windows_requires_confirmation": True,
+    }
     if not assembled:
-        return {"available": False, "impl": None, "isolation_level": "none", "scope": scope_capability, "patch": {"available": False, "artifact_ttl_hours": 24}, "untrusted_execution": "unavailable"}
+        return {"available": False, "impl": None, "isolation_level": "none", "scope": scope_capability, "script": script, "patch": {"available": False, "artifact_ttl_hours": 24}, "untrusted_execution": "unavailable"}
     label = str(getattr(resolution, "label", "") or "")
     if "container" in label:
         level = "container"
@@ -216,13 +239,6 @@ def _sandbox_capability(registry, plugins: tuple[str, ...], settings) -> dict:
         level = "rlimit"
     else:
         level = "none"
-    # Windows 有限解禁（§2.3）：脚本能力默认开，但需技能声明可信 + 每次人工确认
-    script = {
-        "enabled": bool(settings.md_skill_script_enabled),
-        "windows_process": bool(settings.md_skill_windows_process_enabled) and sys.platform == "win32",
-        "windows_requires_trusted": True,
-        "windows_requires_confirmation": True,
-    }
     return {
         "available": True, "impl": label or "builtin_process", "isolation_level": level, "script": script,
         "scope": scope_capability,
@@ -248,6 +264,32 @@ def _a2a_capability(plugins: tuple[str, ...], settings) -> dict:
     return {"available": available, "enabled": bool(available and settings.a2a_enabled), "max_depth": settings.a2a_max_depth}
 
 
+def _mcp_capability(plugins: tuple[str, ...], skill_gateway, lifecycle=None) -> dict:
+    """P1a-1/2：MCP 执行链路与生命周期状态（基于装配与真实传输能力，不伪报）。"""
+    from app.builtin_plugins.mcp import StdioMcpConnector
+
+    available = "mcp_connector" in plugins and skill_gateway is not None
+    result = {
+        "execution": "AVAILABLE" if available else "UNAVAILABLE",
+        "http_discovery": bool(available and getattr(skill_gateway, "http_connector_factory", None)),
+        "stdio_discovery": bool(available and hasattr(StdioMcpConnector, "list_tools")),
+    }
+    if lifecycle is not None:
+        status = lifecycle.status() if hasattr(lifecycle, "status") else {}
+        page_discovery = bool(available and callable(getattr(skill_gateway, "discover_mcp_http", None)))
+        result.update(
+            {
+                "lifecycle": "AVAILABLE" if status.get("available") else "UNAVAILABLE",
+                "tool_registry": int(status.get("tools", 0)),
+                "active_owners": int(status.get("owners", 0)),
+                "page_discovery": page_discovery,
+                "whitelist_registration": page_discovery,
+                "transactional_registration": page_discovery,
+            }
+        )
+    return result
+
+
 @app.get("/api/z-torque/capabilities")
 async def capabilities(request: Request, user: User | None = Depends(get_optional_user), db: Session = Depends(get_db)):
     settings = get_settings()
@@ -269,23 +311,35 @@ async def capabilities(request: Request, user: User | None = Depends(get_optiona
     files = {"max_upload_mb": settings.max_upload_size_mb}
     connectors = {"max_response_bytes": settings.connector_max_response_bytes}
     # §2.4：P0 用字符数/系数估算 token（不引入重型 tokenizer），如实上报。
-    context = {"token_estimate": True, "max_tokens": settings.context_max_tokens, "chars_per_token": settings.context_chars_per_token}
+    context = {"token_estimate": True, "max_tokens": settings.context_max_tokens, "chars_per_token": settings.context_chars_per_token, "estimator": "model_chars_per_token", "tokenizer_dependency": False}
     # §2.2：长期记忆已落 SQLite，三级作用域（无 project_id）。
-    memory = {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled, "long_persistent": True, "long_scopes": ["CONVERSATION", "AGENT", "USER"]}
+    memory = {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled, "long_persistent": True, "long_scopes": ["CONVERSATION", "AGENT", "USER"], "consolidation": True}
     # §2.1：本地检索能力三态（AVAILABLE / DEGRADED / UNAVAILABLE），DEGRADED 必须可见
     knowledge_provider = registry.try_get("knowledge.provider") if registry is not None else None
     if knowledge_provider is None:
-        knowledge = {"local": {"search": "UNAVAILABLE", "fts5": False}, "citation_enforcement": True}
+        knowledge = {"local": {"search": "UNAVAILABLE", "fts5": False}, "citation_enforcement": True, "message_search": "UNAVAILABLE"}
     else:
         knowledge = {
             "local": {"search": knowledge_provider.mode(), "fts5": bool(getattr(knowledge_provider, "fts5", False))},
             "citation_enforcement": True,
+            "message_search": "AVAILABLE" if settings.knowledge_message_search_enabled else "UNAVAILABLE",
         }
+    model_capability = {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}
+    mcp_capability = _mcp_capability(assembled_plugins, skill_gateway, getattr(request.app.state, "mcp_lifecycle", None))
+    capability_cards = build_capability_cards(mcp=mcp_capability, knowledge=knowledge, model=model_capability)
     if is_admin:
         md_skill["directory"] = str(settings.md_skills_dir)
         files["storage_dir"] = str(settings.file_storage_dir)
         connectors["allowed_targets"] = settings.connector_allowed_targets
-    return success_response(request, {"stage": derive_stage(registry), "features": _available_features(registry, assembled_plugins), "ports": ports, "tool_executors": tool_executors, "sandbox": _sandbox_capability(registry, assembled_plugins, settings), "audit_export": _audit_export_capability(assembled_plugins, settings), "a2a": _a2a_capability(assembled_plugins, settings), "md_skill": md_skill, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": memory, "context": context, "knowledge": knowledge, "files": files, "connectors": connectors})
+    governance = getattr(request.app.state, "capability_governance", None)
+    local_scheduler = getattr(request.app.state, "scheduler", None)
+    scheduler_capability = {
+        "available": local_scheduler is not None,
+        "interval": True,
+        "cron": True,
+        "jobs": len(local_scheduler.status()) if local_scheduler is not None else 0,
+    }
+    return success_response(request, {"stage": derive_stage(registry), "features": _available_features(registry, assembled_plugins), "ports": ports, "tool_executors": tool_executors, "sandbox": _sandbox_capability(registry, assembled_plugins, settings), "audit_export": _audit_export_capability(assembled_plugins, settings), "a2a": _a2a_capability(assembled_plugins, settings), "md_skill": md_skill, "model": model_capability, "memory": memory, "context": context, "knowledge": knowledge, "mcp": mcp_capability, "usage": {"summary": True, "unknown_token_value": "unknown"}, "files": files, "connectors": connectors, "capability_cards": capability_cards, "governance": governance or {"manifest_first": False, "levels": {}, "declarations": {}, "shared_capabilities": []}, "scheduler": scheduler_capability})
 
 
 def _resolve_console_dist(settings) -> Path:

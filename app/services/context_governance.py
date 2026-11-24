@@ -14,6 +14,7 @@ import hashlib
 import json
 from typing import Any
 
+from app.core.errors import ApiError
 from app.kernel.model_gateway import ModelMessage
 
 # 系统内部注入的占位内容：构建 prompt 前结构性剔除（不靠提示词警告）。
@@ -39,6 +40,26 @@ def sanitize_untrusted(text: str | None) -> str | None:
     for token in UNTRUSTED_TEMPLATE_TOKENS:
         cleaned = cleaned.replace(token, "")
     return cleaned
+
+
+# P1a-9：不引入 BPE tokenizer；用内置系数表按模型族做更精确的字符/token 估算。
+# 系数来源为首发模型族的保守实测近似；未命中时回退 settings.context_chars_per_token。
+MODEL_CHARS_PER_TOKEN = {
+    "deepseek": 2.1,
+    "gpt-4": 2.2,
+    "gpt-3.5": 2.4,
+    "qwen": 1.9,
+    "glm": 1.8,
+    "claude": 2.3,
+}
+
+
+def resolve_chars_per_token(model: str | None, default: float) -> float:
+    normalized = (model or "").strip().lower()
+    for prefix, ratio in MODEL_CHARS_PER_TOKEN.items():
+        if normalized.startswith(prefix):
+            return ratio
+    return default
 
 
 def estimate_tokens(text: str | None, chars_per_token: float) -> int:
@@ -173,6 +194,9 @@ def heal_context(messages: list[ModelMessage], *, tool_result_max_chars: int = D
     result = drop_orphan_tool_results(result)
     result = backfill_missing_tool_results(result)
     result = apply_tool_result_budget(result, tool_result_max_chars)
+    # 硬不变量：自愈后仍不成对才是失败，不能把破损历史交给模型（生产链强制断言）
+    if not tool_pairs_balanced(result):
+        raise ApiError("AI_CONTEXT_TOOL_PAIR_VIOLATION", "tool call/result pairs are not balanced after heal", 500)
     return result
 
 

@@ -62,5 +62,15 @@ class KnowledgeProvider(ABC):
     def reindex(self, db: Any, *, tenant_id: UUID) -> dict:
         raise NotImplementedError("AI_CAPABILITY_UNAVAILABLE: reindex")
 
+    def search_messages(
+        self, db: Any, *, tenant_id: UUID, user_id: UUID | None, query: str,
+        top_k: int = 5, conversation_id: UUID | None = None,
+    ) -> list[KnowledgeChunk]:
+        """窄扩展：消息级全文检索（默认空实现，内置 SQLite 实现覆盖）。
+
+        `user_id` 是服务端派生的隔离边界：只返回该用户拥有的会话内消息。
+        """
+        return []
+
     def mode(self) -> str:
         return "UNAVAILABLE"

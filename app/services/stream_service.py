@@ -5,17 +5,52 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
+
+from app.core.errors import ApiError
 from app.db.session import SessionLocal
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import ModelGatewayError
-from app.kernel.model_gateway.contracts import ModelRequest
+from app.kernel.model_gateway.contracts import ModelRequest, normalize_usage
 from app.kernel.security_context import SecurityContext
-from app.models import Conversation, Message
+from app.models import Agent, AgentVersion, Conversation, Message
+from app.repositories import get_owned, get_owned_version
 from app.services.chat_application import _maybe_summarize, create_chat_task
 from app.services.context_builder import assistant_reasoning_parts
 from app.services.execution_loop import serialize_seed
+from app.services.usage_service import record_usage_summary
 
 logger = logging.getLogger("z_torque.chat_stream")
+
+
+def _owned_stream_resources(db, *, tenant_id, user_id, conversation_id, user_message_id, agent_version_id):
+    """流式写入前的属主收口（Phase 2 §四）：会话属主 + 消息归属该会话 + 版本属主可见。
+
+    Message 表无 owner 列，属主由 Conversation 承担；版本表同理经 Agent 判定。
+    任一校验失败抛 404，调用方把它转成 SSE error，绝不写他人会话。
+    """
+    conversation = get_owned(
+        db, Conversation, resource_id=conversation_id, tenant_id=tenant_id,
+        user_id=user_id, label="conversation",
+    )
+    message = db.scalar(
+        select(Message).where(
+            Message.id == user_message_id,
+            Message.tenant_id == tenant_id,
+            Message.conversation_id == conversation.id,
+        )
+    )
+    if message is None:
+        raise ApiError("AI_RESOURCE_NOT_FOUND", "message not found", 404)
+    agent_version = (
+        get_owned_version(
+            db, AgentVersion, Agent, "agent_id", version_id=agent_version_id,
+            tenant_id=tenant_id, user_id=user_id, label="agent version",
+        )
+        if agent_version_id
+        else None
+    )
+    return conversation, message, agent_version
 
 
 def sse_event(event_id: str, event: str, data: dict[str, Any]) -> str:
@@ -63,9 +98,24 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
                     detail={"status": "failed", "error_code": exc.code, "error_message": exc.message, "stream": True},
                     trace_id=trace_id,
                 )
-                user_message = db.get(Message, user_message_id)
-                if user_message is not None:
-                    user_message.status = "FAILED"
+                # 属主收口：失败标记也只允许写本人会话下的消息，禁止越权改写他人消息
+                conversation = db.scalar(
+                    select(Conversation).where(
+                        Conversation.id == conversation_id,
+                        Conversation.tenant_id == tenant_id,
+                        Conversation.owner_user_id == user_id,
+                    )
+                )
+                if conversation is not None:
+                    user_message = db.scalar(
+                        select(Message).where(
+                            Message.id == user_message_id,
+                            Message.tenant_id == tenant_id,
+                            Message.conversation_id == conversation.id,
+                        )
+                    )
+                    if user_message is not None:
+                        user_message.status = "FAILED"
                 db.commit()
         except Exception:
             logger.exception("failed to mark stream message %s as FAILED", user_message_id)
@@ -75,11 +125,25 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
         return
     try:
         with SessionLocal() as db:
-            user_message = db.get(Message, user_message_id)
-            conversation = db.get(Conversation, conversation_id)
-            if user_message is None or conversation is None:
+            try:
+                conversation, user_message, agent_version = _owned_stream_resources(
+                    db,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    user_message_id=user_message_id,
+                    agent_version_id=request.agent_version_id,
+                )
+            except ApiError:
                 yield ev("message.error", {"code": "AI_RESOURCE_NOT_FOUND", "message": "conversation or message not found"})
                 return
+            record_usage_summary(
+                db,
+                tenant_id=tenant_id,
+                agent_id=agent_version.agent_id if agent_version else None,
+                model=request.model or "unknown",
+                usage=final_response.usage,
+            )
 
             def audit_model_call(action: str, summary: str, detail: dict[str, Any]) -> None:
                 """流式模型调用审计：与任务链路 MODEL_CALL_* 对应，补齐此前完全缺失的记录。"""
@@ -104,7 +168,8 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
                     "model call completed (tool calls)",
                     {
                         "provider_request_id": final_response.provider_request_id,
-                        "usage": final_response.usage.__dict__ if final_response.usage else None,
+                        "usage": normalize_usage(final_response.usage),
+                        "model": request.model or "unknown",
                         "tool_call_count": len(final_response.tool_calls),
                         "task_created": True,
                     },
@@ -133,7 +198,8 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
                 "model call completed",
                 {
                     "provider_request_id": final_response.provider_request_id,
-                    "usage": final_response.usage.__dict__ if final_response.usage else None,
+                    "usage": normalize_usage(final_response.usage),
+                    "model": request.model or "unknown",
                     "tool_call_count": 0,
                 },
             )

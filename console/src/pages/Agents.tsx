@@ -413,7 +413,7 @@ export function AgentsPage() {
     }
   }
 
-  // M12-4：设为默认智能体（同租户互斥，后端自动清掉旧默认）；会话页/企微桥接无明确目标时优先使用
+  // M12-4：设为默认智能体（同租户互斥，后端自动清掉旧默认）；外部接入未指定目标时优先使用
   async function setDefaultAgent(agent: Agent) {
     setBusy(true);
     setError(null);
@@ -788,7 +788,7 @@ export function AgentsPage() {
         {selected.is_default ? (
           <button className="btn btn-secondary btn-sm" disabled title="当前已是默认智能体">当前默认</button>
         ) : (
-          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void setDefaultAgent(selected)} title="设为默认后，会话页与企微消息未指定目标时优先使用">设为默认</button>
+          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void setDefaultAgent(selected)} title="设为默认后，外部接入未指定目标时优先使用">设为默认</button>
         )}
         <button
           className="btn btn-primary btn-sm"

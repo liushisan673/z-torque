@@ -7,6 +7,7 @@
 """
 
 from .contracts import (
+    UNKNOWN_TOKEN_VALUE,
     ModelContentPart,
     ModelGateway,
     ModelGatewayError,
@@ -15,6 +16,8 @@ from .contracts import (
     ModelResponse,
     ModelToolCall,
     ModelUsage,
+    normalize_usage,
+    parse_model_usage,
 )
 
-__all__ = ['ModelContentPart', 'ModelGateway', 'ModelGatewayError', 'ModelMessage', 'ModelRequest', 'ModelResponse', 'ModelToolCall', 'ModelUsage']
+__all__ = ['ModelContentPart', 'ModelGateway', 'ModelGatewayError', 'ModelMessage', 'ModelRequest', 'ModelResponse', 'ModelToolCall', 'ModelUsage', 'UNKNOWN_TOKEN_VALUE', 'normalize_usage', 'parse_model_usage']

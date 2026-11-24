@@ -413,6 +413,39 @@ class SkillGateway:
             except Exception:  # noqa: BLE001
                 logger.warning("failed to close MCP connector after probe", exc_info=True)
 
+    async def discover_mcp_http(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float, max_response_bytes: int, secret_ref: str | None = None, allow_private_network: bool = False, proxy: str | None = None, cursor: str | None = None, max_pages: int = 1) -> dict:
+        """MCP 分页发现：一次 negotiate，按游标翻页，创建方在 finally 中 close。
+
+        连接归属明确：谁创建 connector，谁负责关闭；调用方只拿到结果与 next_cursor，
+        不会拿到未关闭的连接句柄。max_pages 防止远端错误游标导致无限翻页。
+        """
+        if self.http_connector_factory is None:
+            raise ApiError("AI_CONNECTOR_UNAVAILABLE", "MCP HTTP connector is unavailable", 503)
+        auth_token = self._resolve_secret_token(secret_ref)
+        if isinstance(auth_token, ExecutionResult):
+            raise ApiError(auth_token.error_code or "AI_CONNECTOR_SECRET_INVALID", auth_token.error_message or "连接器凭证无法解密", 503)
+        connector = self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=max_response_bytes, auth_token=auth_token, allow_private_network=allow_private_network, proxy=proxy)
+        tools: list[dict] = []
+        next_cursor = cursor
+        pages = 0
+        try:
+            await connector.negotiate()
+            while True:
+                listing = await connector.list_tools(next_cursor) if next_cursor else await connector.list_tools()
+                if not isinstance(listing, dict):
+                    raise McpProtocolError("invalid MCP tools/list response")
+                tools.extend(item for item in (listing.get("tools") or []) if isinstance(item, dict))
+                pages += 1
+                next_cursor = listing.get("nextCursor") or listing.get("next_cursor")
+                if not next_cursor or pages >= max(1, max_pages):
+                    break
+            return {"tools": tools, "next_cursor": next_cursor, "pages": pages}
+        finally:
+            try:
+                await connector.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("failed to close MCP connector after discovery", exc_info=True)
+
     @staticmethod
     def _mcp_session_key(*, transport: str, target: str, timeout_seconds: float, auth_token: str | None, identity: dict[str, str] | None, extra: dict[str, Any] | None = None) -> str:
         """缓存键：传输 + 端点/服务器名 + 超时 + 凭证指纹 + 身份透传头。

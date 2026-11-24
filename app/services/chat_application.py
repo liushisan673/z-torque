@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -25,6 +26,7 @@ from app.services.context_builder import (
     build_agent_system_prompt,
     build_context,
 )
+from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens, model_capabilities
 from app.services.tool_mapping_builder import build_tool_mappings
 
@@ -107,8 +109,34 @@ def _published_agent_version(db: Session, agent_id: UUID | None) -> AgentVersion
     return agent_version
 
 
-async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None, commit_before_generate: bool = False, source: str = "console", external_sender: str | None = None) -> ChatResult:
-    # 外部链路（webhook/wecom）的消息以 EXTERNAL 角色落库，不再冒充 owner 用户；
+def resolve_agent_mentions(db: Session, *, tenant_id: UUID, mentions: list[dict] | None, content: str) -> tuple[str, UUID | None, UUID | None]:
+    """解析 @智能体 mention：返回（去掉 mention 标记的文本, 目标版本 ID, 目标智能体 ID）。
+
+    只支持单条 agent mention；未知/跨租户/未发布目标一律显式失败，不静默回落到默认智能体。
+    """
+    if not mentions:
+        return content, None, None
+    if len(mentions) != 1 or mentions[0].get("type") != "agent":
+        raise ApiError("AI_MENTION_INVALID", "只支持单条智能体提及", 400)
+    try:
+        target_agent_id = UUID(str(mentions[0].get("id") or ""))
+    except (ValueError, AttributeError) as exc:
+        raise ApiError("AI_MENTION_INVALID", "智能体提及格式不正确", 400) from exc
+    agent = db.get(Agent, target_agent_id)
+    if agent is None or agent.tenant_id != tenant_id or agent.status != "ACTIVE" or agent.current_published_version_id is None:
+        raise ApiError("AI_MENTION_AGENT_NOT_FOUND", "提及的智能体不可用", 404)
+    version = db.get(AgentVersion, agent.current_published_version_id)
+    if version is None or version.tenant_id != tenant_id or version.status != "PUBLISHED":
+        raise ApiError("AI_MENTION_AGENT_NOT_FOUND", "提及的智能体不可用", 404)
+    cleaned = content
+    for token in (f"@[{agent.name}:{target_agent_id}]", f"@[agent:{target_agent_id}]", f"@{agent.name}"):
+        cleaned = cleaned.replace(token, "")
+    cleaned = re.sub(r"@\[[^\]]*?\]", "", cleaned).strip()
+    return (cleaned or content).strip(), version.id, agent.id
+
+
+async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None, commit_before_generate: bool = False, source: str = "console", external_sender: str | None = None, mentions: list[dict] | None = None, generation_preset: str | None = None) -> ChatResult:
+    # 外部链路（webhook/external）的消息以 EXTERNAL 角色落库，不再冒充 owner 用户；
     # owner 仅作为会话归属人（权限隔离），消息身份与真人（console）区分。
     sender_type = "USER" if source == "console" else "EXTERNAL"
     tenant_id = ctx.tenant_id
@@ -130,10 +158,22 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             raise ApiError("AI_CONVERSATION_AGENT_CONFLICT", "conversation agent cannot be changed", 409)
     if content_parts:
         _enrich_bridge_paths(db, content_parts, conversation)
-    user_message = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type=sender_type, source=source, external_sender=external_sender, content=content, content_parts=content_parts, status="PROCESSING")
+    cleaned_content, mention_version_id, mention_agent_id = resolve_agent_mentions(db, tenant_id=tenant_id, mentions=mentions, content=content)
+    user_message = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type=sender_type, source=source, external_sender=external_sender, content=cleaned_content, content_parts=content_parts, status="PROCESSING")
     db.add(user_message)
     db.flush()
-    ensure_conversation_title(conversation, content)
+    ensure_conversation_title(conversation, cleaned_content)
+    if mention_version_id is not None and mention_agent_id is not None:
+        # @智能体：站内 A2A 直调。任务直接建在被提及的智能体版本上，审计归属该智能体。
+        mention_task = create_task(
+            db, ctx=ctx, agent_id=mention_agent_id, agent_version_id=mention_version_id,
+            idempotency_key=idempotency_key or str(user_message.id), request_summary=cleaned_content,
+            conversation_id=conversation.id, trigger_message_id=user_message.id, trace_id=trace_id,
+            allow_conversation_agent_mismatch=True,
+        )
+        user_message.status = "COMPLETED"
+        conversation.last_message_at = datetime.now(timezone.utc)
+        return ChatResult(user_message=user_message, assistant_message=None, task_id=mention_task.id, mocked=False)
     attachment_ids = _attachment_ids(content_parts)
     if attachment_ids:
         _attach_files(db, user_message, conversation, attachment_ids)
@@ -146,7 +186,7 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             agent = db.get(Agent, conversation.agent_id)
             if agent is not None and agent.current_published_version_id is not None:
                 agent_version = db.get(AgentVersion, agent.current_published_version_id)
-        mappings, tools = build_tool_mappings(db, agent_version, tenant_id)
+        mappings, tools = build_tool_mappings(db, agent_version, tenant_id, user_id=ctx.user_id)
         if mappings and skill_gateway is not None and agent_version is not None:
             # 工具型会话：只创建任务并入队（Outbox TASK_READY），执行由 worker 完成；
             # POST /chat 立即返回 task_id，前端订阅任务事件流获得实时执行过程。
@@ -164,6 +204,7 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
                 gateway=model_gateway,
             )
             max_tokens = effective_max_tokens(db, tenant_id=tenant_id, model_identifier=model_name, snapshot_max_tokens=(agent_version.config_snapshot or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
+            temperature, max_tokens = apply_generation_preset(generation_preset, temperature, max_tokens)
             capabilities = model_capabilities(db, tenant_id=tenant_id, model_identifier=model_name)
             request = ModelRequest(
                 trace_id=trace_id or str(user_message.id), conversation_id=conversation.id,
@@ -244,7 +285,7 @@ def _enrich_bridge_paths(db: Session, content_parts: list[dict], conversation: C
 
     入站 Webhook 媒体已由 ``_ingest_media`` 写入 ``bridge_path``，这里会跳过；
     控制台上传等 z-torque 文件在发送时导出一次，智能体即可用
-    ``weixin.send_media(url=<bridge_path>)`` 发回微信。
+    外部发送工具 ``send_media(url=<bridge_path>)`` 发回对应渠道。
     """
     settings = get_settings()
     if settings.bridge_media_root is None:

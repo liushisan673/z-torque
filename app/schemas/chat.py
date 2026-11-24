@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -10,6 +10,10 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
     content_parts: list[dict[str, Any]] | None = None
     stream: bool = False
+    # 站内 A2A：@智能体结构化提及，最多一条；未传时行为与现有链路完全一致
+    mentions: list[dict[str, Any]] | None = None
+    # 用户化生成预设：只传业务标识，不暴露 temperature/max_tokens 参数名
+    generation_preset: Literal["concise", "balanced", "deep", "creative"] | None = None
 
 
 class ChatResponse(BaseModel):

@@ -16,7 +16,7 @@ from app.builtin_plugins.sandbox_driver.container import (
     verify_docker_available,
 )
 from app.builtin_plugins.sandbox_driver.process import ProcessSandboxDriver
-from app.plugin_sdk import AssemblyError, PluginManifest
+from app.plugin_sdk import AssemblyError, CapabilityDeclaration, CapabilityLevel, PluginManifest
 
 SANDBOX_ISOLATION_MODES = ("process", "container")
 
@@ -27,6 +27,10 @@ class SandboxDriverPlugin:
         description="进程内受限脚本执行（独立解释器 -I + 最小环境变量 + cwd 白名单 + rlimit；可选 docker 容器隔离）",
         provides=("sandbox.driver",),
         permissions=("process.spawn",),
+        published_services=("sandbox.allowed_roots",),
+        capabilities=(
+            CapabilityDeclaration("sandbox.patch", CapabilityLevel.NARROW_EXTENSION, "窄扩展 sandbox.driver：事务式补丁与独立 diff artifact"),
+        ),
         # 结构化 JSON Schema：装配期按 Settings 投影校验（类型/枚举/必填），
         # 语义校验（空白名单拒绝、上限为正）仍由 contribute 内的策略完成。
         config_schema={

@@ -42,6 +42,7 @@ def webhook_media_env(tmp_path, monkeypatch):
     # 测试隔离：出站共享卷也固定到临时目录，避免写入项目 data/bridge-media
     monkeypatch.setattr(settings, "bridge_media_shared_root", tmp_path)
     monkeypatch.setattr(settings, "bridge_media_container_root", "/tmp/weixin-agent/media")
+    monkeypatch.setattr(settings, "bridge_media_inbound_container_root", "/tmp/weixin-agent/media")
     image = tmp_path / "photo.jpg"
     image.write_bytes(b"\xff\xd8\xff\xe0fakejpeg")
 

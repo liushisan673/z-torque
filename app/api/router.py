@@ -15,12 +15,15 @@ from app.api.routes.conversations import router as conversations_router
 from app.api.routes.files import router as files_router
 from app.api.routes.knowledge import router as knowledge_router
 from app.api.routes.md_skills import router as md_skills_router
+from app.api.routes.memory import router as memory_router
 from app.api.routes.messages import router as messages_router
 from app.api.routes.models import router as models_router
 from app.api.routes.onboarding import router as onboarding_router
+from app.api.routes.scheduler import router as scheduler_router
 from app.api.routes.secrets import router as secrets_router
 from app.api.routes.skills_tools import router as skills_tools_router
 from app.api.routes.tasks import router as tasks_router
+from app.api.routes.usage import router as usage_router
 from app.api.routes.users_roles_compat import router as users_roles_compat_router
 from app.api.routes.webhooks import router as webhooks_router
 from app.api.routes.workspace import router as workspace_router
@@ -40,6 +43,7 @@ router.include_router(chat_events_router)
 router.include_router(md_skills_router)
 router.include_router(connectors_router)
 router.include_router(models_router)
+router.include_router(memory_router)
 router.include_router(onboarding_router)
 router.include_router(files_router)
 router.include_router(knowledge_router)
@@ -49,4 +53,6 @@ router.include_router(audit_archive_router)
 router.include_router(a2a_router)
 router.include_router(secrets_router)
 router.include_router(webhooks_router)
+router.include_router(usage_router)
 router.include_router(workspace_router)
+router.include_router(scheduler_router)

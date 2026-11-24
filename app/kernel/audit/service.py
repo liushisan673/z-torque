@@ -5,6 +5,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.kernel.audit.metadata import normalize_audit_detail
 from app.kernel.ports.interceptor import ExecutionInterceptor
 from app.models import AuditLog
 
@@ -51,7 +52,7 @@ def record_audit(
         resource_id=resource_id,
         actor_user_id=actor_user_id,
         summary=summary,
-        detail=detail,
+        detail=normalize_audit_detail(detail),
         trace_id=trace_id or _request_trace_id.get(),
     )
     db.add(entry)

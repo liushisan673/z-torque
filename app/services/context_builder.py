@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.core.errors import ApiError
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import ModelContentPart, ModelMessage
 from app.kernel.registry.active import call_optional, try_port
@@ -28,9 +29,11 @@ from app.services.context_governance import (
     extractive_summary,
     heal_context,
     history_hash,
+    resolve_chars_per_token,
     sanitize_untrusted,
     split_accepted_delta,
     stable_prefix,
+    tool_pairs_balanced,
 )
 from app.services.media_ingest import (
     MEDIA_KIND_AUDIO,
@@ -53,6 +56,14 @@ def _skill_orchestration_text(db: Session, skill_version) -> str | None:
         .order_by(SkillVersionTool.sort_order, SkillVersionTool.created_at)
         .all()
     )
+    from app.services.tool_mapping_builder import _dependency_ordered_links
+
+    links = _dependency_ordered_links(links)
+    link_labels = {}
+    for link in links:
+        version = db.get(ToolVersion, link.tool_version_id)
+        parent = db.get(Tool, version.tool_id) if version else None
+        link_labels[str(link.tool_version_id)] = parent.name if parent else str(link.tool_version_id)
     for index, link in enumerate(links[:30], start=1):
         tool_version = db.get(ToolVersion, link.tool_version_id)
         tool = db.get(Tool, tool_version.tool_id) if tool_version else None
@@ -60,6 +71,15 @@ def _skill_orchestration_text(db: Session, skill_version) -> str | None:
         suffix = []
         if link.role:
             suffix.append(f"角色：{link.role}")
+        if link.depends_on:
+            deps = [link_labels.get(str(dep), str(dep)[:8]) for dep in link.depends_on[:6]]
+            suffix.append(f"依赖：{'、'.join(deps)}")
+        if link.selector:
+            criteria = []
+            for key, value in list(link.selector.items())[:3]:
+                text = "、".join(str(item) for item in value[:3]) if isinstance(value, list) else str(value)
+                criteria.append(f"{key}={text[:60]}")
+            suffix.append(f"选择条件：{'；'.join(criteria)}")
         if link.note:
             suffix.append(f"说明：{link.note.strip()[:120]}")
         lines.append(f"{index}. {label}" + (f"（{'；'.join(suffix)}）" if suffix else ""))
@@ -79,37 +99,88 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
     """
     if agent_version is None:
         return None
-    system_prompt = (agent_version.config_snapshot or {}).get("system_prompt")
+    from app.models import Agent, AgentVersionSkill, SkillVersion
+
+    settings = get_settings()
+    snapshot = agent_version.config_snapshot or {}
+    system_prompt = snapshot.get("system_prompt")
+    scopes = snapshot.get("skill_inject_scopes") or ["AGENT"]
     if skill_version_ids is None:
-        from app.models import AgentVersionSkill
         skill_version_ids = [link.skill_version_id for link in db.query(AgentVersionSkill).filter(AgentVersionSkill.agent_version_id == agent_version.id).all()]
-    from app.models import SkillVersion
-    instructions: list[str] = []
+    candidates: list[tuple[int, str, UUID]] = []
     seen: set[UUID] = set()
     for sid in skill_version_ids:
-        key = UUID(str(sid))
-        if key in seen:
+        try:
+            key = UUID(str(sid))
+        except (ValueError, AttributeError, TypeError):
             continue
-        seen.add(key)
+        if key not in seen:
+            seen.add(key)
+            candidates.append((2, "AGENT", key))
+
+    def _add_published(level: int, label: str, rows) -> None:
+        for parent in rows:
+            version_id = getattr(parent, "current_published_version_id", None)
+            if version_id is None or parent.status != "ACTIVE":
+                continue
+            key = UUID(str(version_id))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append((level, label, key))
+
+    if "WORKSPACE" in scopes:
+        _add_published(0, "WORKSPACE", db.scalars(select(Skill).where(Skill.tenant_id == agent_version.tenant_id, Skill.official.is_(True))).all())
+    if "USER" in scopes:
+        agent = db.get(Agent, agent_version.agent_id)
+        if agent is not None and agent.owner_user_id is not None:
+            _add_published(1, "USER", db.scalars(select(Skill).where(Skill.tenant_id == agent_version.tenant_id, Skill.owner_user_id == agent.owner_user_id, Skill.source_type == "USER")).all())
+
+    candidates.sort(key=lambda item: (item[0], str(item[2])))
+    budget = max(0, settings.skill_inject_max_chars)
+    used = 0
+    blocks: list[str] = []
+    for _level, label, key in candidates[: max(0, settings.skill_inject_max_items)]:
         sv = db.get(SkillVersion, key)
-        if sv is None:
+        if sv is None or sv.status != "PUBLISHED":
             continue
-        # 技能描述背景：description 此前仅作列表展示，不进模型上下文；此处注入一句概述
-        # （截断 200 字防提示膨胀），让模型理解各绑定技能的用途边界
+        pieces: list[str] = []
         parent = db.get(Skill, sv.skill_id)
         if parent is not None and (parent.description or "").strip():
-            instructions.append(f"[技能背景] {parent.name}：{parent.description.strip()[:200]}")
+            pieces.append(f"[技能背景/{label}] {parent.name}：{parent.description.strip()[:200]}")
         if sv.instructions and sv.instructions.strip():
-            instructions.append(sv.instructions.strip())
+            pieces.append(sv.instructions.strip())
         orchestration = _skill_orchestration_text(db, sv)
         if orchestration:
-            instructions.append(orchestration)
-    if instructions:
-        system_prompt = (system_prompt + "\n\n" if system_prompt else "") + "\n\n".join(instructions)
+            pieces.append(orchestration)
+        text = "\n".join(pieces)
+        if not text:
+            continue
+        remaining = budget - used
+        if remaining <= 0:
+            blocks.append("[技能预算] 已达上限，后续技能注入被截断。")
+            break
+        if len(text) > remaining:
+            text = text[:remaining] + "…[技能预算截断]"
+        blocks.append(text)
+        used += len(text)
+    if blocks:
+        system_prompt = (system_prompt + "\n\n" if system_prompt else "") + "\n\n".join(blocks)
     # §2.1 强制引用：使用本地检索片段/文件附件回答时，必须标注可回查坐标。
     # 校验侧见 services/citation_guard.py；不在提示词里靠"请不要编造"软约束。
     citation_rule = "[引用约束] 使用检索片段或文件附件回答时，每个事实必须标注 [chunk:<chunk_id>] 或 [source:<path>#page=<n>/sheet=<s>#row=<r>#col=<c>]；未标注引用将被系统判定为未通过校验。"
     system_prompt = (system_prompt + "\n\n" if system_prompt else "") + citation_rule
+    # 站内 A2A：系统智能体（用户设为默认，或未设置时的默认父）必须知道可把需求派发给专业智能体。
+    from app.models import Agent as _Agent
+
+    agent = db.get(_Agent, agent_version.agent_id)
+    if agent is not None and agent.is_default_parent:
+        dispatch_rule = (
+            "[智能体协作] 你是系统智能体。用户的需求若需要专业能力，请调用以 call_agent_ 开头的工具，"
+            "把完整任务交给对应智能体处理并等待其结论；仅在闲聊、确认、催促或与专业能力无关的简短交流时直接回答。"
+            "不要尝试自己代替专业智能体完成其职责范围内的工作。"
+        )
+        system_prompt = (system_prompt + "\n\n") + dispatch_rule
     return system_prompt
 
 
@@ -425,7 +496,7 @@ def build_context(
     files = _load_files(db, conversation, _media_file_ids(messages))
     store = try_port("object.store")
     # 图片只注入当前用户消息；messages 已按时间倒序，取最近 1 + N 条用户消息
-    # EXTERNAL（Webhook/企微外部来源）与 USER 同属用户侧消息
+    # EXTERNAL（通用 Webhook 等外部来源）与 USER 同属用户侧消息
     user_message_ids = [message.id for message in messages if message.sender_type in ("USER", "EXTERNAL")]
     inject_limit = 1 + max(0, settings.model_image_history_limit)
     image_message_ids = set(user_message_ids[:inject_limit])
@@ -433,15 +504,13 @@ def build_context(
     doc_texts: list[tuple[UUID, str]] = []
     for message in reversed(messages):
         if message.sender_type in ("USER", "EXTERNAL"):
-            # 入站事件元数据（企微 / 通用 Webhook / 渠道接入）只给模型看，不污染 Chat 气泡；
+            # 入站事件元数据（通用 Webhook / 渠道接入）只给模型看，不污染 Chat 气泡；
             # 前端按 file_id 过滤 content_parts，天然忽略该片段。
             for part in message.content_parts or []:
                 if not isinstance(part, dict):
                     continue
                 part_type = part.get("type")
-                if part_type == "wecom_event":
-                    label = "WeCom event context (trusted metadata)"
-                elif part_type == "webhook_event":
+                if part_type == "webhook_event":
                     label = "Inbound webhook context (untrusted metadata)"
                 elif part_type == "inbound_event":
                     label = "Inbound channel context (untrusted metadata)"
@@ -486,12 +555,14 @@ def build_context(
     context, compaction_seq = _compact_if_needed(
         db, conversation, context,
         max_tokens=settings.context_max_tokens,
-        chars_per_token=settings.context_chars_per_token,
+        chars_per_token=resolve_chars_per_token(model, settings.context_chars_per_token),
         max_chars=max_chars,
         compaction_seq=compaction_seq,
     )
     # max_chars 作为硬上限二次保护：压缩后仍超限才按最新优先裁剪。
     context = _enforce_hard_cap(context, max_chars)
+    if not tool_pairs_balanced(context):
+        raise ApiError("AI_CONTEXT_TOOL_PAIR_VIOLATION", "tool call/result pairs broken after compression", 500)
     if working is not None and fingerprint is not None:
         working.put(conversation.tenant_id, conversation.owner_user_id, conversation.id, {"fingerprint": fingerprint, "messages": [asdict(item) for item in context]})
     return context

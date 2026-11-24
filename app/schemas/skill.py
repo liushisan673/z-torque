@@ -1,3 +1,4 @@
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -62,6 +63,8 @@ class SkillPublishBindingItem(BaseModel):
     tool_version_id: UUID
     role: str | None = Field(default=None, max_length=16)
     note: str | None = None
+    selector: dict[str, Any] | None = None
+    depends_on: list[UUID] | None = None
 
 
 class SkillVersionPublishRequest(BaseModel):
@@ -80,12 +83,16 @@ class AttachToolRequest(BaseModel):
     sort_order: int | None = Field(default=None, ge=0)
     role: str | None = Field(default=None, max_length=16)
     note: str | None = None
+    selector: dict[str, Any] | None = None
+    depends_on: list[UUID] | None = None
 
 
 class ToolBindingUpdateRequest(BaseModel):
     sort_order: int | None = Field(default=None, ge=0)
     role: str | None = Field(default=None, max_length=16)
     note: str | None = None
+    selector: dict[str, Any] | None = None
+    depends_on: list[UUID] | None = None
 
 
 class ToolBindingOrderRequest(BaseModel):

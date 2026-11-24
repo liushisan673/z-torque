@@ -44,7 +44,7 @@ class ThirdPartyNotifyPlugin:
     manifest = PluginManifest(
         name="third_party_notify",
         description="entry point 发现的三方通知渠道（覆盖内置 LoggingNotifyChannel）",
-        provides=(),
+        provides=("notify.channel",),
     )
 
     def contribute(self, sdk: PluginSdk) -> None:

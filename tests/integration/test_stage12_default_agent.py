@@ -1,12 +1,9 @@
 """阶段 12 M12-4：默认智能体（is_default）。
 
 - 设置默认智能体接口（同租户互斥：设置新默认时清掉旧的）；
-- 归档智能体不允许设为默认，归档时清除默认标记；
-- 企微桥接解析目标智能体的 fallback 优先级：is_default > is_default_parent > 最早创建。
+- 归档智能体不允许设为默认，归档时清除默认标记。
 """
 
-import uuid
-from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -113,46 +110,3 @@ async def test_set_default_agent_rejects_archived(tenant_user):
 
         resp = await client.post(f"/api/z-torque/agents/{agent['id']}/set-default", headers=headers)
         assert resp.status_code == 422
-
-
-@pytest.mark.asyncio
-async def test_wecom_fallback_prefers_default_agent(tenant_user, monkeypatch):
-    """企微桥接未配置专用智能体时，fallback 优先取 is_default，其次 is_default_parent。"""
-    from app.config import get_settings
-    from app.services.wecom_chat_bridge import WeComChatBridge
-    from app.services.wecom_events import WeComEvent
-
-    settings = get_settings()
-    monkeypatch.setattr(settings, "wecom_chat_agent_id", "")
-    monkeypatch.setattr(settings, "wecom_agent_id_app", "")
-    monkeypatch.setattr(settings, "wecom_agent_id_bot", "")
-
-    with SessionLocal.begin() as db:
-        tenant_id = tenant_user["tenant_id"]
-        owner = db.get(User, uuid.UUID(tenant_user["user_id"]))
-        plain = Agent(tenant_id=tenant_id, owner_user_id=owner.id, name="plain", source_type="USER", status="ACTIVE")
-        parent = Agent(tenant_id=tenant_id, owner_user_id=owner.id, name="parent", source_type="USER", status="ACTIVE", is_default_parent=True)
-        default = Agent(tenant_id=tenant_id, owner_user_id=owner.id, name="default", source_type="USER", status="ACTIVE", is_default=True)
-        db.add_all([plain, parent, default])
-        db.flush()
-        for agent in (plain, parent, default):
-            version = AgentVersion(tenant_id=tenant_id, agent_id=agent.id, version_number=1, status="PUBLISHED", config_snapshot={"system_prompt": "sp", "model": "gpt-x"})
-            db.add(version)
-            db.flush()
-            version.published_at = datetime.now(timezone.utc)
-            agent.current_published_version_id = version.id
-        ids = {"plain": str(plain.id), "parent": str(parent.id), "default": str(default.id)}
-
-    bridge = WeComChatBridge(settings)
-    event = WeComEvent(
-        event_id=f"evt-default-{uuid4().hex[:8]}",
-        event_type="wecom.message.received",
-        channel="wecom_app",
-        external_user_id="ext-user",
-        text="你好",
-    )
-    with SessionLocal.begin() as db:
-        owner = db.get(User, uuid.UUID(tenant_user["user_id"]))
-        resolved = bridge._resolve_agent(db, owner, event)
-        assert resolved is not None
-        assert str(resolved.id) == ids["default"]

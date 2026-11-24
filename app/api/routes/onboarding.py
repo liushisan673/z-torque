@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import ApiError
 from app.core.responses import success_response
 from app.db.session import get_db
-from app.kernel.agent.service import create_agent
+from app.kernel.agent.service import create_agent, ensure_system_agent
 from app.kernel.agent.version_service import create_version, publish_version
 from app.kernel.audit.service import record_audit
 from app.models import Agent, Conversation, ModelEndpoint, ModelProvider, ModelResource, User
@@ -96,10 +96,13 @@ async def run_onboarding(
             )
         )
         if conversation is None:
+            system_agent = db.scalar(select(Agent).where(Agent.tenant_id == user.tenant_id, Agent.is_default_parent.is_(True)))
+            if system_agent is None:
+                system_agent = ensure_system_agent(db, tenant_id=user.tenant_id)
             conversation = Conversation(
                 tenant_id=user.tenant_id,
                 owner_user_id=user.id,
-                agent_id=existing.id,
+                agent_id=system_agent.id,
                 title="新对话",
                 status="ACTIVE",
             )
@@ -182,10 +185,14 @@ async def run_onboarding(
     )
     publish_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version.id)
 
+    # 系统自带智能体：确保在首次开通时也存在；会话默认绑定到它，用户创建的助手作为被调用的专业智能体。
+    system_agent = db.scalar(select(Agent).where(Agent.tenant_id == user.tenant_id, Agent.is_default_parent.is_(True)))
+    if system_agent is None:
+        system_agent = ensure_system_agent(db, tenant_id=user.tenant_id)
     conversation = Conversation(
         tenant_id=user.tenant_id,
         owner_user_id=user.id,
-        agent_id=agent.id,
+        agent_id=system_agent.id,
         title="新对话",
         status="ACTIVE",
     )

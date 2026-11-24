@@ -81,8 +81,18 @@ export function PaneResizer({ onPreview, onCommit, invert = false }: PaneResizer
       className="pane-resizer"
       role="separator"
       aria-orientation="vertical"
-      title="拖动调整左右分栏宽度"
+      aria-valuemin={MIN_PANE_W}
+      aria-valuemax={MAX_PANE_W}
+      tabIndex={0}
+      title="拖动或按左右方向键调整左右分栏宽度"
       onMouseDown={handleMouseDown}
+      onKeyDown={(e) => {
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+        const pane = (invert ? e.currentTarget.nextElementSibling : e.currentTarget.previousElementSibling) as HTMLElement | null;
+        if (!pane) return;
+        e.preventDefault();
+        onCommit(clampWidth(pane.getBoundingClientRect().width + (e.key === "ArrowRight" ? 16 : -16)));
+      }}
     />
   );
 }

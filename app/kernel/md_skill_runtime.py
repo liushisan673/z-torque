@@ -18,7 +18,7 @@ from typing import Any
 
 from jsonschema import ValidationError, validate
 
-from app.core.errors import ApiError
+from app.core.errors import SKILL_WINDOWS_UNTRUSTED, ApiError
 from app.kernel.md_skill import MdSkillManifest, validate_input
 from app.kernel.ports.sandbox_driver import SandboxDriver, SandboxScope
 
@@ -57,7 +57,7 @@ class MdSkillRuntime:
             if not self.windows_process_enabled:
                 raise ApiError("AI_CAPABILITY_UNAVAILABLE", "Windows process execution is disabled", 503)
             if not manifest.windows_trusted:
-                raise ApiError("AI_SKILL_WINDOWS_UNTRUSTED", "skill did not declare windows_trusted", 403)
+                raise ApiError(SKILL_WINDOWS_UNTRUSTED, "skill did not declare windows_trusted", 403)
         if self._sandbox is None:
             # 能力缺失必须显式暴露：未装 sandbox_driver 插件时不允许执行脚本
             raise ApiError("AI_CAPABILITY_UNAVAILABLE", "no sandbox.driver implementation is resolved", 503)

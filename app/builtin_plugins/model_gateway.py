@@ -28,7 +28,7 @@ from app.kernel.model_gateway.contracts import (
     ModelRequest,
     ModelResponse,
     ModelToolCall,
-    ModelUsage,
+    parse_model_usage,
 )
 from app.models import ModelEndpoint, ModelProvider, ModelResource
 from app.security.secret_store import SecretStore, SecretStoreError
@@ -144,7 +144,7 @@ class OpenAICompatibleGateway(ModelGateway):
         calls: dict[int, dict[str, str]] = {}
         finish_reason: str | None = None
         provider_id: str | None = None
-        usage = ModelUsage()
+        usage = parse_model_usage({})
         try:
             async with self.client.stream('POST', f'{self.base_url}/chat/completions', headers={'Authorization': f'Bearer {self.api_key}', 'Accept': 'text/event-stream'}, json=payload, timeout=request.timeout_seconds) as response:
                 response.raise_for_status()
@@ -162,7 +162,7 @@ class OpenAICompatibleGateway(ModelGateway):
                         provider_id = str(body['id'])
                     if body.get('usage'):
                         usage_data = body['usage']
-                        usage = ModelUsage(usage_data.get('prompt_tokens', 0), usage_data.get('completion_tokens', 0), usage_data.get('total_tokens', 0))
+                        usage = parse_model_usage(usage_data)
                     choices = body.get('choices') or []
                     if not choices:
                         continue
@@ -346,7 +346,7 @@ class OpenAICompatibleGateway(ModelGateway):
                 raise ValueError('tool arguments must be an object')
             calls.append(ModelToolCall(str(call['id']), str(function['name']), arguments))
         usage_data = body.get('usage') or {}
-        usage = ModelUsage(usage_data.get('prompt_tokens', 0), usage_data.get('completion_tokens', 0), usage_data.get('total_tokens', 0))
+        usage = parse_model_usage(usage_data)
         return ModelResponse(message.get('content'), calls, choice.get('finish_reason'), body.get('id'), usage, message.get('reasoning_content'))
 
 

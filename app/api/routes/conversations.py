@@ -10,6 +10,7 @@ from app.core.errors import ApiError
 from app.core.responses import success_response
 from app.core.servertime import iso_utc
 from app.db.session import get_db
+from app.kernel.agent.service import ensure_system_agent
 from app.models import Agent, Conversation, Message, User
 from app.schemas.conversation import ConversationCreate, ConversationResponse, ConversationUpdate
 from app.schemas.message import MessageResponse
@@ -56,6 +57,8 @@ async def create(payload: ConversationCreate, request: Request, user: User = Dep
         (Agent.owner_user_id == user.id) | (Agent.source_type == "OFFICIAL") | admin_owned_clause(Agent.owner_user_id, user.tenant_id),
     )
     if payload.agent_id is None:
+        ensure_system_agent(db, tenant_id=user.tenant_id)
+        db.commit()
         query = query.where(Agent.is_default_parent.is_(True))
     else:
         query = query.where(Agent.id == payload.agent_id)

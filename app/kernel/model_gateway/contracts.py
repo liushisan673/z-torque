@@ -36,6 +36,59 @@ class ModelUsage:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # cache 字段与「是否由上游真实返回」标记：缺省一律 unknown，禁止把缺失伪装成 0。
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    prompt_tokens_known: bool = False
+    completion_tokens_known: bool = False
+    total_tokens_known: bool = False
+    cache_read_tokens_known: bool = False
+    cache_write_tokens_known: bool = False
+
+
+UNKNOWN_TOKEN_VALUE = "unknown"
+
+
+def parse_model_usage(data: Any) -> ModelUsage:
+    """把上游 usage 对象解析为带「未知」语义的模型契约。
+
+    只有键真实出现且为非负整数时才标记 known；缺失、None、负数一律 unknown。
+    """
+
+    def _field(key: str) -> tuple[int, bool]:
+        if not isinstance(data, dict) or key not in data:
+            return 0, False
+        known_key = f"{key}_known"
+        if known_key in data and data[known_key] is False:
+            return 0, False
+        value = data[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0, False
+        return value, True
+
+    prompt, prompt_known = _field("prompt_tokens")
+    completion, completion_known = _field("completion_tokens")
+    total, total_known = _field("total_tokens")
+    cache_read, cache_read_known = _field("cache_read_tokens")
+    cache_write, cache_write_known = _field("cache_write_tokens")
+    if not total_known and prompt_known and completion_known:
+        total, total_known = prompt + completion, True
+    return ModelUsage(
+        prompt, completion, total, cache_read, cache_write,
+        prompt_known, completion_known, total_known, cache_read_known, cache_write_known,
+    )
+
+
+def normalize_usage(usage: ModelUsage | None) -> dict[str, int | str]:
+    """审计/汇总统一出口：未提供写 `unknown`，不写 0。"""
+    source = usage or ModelUsage()
+    return {
+        "prompt_tokens": source.prompt_tokens if source.prompt_tokens_known else UNKNOWN_TOKEN_VALUE,
+        "completion_tokens": source.completion_tokens if source.completion_tokens_known else UNKNOWN_TOKEN_VALUE,
+        "total_tokens": source.total_tokens if source.total_tokens_known else UNKNOWN_TOKEN_VALUE,
+        "cache_read_tokens": source.cache_read_tokens if source.cache_read_tokens_known else UNKNOWN_TOKEN_VALUE,
+        "cache_write_tokens": source.cache_write_tokens if source.cache_write_tokens_known else UNKNOWN_TOKEN_VALUE,
+    }
 
 
 @dataclass(frozen=True)

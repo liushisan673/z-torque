@@ -52,7 +52,7 @@ PORT_SPECS: tuple[PortSpec, ...] = (
     # Information（6）
     PortSpec("memory.working", GROUP_INFORMATION, True, "请求级上下文组装", "进程内会话工作记忆（LRU）", pending=False),
     PortSpec("memory.short", GROUP_INFORMATION, True, "会话级短记忆", "内置短记忆（DB）", pending=False),
-    PortSpec("memory.long", GROUP_INFORMATION, False, "长期记忆", "内置进程内简单 KV（单机）", pending=False),
+    PortSpec("memory.long", GROUP_INFORMATION, False, "长期记忆", "内置 SQLite 持久化（单机固定租户）", pending=False),
     PortSpec("vector.store", GROUP_INFORMATION, False, "向量检索", "UNAVAILABLE 或轻量实现", pending=False),
     PortSpec("knowledge.provider", GROUP_INFORMATION, False, "知识库", "UNAVAILABLE", pending=False),
     PortSpec("object.store", GROUP_INFORMATION, True, "文件对象存储", "本地文件系统", pending=False),

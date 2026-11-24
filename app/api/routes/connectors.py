@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
@@ -14,7 +14,7 @@ from app.core.errors import ApiError
 from app.core.responses import success_response, trace_id_from
 from app.core.servertime import iso_utc
 from app.db.session import get_db
-from app.kernel.audit.service import record_audit
+from app.kernel.audit.service import record_audit, record_audit_detached
 from app.kernel.skill_service import _snapshot_hash, normalize_tags
 from app.models import Connector, ConnectorTool, Tool, ToolVersion, User
 from app.schemas.connector import (
@@ -25,10 +25,14 @@ from app.schemas.connector import (
     ConnectorToolReconfigureRequest,
     ConnectorToolRegisterRequest,
     ConnectorToolSyncRequest,
+    McpDiscoverRequest,
+    McpRegisterFromDiscoveryRequest,
 )
 from app.security.permissions import require_permissions
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
+# app.state 上的共享 MCP 生命周期服务键（用字面量避免 API 反向依赖插件包）
+SERVICE_MCP_LIFECYCLE = "mcp_lifecycle"
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
 DbSession = Annotated[Session, Depends(get_db)]
@@ -86,13 +90,14 @@ class _RegisteredMcpTool:
     version: ToolVersion
 
 
-def _normalize_discovered_tools(listing: dict) -> list[dict]:
+def _normalize_discovered_tools(listing: dict, *, preserve_raw: bool = False) -> list[dict]:
     """MCP tools/list 原始结果 → 统一结构（MCP 规范为 camelCase inputSchema）。"""
     return [
         {
             "name": str(t.get("name")),
             "description": str(t.get("description") or ""),
             "input_schema": t.get("inputSchema") if isinstance(t.get("inputSchema"), dict) else {},
+            **({"raw_input_schema": t.get("inputSchema")} if preserve_raw and isinstance(t.get("inputSchema"), dict) else {}),
         }
         for t in (listing.get("tools") or [])
         if isinstance(t, dict) and t.get("name")
@@ -205,13 +210,8 @@ def _diff_mcp_tools(discovered: list[dict], registered: dict[str, _RegisteredMcp
     }
 
 
-async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = None, allow_private_network: bool = False) -> dict:
-    """对 MCP 连接做真实探测：initialize 握手 + tools/list，返回 tools/list 原始结果。
-
-    仅支持 HTTP 传输（Streamable HTTP）；传输实现经装配注入的 SkillGateway
-    （http_connector_factory）构造，本模块不直接导入 builtin_plugins（G1 修复）。
-    失败抛 ApiError 或底层 Mcp*Error。
-    """
+def _mcp_probe_options(request: Request, config: dict, secret_ref: str | None = None, allow_private_network: bool = False) -> tuple[Any, dict]:
+    """构造 MCP HTTP 探测/发现的统一参数；端点、白名单、代理口径与执行期同源。"""
     from app.config import get_settings
 
     settings = get_settings()
@@ -227,22 +227,77 @@ async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = No
     gateway = getattr(request.app.state, "skill_gateway", None)
     if gateway is None:
         raise ApiError("AI_CONNECTOR_UNAVAILABLE", "skill gateway is unavailable", 503)
-    # 主机白名单经 policy.source Port 提供（P2-14 真实调用缝），缺失时退回配置
     registry = getattr(request.app.state, "port_registry", None)
     policy = registry.try_get("policy.source") if registry is not None else None
     allowed_hosts = policy.mcp_allowed_hosts() if policy is not None else settings.mcp_allowed_hosts
-    # 出站代理（连接器级三态）：缺省跟随全局；""=直连；URL=指定代理（与执行期同源）
     raw_proxy = config.get("proxy")
     proxy = raw_proxy.strip() if isinstance(raw_proxy, str) else None
-    return await gateway.probe_mcp_http(
-        endpoint,
-        allowed_hosts=allowed_hosts,
-        timeout_seconds=max(min(timeout, MCP_PROBE_TIMEOUT_SECONDS), 1.0),
-        max_response_bytes=settings.mcp_max_response_bytes,
-        secret_ref=secret_ref,
-        allow_private_network=allow_private_network,
-        proxy=proxy,
-    )
+    options = {
+        "endpoint": endpoint,
+        "allowed_hosts": allowed_hosts,
+        "timeout_seconds": max(min(timeout, MCP_PROBE_TIMEOUT_SECONDS), 1.0),
+        "max_response_bytes": settings.mcp_max_response_bytes,
+        "secret_ref": secret_ref,
+        "allow_private_network": allow_private_network,
+        "proxy": proxy,
+    }
+    return gateway, options
+
+
+async def _probe_mcp(request: Request, config: dict, secret_ref: str | None = None, allow_private_network: bool = False) -> dict:
+    """对 MCP 连接做真实探测：initialize 握手 + tools/list，返回 tools/list 原始结果。
+
+    仅支持 HTTP 传输（Streamable HTTP）；传输实现经装配注入的 SkillGateway
+    （http_connector_factory）构造，本模块不直接导入 builtin_plugins（G1 修复）。
+    失败抛 ApiError 或底层 Mcp*Error。
+    """
+    gateway, options = _mcp_probe_options(request, config, secret_ref, allow_private_network)
+    return await gateway.probe_mcp_http(**options)
+
+
+def _mcp_lifecycle(request: Request):
+    return getattr(request.app.state, SERVICE_MCP_LIFECYCLE, None)
+
+
+def _mcp_owner_id(request: Request, explicit: str | None) -> str:
+    return (explicit or request.headers.get("x-mcp-owner") or uuid4().hex).strip()
+
+
+def _acquire_mcp_owner(request: Request, connector, owner_id: str):
+    lifecycle = _mcp_lifecycle(request)
+    if lifecycle is None:
+        return None, None
+    try:
+        return lifecycle, lifecycle.registry.acquire_owner(connector.tenant_id, connector.id, owner_id)
+    except ApiError as exc:
+        record_audit_detached(
+            tenant_id=connector.tenant_id,
+            actor_user_id=getattr(request.state, "user_id", None),
+            action="MCP_OWNER_CONFLICT",
+            resource_type="CONNECTOR",
+            resource_id=connector.id,
+            summary="MCP lifecycle owner conflict",
+            detail={"error_code": exc.code, "owner_id": owner_id},
+        )
+        raise
+
+
+def _release_mcp_owner(lifecycle, token: str | None) -> None:
+    if lifecycle is not None and token:
+        lifecycle.registry.release_owner(token)
+
+
+async def _discover_tools(request: Request, connector, *, cursor: str | None, max_pages: int) -> tuple[list[dict], str | None, int]:
+    """分页发现：优先走共享生命周期服务；未装配时退回旧的单页探测。"""
+    gateway, options = _mcp_probe_options(request, dict(connector.config or {}), connector.secret_ref, allow_private_network=_mcp_allow_private(connector))
+    lifecycle = _mcp_lifecycle(request)
+    # 单页且无游标的旧调用保持原探测路径（含既有 monkeypatch 扩展点）；
+    # 显式分页时才走生命周期服务，避免改变现有客户端与回归用例的行为。
+    if lifecycle is not None and callable(getattr(gateway, "discover_mcp_http", None)) and (cursor is not None or max_pages > 1):
+        result = await lifecycle.discover(options=options, cursor=cursor, max_pages=max_pages)
+        return _normalize_discovered_tools(result, preserve_raw=True), result.get("next_cursor"), int(result.get("pages", 1))
+    listing = await _probe_mcp(request, dict(connector.config or {}), connector.secret_ref, allow_private_network=_mcp_allow_private(connector))
+    return _normalize_discovered_tools(listing, preserve_raw=True), None, 1
 
 
 def _rest_auth_headers(config: dict, secret_ref: str | None) -> tuple[dict[str, str], bool]:
@@ -713,7 +768,7 @@ async def test_connector(connector_id: UUID, request: Request, user: ReadUser, d
 
 
 @router.post("/{connector_id}/discover", summary="发现连接器工具")
-async def discover_connector(connector_id: UUID, request: Request, user: ReadUser, db: DbSession):
+async def discover_connector(connector_id: UUID, request: Request, user: ReadUser, db: DbSession, payload: McpDiscoverRequest | None = None):
     item = get_owned(db, user, connector_id)
     if item.status != "ENABLED":
         raise ApiError("AI_CONNECTOR_UNAVAILABLE", "connector is disabled", 503)
@@ -721,23 +776,26 @@ async def discover_connector(connector_id: UUID, request: Request, user: ReadUse
         return success_response(request, {"connector_id": str(item.id), "tools": []})
     from app.kernel.ports.connector import McpProtocolError, McpTransportError
 
+    payload = payload or McpDiscoverRequest()
+    owner_id = _mcp_owner_id(request, payload.owner_id)
+    lifecycle, token = _acquire_mcp_owner(request, item, owner_id)
     try:
-        listing = await _probe_mcp(request, dict(item.config or {}), item.secret_ref, allow_private_network=_mcp_allow_private(item))
-    except ApiError:
-        raise
-    except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
-        raise ApiError("AI_CONNECTOR_UNAVAILABLE", f"MCP 工具发现失败：{_mcp_error_reason(exc)}", 503) from exc
-    # MCP 规范为 camelCase（inputSchema），统一转本项目 snake_case 返回
-    tools = _normalize_discovered_tools(listing)
-    # 发现结果与本地登记比对：只提示差异，不自动改写已登记工具（需人工确认后走 /tools/sync）
-    drift = _diff_mcp_tools(tools, _load_registered_mcp_tools(db, user.tenant_id, item.id))
-    record_audit(
-        db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_DISCOVERED",
-        resource_type="CONNECTOR", resource_id=item.id, summary="connector tools discovered",
-        detail={"tool_count": len(tools), "added": len(drift["added"]), "removed": len(drift["removed"]), "changed": len(drift["changed"])},
-    )
-    db.commit()
-    return success_response(request, {"connector_id": str(item.id), "tools": tools, "requires_approval": True, "drift": drift})
+        try:
+            tools, next_cursor, pages = await _discover_tools(request, item, cursor=payload.cursor, max_pages=payload.max_pages)
+        except ApiError:
+            raise
+        except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
+            raise ApiError("AI_CONNECTOR_UNAVAILABLE", f"MCP 工具发现失败：{_mcp_error_reason(exc)}", 503) from exc
+        drift = _diff_mcp_tools(tools, _load_registered_mcp_tools(db, user.tenant_id, item.id))
+        record_audit(
+            db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_DISCOVERED",
+            resource_type="CONNECTOR", resource_id=item.id, summary="connector tools discovered",
+            detail={"tool_count": len(tools), "pages": pages, "added": len(drift["added"]), "removed": len(drift["removed"]), "changed": len(drift["changed"])},
+        )
+        db.commit()
+        return success_response(request, {"connector_id": str(item.id), "tools": tools, "next_cursor": next_cursor, "pages": pages, "requires_approval": True, "drift": drift})
+    finally:
+        _release_mcp_owner(lifecycle, token)
 
 
 @router.post("/{connector_id}/tools/sync", summary="同步 MCP 工具说明与入参")
@@ -762,7 +820,7 @@ async def sync_connector_tools(connector_id: UUID, payload: ConnectorToolSyncReq
     except (McpProtocolError, McpTransportError, OSError, ValueError, RuntimeError) as exc:
         raise ApiError("AI_CONNECTOR_UNAVAILABLE", f"MCP 工具同步失败：{_mcp_error_reason(exc)}", 503) from exc
 
-    discovered = {item["name"]: item for item in _normalize_discovered_tools(listing)}
+    discovered = {item["name"]: item for item in _normalize_discovered_tools(listing, preserve_raw=True)}
     registered = _load_registered_mcp_tools(db, user.tenant_id, connector.id)
     requested = {name.strip() for name in payload.names if name and name.strip()}
     updated: list[dict] = []
@@ -792,6 +850,7 @@ async def sync_connector_tools(connector_id: UUID, payload: ConnectorToolSyncReq
             # 入参属版本快照：生成 v(n+1) 并发布，旧版本仍可被既有 Skill 绑定
             old_version = local.version
             config_snapshot = dict(old_version.config_snapshot or {})
+            config_snapshot["_mcp_raw_input_schema"] = remote.get("raw_input_schema") or remote["input_schema"]
             version_number = _next_version_number(db, tool.id)
             new_version = ToolVersion(
                 tenant_id=user.tenant_id, tool_id=tool.id, version_number=version_number, status="PUBLISHED",
@@ -899,6 +958,96 @@ async def register_connector_tool(connector_id: UUID, payload: ConnectorToolRegi
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_TOOL_REGISTERED", resource_type="CONNECTOR", resource_id=connector.id, summary="connector tool registered", detail={"tool_id": str(tool.id), "tool_version_id": str(version.id)})
     db.commit()
     return success_response(request, {"tool_id": str(tool.id), "tool_version_id": str(version.id), "connector_id": str(connector.id)})
+
+
+def _register_discovered_mcp_tools(db: Session, user: User, connector: Connector, discovered: list[dict], allowed_names: list[str]) -> tuple[list[dict], list[dict]]:
+    """在一个事务内按白名单登记工具；任一工具构造失败由调用方整体 rollback。"""
+    allowed = {name.strip() for name in allowed_names if name and name.strip()}
+    remote = {str(item.get("name") or "").strip(): item for item in discovered if str(item.get("name") or "").strip()}
+    registered = _load_registered_mcp_tools(db, user.tenant_id, connector.id)
+    pending: list[tuple[str, str, str, dict, dict]] = []
+    skipped: list[dict] = []
+    for name in sorted(allowed):
+        item = remote.get(name)
+        if item is None:
+            skipped.append({"name": name, "reason": "MCP 服务未返回该工具"})
+            continue
+        if name in registered:
+            skipped.append({"name": name, "reason": "该工具已登记"})
+            continue
+        schema = item.get("input_schema")
+        if not isinstance(schema, dict):
+            raise ApiError("AI_PARAM_INVALID", f"MCP tool {name} has invalid input_schema", 422)
+        raw_schema = item.get("raw_input_schema") or schema
+        config_snapshot, tool_type, _is_write, filled_schema = _resolve_tool_register_config(
+            connector, tool_type="MCP", payload_config={"_mcp_raw_input_schema": raw_schema}, sql_template=None,
+            input_schema=schema, external_name=name, fallback_name=name,
+        )
+        pending.append((name, str(item.get("description") or ""), tool_type, config_snapshot, filled_schema))
+    created: list[dict] = []
+    for name, description, tool_type, config_snapshot, filled_schema in pending:
+        tool = Tool(tenant_id=user.tenant_id, owner_user_id=user.id, name=name, description=description or None, tool_type=tool_type, source_type="CONNECTOR", status="ACTIVE", official=False)
+        db.add(tool); db.flush()
+        version = ToolVersion(
+            tenant_id=user.tenant_id, tool_id=tool.id, version_number=1, status="PUBLISHED",
+            config_snapshot=config_snapshot, input_schema=filled_schema, snapshot_hash=_snapshot_hash(config_snapshot),
+            published_at=datetime.now(timezone.utc),
+        )
+        db.add(version); db.flush()
+        tool.current_published_version_id = version.id
+        db.add(ConnectorTool(tenant_id=user.tenant_id, connector_id=connector.id, tool_id=tool.id, external_name=name, approved=True))
+        created.append({"name": name, "tool_id": str(tool.id), "tool_version_id": str(version.id)})
+    return created, skipped
+
+
+@router.post("/{connector_id}/tools/register-from-discovery", summary="分页发现后按白名单登记 MCP 工具")
+async def register_mcp_tools_from_discovery(connector_id: UUID, payload: McpRegisterFromDiscoveryRequest, request: Request, user: ManageUser, db: DbSession):
+    """分页发现 → 白名单过滤 → 单事务登记；任一步失败都不留半成品工具。"""
+    from app.kernel.ports.connector import McpProtocolError, McpTransportError
+
+    connector = get_owned(db, user, connector_id)
+    if connector.status != "ENABLED":
+        raise ApiError("AI_CONNECTOR_UNAVAILABLE", "connector is disabled", 503)
+    if connector.connector_type != "MCP":
+        raise ApiError("AI_PARAM_INVALID", "只有 MCP 连接器支持发现后登记", 400)
+    allowed_names = [name.strip() for name in payload.allowed_names if name and name.strip()]
+    if not allowed_names:
+        raise ApiError("AI_PARAM_INVALID", "allowed_names must contain at least one tool name", 400)
+    owner_id = _mcp_owner_id(request, payload.owner_id)
+    lifecycle, token = _acquire_mcp_owner(request, connector, owner_id)
+    try:
+        try:
+            discovered, next_cursor, pages = await _discover_tools(request, connector, cursor=payload.cursor, max_pages=payload.max_pages)
+            created, skipped = _register_discovered_mcp_tools(db, user, connector, discovered, allowed_names)
+        except ApiError:
+            raise
+        except (McpProtocolError, McpTransportError, OSError, ValueError) as exc:
+            raise ApiError("AI_MCP_TOOL_REGISTER_FAILED", f"MCP 工具登记失败：{_mcp_error_reason(exc)}", 502) from exc
+        except Exception as exc:  # noqa: BLE001 - 批量登记必须整体回滚并留下独立事务审计
+            raise ApiError("AI_MCP_TOOL_REGISTER_FAILED", f"MCP 工具登记失败：{exc}", 500) from exc
+        record_audit(
+            db, tenant_id=user.tenant_id, actor_user_id=user.id, action="CONNECTOR_TOOL_REGISTERED",
+            resource_type="CONNECTOR", resource_id=connector.id, summary="MCP tools registered from discovery",
+            detail={"created": len(created), "skipped": len(skipped), "pages": pages, "owner_id": owner_id},
+        )
+        db.commit()
+        if lifecycle is not None:
+            lifecycle.registry.record(user.tenant_id, connector.id, [item["name"] for item in created])
+        return success_response(request, {
+            "connector_id": str(connector.id), "registered": created, "skipped": skipped,
+            "next_cursor": next_cursor, "pages": pages,
+        })
+    except Exception as exc:
+        db.rollback()
+        code = exc.code if isinstance(exc, ApiError) else "AI_MCP_TOOL_REGISTER_FAILED"
+        record_audit_detached(
+            tenant_id=user.tenant_id, actor_user_id=user.id, action="MCP_TOOL_REGISTER_FAILED",
+            resource_type="CONNECTOR", resource_id=connector.id, summary="MCP whitelist registration rolled back",
+            detail={"error_code": code, "names": allowed_names, "owner_id": owner_id},
+        )
+        raise
+    finally:
+        _release_mcp_owner(lifecycle, token)
 
 
 def _get_reconfigurable_tool(db: Session, user: User, connector: Connector, tool_id: UUID, *, composite: bool) -> Tool:

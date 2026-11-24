@@ -510,8 +510,8 @@ async def new_skill_version(skill_id: UUID, payload: SkillVersionCreateRequest, 
 
 @router.post("/skill-versions/{version_id}/tools", summary="为技能版本绑定工具")
 async def link_tool(version_id: UUID, payload: AttachToolRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    item = attach_tool(db, tenant_id=user.tenant_id, user_id=user.id, skill_version_id=version_id, tool_version_id=payload.tool_version_id, sort_order=payload.sort_order, role=payload.role, note=payload.note); db.commit()
-    return out(request, {"id": str(item.id), "tool_version_id": str(item.tool_version_id), "sort_order": item.sort_order, "role": item.role, "note": item.note})
+    item = attach_tool(db, tenant_id=user.tenant_id, user_id=user.id, skill_version_id=version_id, tool_version_id=payload.tool_version_id, sort_order=payload.sort_order, role=payload.role, note=payload.note, selector=payload.selector, depends_on=payload.depends_on); db.commit()
+    return out(request, {"id": str(item.id), "tool_version_id": str(item.tool_version_id), "sort_order": item.sort_order, "role": item.role, "note": item.note, "selector": item.selector, "depends_on": item.depends_on})
 
 
 @router.delete("/skill-versions/{version_id}/tools/{tool_version_id}", summary="为技能版本解绑工具")
@@ -523,7 +523,7 @@ async def unlink_tool(version_id: UUID, tool_version_id: UUID, request: Request,
 @router.patch("/skill-versions/{version_id}/tools/{tool_version_id}", summary="更新工具绑定顺序/角色/备注")
 async def patch_tool_binding(version_id: UUID, tool_version_id: UUID, payload: ToolBindingUpdateRequest, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     item = update_tool_binding(db, tenant_id=user.tenant_id, user_id=user.id, skill_version_id=version_id, tool_version_id=tool_version_id, **payload.model_dump(exclude_unset=True)); db.commit()
-    return out(request, {"tool_version_id": str(item.tool_version_id), "sort_order": item.sort_order, "role": item.role, "note": item.note})
+    return out(request, {"tool_version_id": str(item.tool_version_id), "sort_order": item.sort_order, "role": item.role, "note": item.note, "selector": item.selector, "depends_on": item.depends_on})
 
 
 @router.put("/skill-versions/{version_id}/tools/order", summary="重排工具绑定顺序")

@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.kernel.audit.service import record_audit, record_audit_detached
 from app.kernel.ports.knowledge_provider import KnowledgeProvider, ParsedFile
 from app.kernel.security_context import SecurityContext
@@ -81,10 +83,25 @@ def search(
     query: str, allowed_paths: list[str], top_k: int,
 ) -> list:
     audit_degradation(provider, ctx)
-    return provider.search(
+    chunks = list(provider.search(
         db=db, tenant_id=ctx.tenant_id, query=query, top_k=top_k,
         filters={"allowed_paths": allowed_paths},
-    )
+    ))
+    if get_settings().knowledge_message_search_enabled:
+        message_chunks = list(provider.search_messages(
+            db, tenant_id=ctx.tenant_id, user_id=ctx.user_id, query=query, top_k=top_k,
+        ))
+        seen = {item.source for item in chunks}
+        chunks.extend(item for item in message_chunks if item.source not in seen)
+        if message_chunks:
+            record_audit_detached(
+                tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id,
+                action="KNOWLEDGE_MESSAGE_SEARCH", resource_type="KNOWLEDGE", resource_id=None,
+                summary="message-level full-text search",
+                detail={"query_hash": hashlib.sha256(query.encode("utf-8")).hexdigest(), "hits": len(message_chunks)},
+                trace_id=ctx.trace_id,
+            )
+    return chunks[:top_k]
 
 
 def allowed_paths_for_user(request, db: Session, *, tenant_id: UUID, user_id: UUID) -> list[str]:

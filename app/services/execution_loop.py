@@ -7,6 +7,7 @@ from uuid import UUID
 from sqlalchemy import update
 
 from app.core.errors import ApiError
+from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import (
     ModelContentPart,
     ModelGateway,
@@ -18,13 +19,14 @@ from app.kernel.model_gateway import (
 )
 from app.kernel.ports.model_selector import ModelSelector, resolve_model_selection
 from app.kernel.ports.skill_executor import ExecutionResult
+from app.kernel.registry.active import call_optional
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import append_task_event
 from app.models import Task, TaskCheckpoint
-from app.services.context_governance import heal_context
-from app.services.function_calling import ToolMapping, map_tool_calls
+from app.services.context_governance import heal_context, sanitize_untrusted
+from app.services.function_calling import ToolMapping, repair_tool_message, validate_tool_calls
 from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
 
@@ -158,6 +160,8 @@ class AgentExecutionLoop:
         seed: dict | None = None,
     ) -> LoopResult:
         task = db.get(Task, task_id) if task_id else None
+        repair_used = False
+        repaired_ids: set[str] = set()
         seeded: tuple[list[ModelMessage], ModelResponse] | None = None
         if resume is not None:
             # 审批恢复续跑：从挂起时的上下文快照重建消息，回填已重放的工具结果后继续循环
@@ -196,14 +200,39 @@ class AgentExecutionLoop:
             if len(response.tool_calls) > MAX_TOOL_CALLS_PER_ROUND:
                 raise ApiError("AI_FUNCTION_CALL_INVALID", "too many tool calls in one round", 422)
             messages.append(ModelMessage("assistant", response.content, tool_calls=[call.__dict__ for call in response.tool_calls], reasoning_content=response.reasoning_content))
-            for call, (mapping, arguments) in zip(response.tool_calls, map_tool_calls(response.tool_calls, mappings), strict=True):
+            validated_calls = validate_tool_calls(response.tool_calls, mappings)
+            invalid_calls = [item for item in validated_calls if item.error]
+            if invalid_calls:
+                if repair_used:
+                    for item in invalid_calls:
+                        record_audit(db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="TOOL_CALL_REPAIR_FAILED", resource_type="TASK", resource_id=task_id, summary="tool argument repair exhausted", detail={"status": "FAILED", "error_code": item.error["code"], "tool_version_id": str(item.mapping.tool_version_id) if item.mapping and item.mapping.tool_version_id else None, "reason": f"{item.error['json_path']}: {item.error['message']}"})
+                    raise ApiError("AI_FUNCTION_CALL_INVALID", "tool arguments still invalid after one repair round", 422)
+                repair_used = True
+                repaired_ids: set[str] = set()
+                for item in validated_calls:
+                    if item.error:
+                        repaired_ids.add(item.call.id)
+                        record_audit(db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="TOOL_ARGUMENT_INVALID", resource_type="TASK", resource_id=task_id, summary="tool arguments failed strict validation", detail={"status": "FAILED", "error_code": item.error["code"], "tool_version_id": str(item.mapping.tool_version_id) if item.mapping and item.mapping.tool_version_id else None, "reason": f"{item.error['json_path']}: {item.error['message']}"})
+                        messages.append(ModelMessage("tool", repair_tool_message(item.call, item.error), tool_call_id=item.call.id))
+                        _progress_event(db, task, "TASK_TOOL_ARGUMENT_INVALID", f"invalid arguments for {item.call.name}", trace_id=request.trace_id, payload={"tool_name": item.call.name, "json_path": item.error["json_path"]})
+                    else:
+                        messages.append(ModelMessage("tool", "SKIPPED：同一轮其它工具调用参数校验失败，本调用未执行；请在修复回合重新发起。", tool_call_id=item.call.id))
+                continue
+            for item in validated_calls:
+                call = item.call
+                mapping = item.mapping
+                arguments = item.arguments
+                if mapping is None:
+                    raise ApiError("AI_TOOL_MAPPING_INVALID", "tool name is not allowed for this agent version", 422)
                 _progress_event(db, task, "TASK_TOOL_CALL", f"calling tool {call.name}", trace_id=request.trace_id, payload={"tool_name": call.name, "arguments": _brief(arguments)})
-                if mapping.child_agent_version_id is not None:
-                    # 委派调用：把任务交给子智能体独立执行，其最终回答作为工具结果返回
+                dispatch_target = mapping.child_agent_version_id or mapping.dispatch_agent_version_id
+                if dispatch_target is not None:
+                    # 父子委派与站内 A2A 派发共用同一条子执行链路：
+                    # 目标智能体版本的回答作为 tool 结果回填，审计归属目标智能体。
                     child_content = await self._run_child_agent(
                         db,
                         ctx=ctx,
-                        child_agent_version_id=mapping.child_agent_version_id,
+                        child_agent_version_id=dispatch_target,
                         task_text=str(arguments.get("task", "")).strip(),
                         delegation_depth=delegation_depth,
                         cancellation_event=cancellation_event,
@@ -246,6 +275,8 @@ class AgentExecutionLoop:
                 tool_content = self._tool_result(result)
                 messages.append(ModelMessage("tool", tool_content, tool_call_id=call.id))
                 if result.status == "SUCCEEDED":
+                    if call.id in repaired_ids:
+                        record_audit(db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="TOOL_CALL_REPAIRED", resource_type="TASK", resource_id=task_id, summary="tool call repaired in one round", detail={"status": "SUCCEEDED", "tool_version_id": str(mapping.tool_version_id) if mapping.tool_version_id else None, "reason": "arguments fixed after structured feedback"})
                     _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload={"tool_name": call.name, "status": result.status, "result": _brief(result.data)})
                 else:
                     _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} failed: {result.error_code}", trace_id=request.trace_id, payload={"tool_name": call.name, "status": result.status, "error": result.error_message})
@@ -289,7 +320,7 @@ class AgentExecutionLoop:
         child_agent = db.get(Agent, child.agent_id)
         if child_agent is None or child_agent.status != "ACTIVE":
             return _error("child agent is not available")
-        mappings, tools = build_tool_mappings(db, child, tenant_id, exclude_requires_confirmation=True)
+        mappings, tools = build_tool_mappings(db, child, tenant_id, exclude_requires_confirmation=True, user_id=ctx.user_id)
         # 与 chat 主路径一致：注入子智能体绑定 skill 的执行指令
         system_prompt = (child.config_snapshot or {}).get("system_prompt")
         if mappings:
@@ -306,6 +337,27 @@ class AgentExecutionLoop:
             if instructions:
                 system_prompt = (system_prompt + "\n\n" if system_prompt else "") + "\n\n".join(instructions)
         child_messages = [ModelMessage("system", system_prompt)] if system_prompt else []
+        parent_task = db.get(Task, task_id) if task_id else None
+        conversation_id = getattr(parent_task, "conversation_id", None)
+        if getattr(settings, "memory_long_enabled", False) and hasattr(db, "scalars"):
+            bundle = call_optional(
+                db,
+                audit_tenant_id=tenant_id,
+                port_name="memory.long",
+                method="recall_bundle",
+                actor_user_id=ctx.user_id,
+                tenant_id=tenant_id,
+                user_id=ctx.user_id,
+                agent_id=child.agent_id,
+                conversation_id=conversation_id,
+                pass_db=True,
+                trace_id=ctx.trace_id,
+            ) or {}
+            scope_labels = {"AGENT": "智能体指令", "USER": "用户画像", "CONVERSATION": "会话记忆"}
+            for scope in ("AGENT", "USER", "CONVERSATION"):
+                lines = [value for key, value in bundle.items() if key.startswith(f"{scope}:") and value]
+                if lines:
+                    child_messages.append(ModelMessage("system", f"Delegated memory / {scope_labels[scope]} (untrusted context):\n" + sanitize_untrusted("\n".join(lines))))
         child_messages.append(ModelMessage("user", task_text))
         # 子版本快照绑定优先（模型 + 调用参数），未设置回退模型档案 max_output_tokens，再退全局兜底（文档 §6.1）
         child_snapshot = child.config_snapshot or {}

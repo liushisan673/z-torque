@@ -16,10 +16,8 @@
 1. 通用入站 Webhook 只解析一个文本字段，取不到就返回 422，没有媒体下载、落库、附件绑定能力。
    - `app/services/inbound_webhook.py` 的 `parse()` 只取 `message_path`。
    - `ParsedInbound` 只有 `event_id / text / conversation_key / reply_*`。
-2. 企业微信入站虽然解析了 `media`，但没有进入模型上下文；纯媒体消息只会得到空文本上下文。
-   - `app/services/wecom_events.py` 的 `_event_parts` 只传元数据。
-   - `app/services/wecom_chat_bridge.py` 的 `record_inbound` 在 `not event.text` 时直接返回；
-     `_process_with_agent` 不判断文本，仍会以空字符串调用 `handle_chat`（媒体未进上下文，并非真正丢弃）。
+2. 外部渠道入站消息中的 `media` 没有进入模型上下文；纯媒体消息只会得到空文本上下文。
+   - 事件元数据片段只传元数据，媒体附件未注入模型上下文。
 3. 文件上传只允许 PDF/TXT/MD/CSV/XLSX，图片/音频/视频会 415。
    - `app/services/file_parser.py` 的 `SUPPORTED` 白名单。
    - `app/api/routes/files.py` 的上传校验。
@@ -34,8 +32,8 @@
 - 支持回调消息中的图片、文件、语音、视频进入会话；首期落地图片 + 可解析文档。
 - 媒体消息进入正常任务链路，控制台能看到实时执行过程。
 - 智能体使用多模态模型时，图片真正进入模型上下文；不支持视觉的模型必须明确降级，不能假装理解。
-- 自动回写仍然只支持文本；媒体回复由智能体调用 `weixin.send_media` 完成，
-  文件需先导出到 Bridge 共享卷（`POST /files/{id}/bridge-export`）。
+- 自动回写仍然只支持文本；媒体回复由智能体调用外部服务提供的发送工具完成，
+  文件需先导出到共享卷（`POST /files/{id}/bridge-export`）。
 
 ## 2. 总体架构
 
@@ -333,7 +331,7 @@ class ModelMessage:
 4. 含媒体的上下文跳过 `memory.working` 缓存，避免缓存巨大 base64。
 5. `attachment_ids` 参数保留，用于兼容当前请求的附件；与消息内 `file_id` 去重。
 6. 现有代码在累加长度时直接 `len(item.content)`，引入 `content=None + content_parts` 后必须统一改为 `len(item.content or "")`，否则会 `TypeError`。
-7. 现有 `content_parts` 循环只识别 `wecom_event` / `webhook_event`，其余类型直接 `continue`；新增 image/file part 时必须在同一循环内扩展，且不得破坏事件元数据注入顺序。
+7. 现有 `content_parts` 循环只识别 `webhook_event` / `inbound_event`，其余类型直接 `continue`；新增 image/file part 时必须在同一循环内扩展，且不得破坏事件元数据注入顺序。
 
 任务链路也必须生效：`app/kernel/task/runtime.py` 调用 `build_context` 时不再依赖单独的 `attachment_ids`，而是从触发消息的 `content_parts` 自动读取。
 

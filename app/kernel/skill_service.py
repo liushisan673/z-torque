@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -49,6 +50,65 @@ def validate_binding_role(role: str | None) -> str | None:
     if value is not None and value not in _BINDING_ROLES:
         raise ApiError("AI_REQUEST_INVALID", "unsupported tool binding role", 422)
     return value
+
+
+def normalize_tool_selector(selector: Any) -> dict | None:
+    if selector is None:
+        return None
+    if not isinstance(selector, dict):
+        raise ApiError("AI_REQUEST_INVALID", "tool selector must be an object", 422)
+    result: dict[str, list[str]] = {}
+    for key in ("tool_types", "tags", "tool_names", "query"):
+        value = selector.get(key)
+        if value is None:
+            continue
+        items = value if isinstance(value, list) else [value]
+        cleaned = [str(item).strip()[:128] for item in items[:20] if str(item).strip()]
+        if cleaned:
+            result[key] = cleaned
+    if not result:
+        raise ApiError("AI_REQUEST_INVALID", "tool selector must contain at least one criterion", 422)
+    return result
+
+
+def normalize_depends_on(depends_on: Any) -> list[str] | None:
+    if depends_on is None:
+        return None
+    if not isinstance(depends_on, (list, tuple)):
+        raise ApiError("AI_REQUEST_INVALID", "depends_on must be a list", 422)
+    result: list[str] = []
+    for item in depends_on[:16]:
+        try:
+            value = str(UUID(str(item)))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ApiError("AI_REQUEST_INVALID", "depends_on must contain tool version UUIDs", 422) from exc
+        if value not in result:
+            result.append(value)
+    return result or None
+
+
+def _validate_dependency_graph(bindings: list[tuple[UUID, str | None, str | None, dict | None, list[str] | None]]) -> None:
+    ids = {str(item[0]) for item in bindings}
+    for item in bindings:
+        if any(dep not in ids for dep in (item[4] or [])):
+            raise ApiError("AI_REQUEST_INVALID", "depends_on must reference a tool in the same binding set", 422)
+    graph = {str(item[0]): set(item[4] or []) for item in bindings}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str) -> None:
+        if node in visiting:
+            raise ApiError("AI_REQUEST_INVALID", "tool dependency cycle detected", 422)
+        if node in visited:
+            return
+        visiting.add(node)
+        for parent in graph[node]:
+            visit(parent)
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in graph:
+        visit(node)
 
 
 def _binding_links(db: Session, skill_version_id: UUID) -> list[SkillVersionTool]:
@@ -244,7 +304,7 @@ def _locked_draft_skill_version(db: Session, *, tenant_id: UUID, user_id: UUID, 
     return skill
 
 
-def attach_tool(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id: UUID, tool_version_id: UUID, sort_order: int | None = None, role: str | None = None, note: str | None = None) -> SkillVersionTool:
+def attach_tool(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id: UUID, tool_version_id: UUID, sort_order: int | None = None, role: str | None = None, note: str | None = None, selector: dict | None = None, depends_on: list | None = None) -> SkillVersionTool:
     skill = _locked_draft_skill_version(db, tenant_id=tenant_id, user_id=user_id, skill_version_id=skill_version_id)
     tool = db.get(ToolVersion, tool_version_id)
     if not tool or tool.tenant_id != tenant_id or tool.status != "PUBLISHED": raise ApiError("AI_TOOL_VERSION_NOT_FOUND", "published tool version not found", 404)
@@ -256,14 +316,19 @@ def attach_tool(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id
     if sort_order is None:
         max_order = db.scalar(select(func.max(SkillVersionTool.sort_order)).where(SkillVersionTool.skill_version_id == skill.id))
         sort_order = (max_order if max_order is not None else -1) + 1
-    link = SkillVersionTool(tenant_id=tenant_id, skill_version_id=skill.id, tool_version_id=tool.id, sort_order=sort_order, role=validate_binding_role(role), note=(note.strip() or None) if note is not None else None)
+    normalized_selector = normalize_tool_selector(selector)
+    normalized_depends = normalize_depends_on(depends_on)
+    existing_ids = {str(link.tool_version_id) for link in _binding_links(db, skill.id)}
+    if normalized_depends and any(dep not in existing_ids for dep in normalized_depends):
+        raise ApiError("AI_REQUEST_INVALID", "depends_on must reference tools already bound to this skill version", 422)
+    link = SkillVersionTool(tenant_id=tenant_id, skill_version_id=skill.id, tool_version_id=tool.id, sort_order=sort_order, role=validate_binding_role(role), note=(note.strip() or None) if note is not None else None, selector=normalized_selector, depends_on=normalized_depends)
     db.add(link); db.flush(); return link
 
 
 def set_skill_tool_bindings(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id: UUID, bindings: list[dict]) -> list[SkillVersionTool]:
     """整体替换草稿版本的工具绑定列表（一键保存并发布用）：先全量校验再重建，失败不产生半成品。"""
     skill = _locked_draft_skill_version(db, tenant_id=tenant_id, user_id=user_id, skill_version_id=skill_version_id)
-    wanted: list[tuple[UUID, str | None, str | None]] = []
+    wanted: list[tuple[UUID, str | None, str | None, dict | None, list[str] | None]] = []
     seen: set[UUID] = set()
     for item in bindings:
         tool_version_id = item.get("tool_version_id")
@@ -273,14 +338,15 @@ def set_skill_tool_bindings(db: Session, *, tenant_id: UUID, user_id: UUID, skil
         if tool.id in seen:
             raise ApiError("AI_REQUEST_INVALID", "duplicate tool version binding", 422)
         seen.add(tool.id)
-        wanted.append((tool.id, item.get("role"), item.get("note")))
+        wanted.append((tool.id, item.get("role"), item.get("note"), normalize_tool_selector(item.get("selector")), normalize_depends_on(item.get("depends_on"))))
     if len(wanted) > MAX_SKILL_BOUND_TOOLS:
         raise ApiError("AI_SKILL_TOOL_LIMIT_EXCEEDED", f"a skill version can bind at most {MAX_SKILL_BOUND_TOOLS} tools", 409)
+    _validate_dependency_graph(wanted)
     for link in _binding_links(db, skill.id):
         db.delete(link)
     db.flush()
     rebuilt: list[SkillVersionTool] = []
-    for index, (tool_version_id, role, note) in enumerate(wanted):
+    for index, (tool_version_id, role, note, selector, depends) in enumerate(wanted):
         link = SkillVersionTool(
             tenant_id=tenant_id,
             skill_version_id=skill.id,
@@ -288,6 +354,8 @@ def set_skill_tool_bindings(db: Session, *, tenant_id: UUID, user_id: UUID, skil
             sort_order=index,
             role=validate_binding_role(role),
             note=(note.strip() or None) if note is not None else None,
+            selector=selector,
+            depends_on=depends,
         )
         db.add(link)
         rebuilt.append(link)
@@ -302,7 +370,7 @@ def detach_tool(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id
     db.delete(link); db.flush(); return link
 
 
-def update_tool_binding(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id: UUID, tool_version_id: UUID, sort_order: int | None = None, role: str | None = None, note: str | None = None) -> SkillVersionTool:
+def update_tool_binding(db: Session, *, tenant_id: UUID, user_id: UUID, skill_version_id: UUID, tool_version_id: UUID, sort_order: int | None = None, role: str | None = None, note: str | None = None, selector: dict | None = None, depends_on: list | None = None) -> SkillVersionTool:
     skill = _locked_draft_skill_version(db, tenant_id=tenant_id, user_id=user_id, skill_version_id=skill_version_id)
     link = db.scalar(select(SkillVersionTool).where(SkillVersionTool.skill_version_id == skill.id, SkillVersionTool.tool_version_id == tool_version_id))
     if not link: raise ApiError("AI_RESOURCE_NOT_FOUND", "tool link not found", 404)
@@ -312,6 +380,14 @@ def update_tool_binding(db: Session, *, tenant_id: UUID, user_id: UUID, skill_ve
         link.role = validate_binding_role(role)
     if note is not None:
         link.note = note.strip() or None
+    if selector is not None:
+        link.selector = normalize_tool_selector(selector)
+    if depends_on is not None:
+        normalized = normalize_depends_on(depends_on) or []
+        ids = {str(item.tool_version_id) for item in _binding_links(db, skill.id)}
+        if any(dep not in ids or dep == str(link.tool_version_id) for dep in normalized):
+            raise ApiError("AI_REQUEST_INVALID", "depends_on must reference another tool in this skill version", 422)
+        link.depends_on = normalized or None
     db.flush(); return link
 
 
@@ -349,6 +425,8 @@ def upgrade_tool_binding(db: Session, *, tenant_id: UUID, user_id: UUID, skill_v
     if exists:
         raise ApiError("AI_REQUEST_INVALID", "tool version already attached", 422)
     link.tool_version_id = new_version.id
+    if link.depends_on:
+        link.depends_on = [str(new_version.id) if dep == str(tool_version_id) else dep for dep in link.depends_on]
     db.flush()
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="SKILL_TOOL_BINDING_UPGRADED", resource_type="SKILL_VERSION", resource_id=skill.id, summary="tool binding upgraded", detail={"from_tool_version_id": str(tool_version_id), "to_tool_version_id": str(new_version.id)})
     return link
@@ -366,7 +444,7 @@ def publish_skill_version(db: Session, *, tenant_id: UUID, user_id: UUID, versio
         raise ApiError("AI_SKILL_INVALID_MANIFEST", "instruction skill cannot contain script source", 422)
     # 绑定元数据（顺序/角色/备注）一并进入快照哈希，发布后不可原地篡改
     bindings = [
-        {"tool_version_id": str(x.tool_version_id), "sort_order": x.sort_order, "role": x.role, "note": x.note}
+        {"tool_version_id": str(x.tool_version_id), "sort_order": x.sort_order, "role": x.role, "note": x.note, "selector": x.selector, "depends_on": x.depends_on}
         for x in _binding_links(db, item.id)
     ]
     if len(bindings) > MAX_SKILL_BOUND_TOOLS:

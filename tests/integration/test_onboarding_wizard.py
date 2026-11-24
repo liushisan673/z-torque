@@ -111,18 +111,22 @@ async def test_onboarding_creates_published_agent_and_conversation(users):
             endpoints = db.scalars(select(ModelEndpoint)).all()
             agents = db.scalars(select(Agent)).all()
             conversations = db.scalars(select(Conversation)).all()
-            assert (len(providers), len(models), len(endpoints), len(agents), len(conversations)) == (1, 1, 1, 1, 1)
+            # 系统自带智能体 + 用户创建的助手 = 2 个智能体；会话绑定系统自带智能体
+            assert (len(providers), len(models), len(endpoints), len(conversations)) == (1, 1, 1, 1)
+            assert len(agents) == 2
             assert providers[0].secret_ref and providers[0].secret_ref.startswith("secret://")
             assert "sk-test-key" not in providers[0].secret_ref
-            assert agents[0].current_published_version_id is not None
-            assert conversations[0].agent_id == agents[0].id
+            system_agent = next(a for a in agents if a.is_default_parent)
+            user_agent = next(a for a in agents if not a.is_default_parent)
+            assert user_agent.current_published_version_id is not None
+            assert conversations[0].agent_id == system_agent.id
 
         # 重复提交幂等：同名已发布助手已存在时直接返回，不重复建资源
         again = await client.post("/api/z-torque/onboarding", headers=headers, json=_payload())
         assert again.status_code == 200
         assert again.json()["data"]["already_exists"] is True
         with SessionLocal() as db:
-            assert len(db.scalars(select(Agent)).all()) == 1
+            assert len(db.scalars(select(Agent)).all()) == 2  # 系统自带 + 用户助手
             assert len(db.scalars(select(ModelProvider)).all()) == 1
 
 

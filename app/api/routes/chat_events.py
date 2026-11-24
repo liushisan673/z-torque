@@ -1,6 +1,6 @@
 """控制台会话消息事件流（SSE）。
 
-入站 Webhook、企微等后台链路把消息写入 ``Conversation`` / ``Message`` 后，
+入站 Webhook 等后台链路把消息写入 ``Conversation`` / ``Message`` 后，
 通过进程内总线立即推给控制台；前端不再轮询。多副本需替换为 Redis/DB 广播。
 """
 

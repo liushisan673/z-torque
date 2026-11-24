@@ -1,7 +1,7 @@
 """会话消息事件总线：后台链路消息落库后主动推送给控制台会话页。
 
 单进程最小实现：控制台通过 ``GET /api/z-torque/chat/events`` 订阅，
-入站 Webhook / 企微等后台链路落库后 publish；多副本部署需要替换为 Redis/DB 广播。
+入站 Webhook 等后台链路落库后 publish；多副本部署需要替换为 Redis/DB 广播。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ class ChatMessageEvent:
     task_id: UUID | None = None
     # 该消息触发的后台任务（用户消息）：控制台据此订阅任务事件流，展示执行过程
     pending_task_id: UUID | None = None
-    # 消息来源渠道（console/webhook/wecom）与外部发送者标识：外部来源前端渲染独立样式
+    # 消息来源渠道（console/webhook/external）与外部发送者标识：外部来源前端渲染独立样式
     source: str | None = None
     external_sender: str | None = None
 

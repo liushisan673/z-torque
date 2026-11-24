@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from app.kernel.registry.port_registry import AssemblyError, PortPriority
+from app.plugin_sdk.capability import CapabilityDeclaration, validate_capability_declarations
 
 PLUGIN_API_VERSION = "zsoftym.ai/plugin.v1"
 
@@ -49,6 +50,11 @@ class PluginManifest:
     # 审计事件流只读能力（v1.3 §3.7 / B-12）：默认关闭，需显式声明并在
     # 各插件的 validate_plugin 中校验"附属能力不得凭空获得"，导出/归档插件必须持此能力
     read_audit: bool = False
+    # Phase 2 manifest-first：插件经 sdk.publish 对外发布的共享能力键必须先在此声明。
+    # 空元组表示不发布任何领域服务；Port 实现体自身即 provides 中的名字，自动视为已声明。
+    published_services: tuple[str, ...] = ()
+    # Phase 2 capability ladder：能力分级声明；core_change 必须带 approval_ref。
+    capabilities: tuple[CapabilityDeclaration, ...] = ()
 
 
 class PluginSdk:
@@ -63,7 +69,7 @@ class PluginSdk:
     - expose_skill_gateway / attach_stdio_registry：装配产出物挂载。
     """
 
-    def __init__(self, *, settings: Any = None, engine: Any = None, registry: Any = None, objects: dict[str, Any] | None = None, manifest: PluginManifest | None = None, builtin: bool = True, guard: Any = None) -> None:
+    def __init__(self, *, settings: Any = None, engine: Any = None, registry: Any = None, objects: dict[str, Any] | None = None, manifest: PluginManifest | None = None, builtin: bool = True, guard: Any = None, enforce_manifest_first: bool | None = None) -> None:
         self._settings = settings
         self._engine = engine
         self._registry = registry
@@ -71,6 +77,8 @@ class PluginSdk:
         self._builtin = builtin
         # 直构/测试场景未传 manifest 时使用宽松占位（生产装配始终传真实 manifest）
         self._manifest = manifest or PluginManifest(name="adhoc", description="", provides=(), permissions=(ENGINE_PERMISSION,))
+        # 生产装配（传真实 manifest）强制 manifest-first 门禁；adhoc 直构测试保持宽松
+        self._enforce_manifest_first = enforce_manifest_first if enforce_manifest_first is not None else manifest is not None
         self._guard = guard
         self._skill_gateway: Any = None
         self._stdio_registry: Any = None
@@ -223,12 +231,30 @@ class PluginSdk:
         """注册 Port：内置插件默认 BUILTIN；第三方插件默认 PLUGIN。
 
         契约 §3「显式配置 > 插件优先级 > 内置默认」因此无需插件手写 priority
-        即可覆盖内置实现（P2-15）。
+        即可覆盖内置实现（P2-15）。manifest-first（Phase 2）：注册前必须在
+        manifest.provides 声明该 Port，杜绝"装上却没声明"的隐式能力扩张。
         """
+        if self._enforce_manifest_first and port_name not in self._manifest.provides:
+            raise AssemblyError(
+                f"plugin {self._manifest.name} registers undeclared port {port_name!r}; "
+                "manifest-first requires 'provides' to declare every registered Port"
+            )
         resolved_priority = priority if priority is not None else (PortPriority.BUILTIN if self._builtin else PortPriority.PLUGIN)
         self._registry.register(port_name, factory, priority=resolved_priority, label=label, plugin=self._manifest.name)
 
     def publish(self, key: str, value: Any) -> None:
+        """发布共享能力：manifest-first（Phase 2）要求 key 已在 manifest 声明。
+
+        Port 实现体自身的 publish（key == provides 中的 Port 名）自动视为已声明；
+        领域服务必须列在 manifest.published_services，否则拒绝发布。
+        """
+        if self._enforce_manifest_first:
+            declared = set(self._manifest.provides) | set(self._manifest.published_services)
+            if key not in declared:
+                raise AssemblyError(
+                    f"plugin {self._manifest.name} publishes undeclared capability {key!r}; "
+                    "declare it in manifest.published_services (or provides if it is a Port)"
+                )
         self._objects[key] = value
 
     def shared(self, key: str, default: Any = None) -> Any:
@@ -282,6 +308,9 @@ def validate_manifest(manifest: PluginManifest, known_ports: set[str]) -> None:
     # 附属能力不得凭空获得（v1.3 §3.7 / B-12）：read_audit 必须伴随显式 audit.read 声明
     if manifest.read_audit and AUDIT_READ_PERMISSION not in manifest.permissions:
         raise ValueError(f"plugin {manifest.name} declares read_audit but lacks '{AUDIT_READ_PERMISSION}' permission")
+    # Phase 2 manifest-first / capability ladder：能力声明层级合法、名称唯一，
+    # core_change 必须带审批引用（未声明能力的插件默认通过，向后兼容）。
+    validate_capability_declarations(manifest.capabilities)
     # apiVersion 兼容性（标准插件可移植性）：内核只接受自己认识的契约版本，
     # 未知版本直接拒绝启动，避免"装上但语义半懂"的静默错配。
     if manifest.api_version not in SUPPORTED_API_VERSIONS:

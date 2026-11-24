@@ -61,7 +61,7 @@ def archive_agent(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID
     if agent.is_default_parent:
         raise ApiError("AI_REQUEST_INVALID", "default parent cannot be archived", 422)
     agent.status = "ARCHIVED"
-    # 归档的智能体不再作为默认项（会话页/企微桥接 fallback 会跳过非 ACTIVE 的默认项，这里直接清标记）
+    # 归档的智能体不再作为默认项（外部接入 fallback 会跳过非 ACTIVE 的默认项，这里直接清标记）
     agent.is_default = False
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="AGENT_ARCHIVED", resource_type="AGENT", resource_id=agent.id, summary="agent archived")
     return agent
@@ -123,6 +123,36 @@ def set_default_parent(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id:
     )
     agent.is_default_parent = True
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="DEFAULT_PARENT_SET", resource_type="AGENT", resource_id=agent.id, summary="default parent set")
+    return agent
+
+
+SYSTEM_AGENT_NAME = "Z-Torque 系统智能体"
+SYSTEM_AGENT_DESCRIPTION = "系统内置智能体：自动识别需求并派发给合适的智能体，无需用户手动选择。"
+SYSTEM_AGENT_SNAPSHOT = {
+    "mode": "router",
+    "system_prompt": "你是 Z-Torque 系统智能体。用户的需求若需要专业能力，请调用 call_agent_ 开头的工具把任务交给对应智能体；仅闲聊或与专业能力无关的简短交流才直接回答。",
+}
+
+
+def ensure_system_agent(db: Session, *, tenant_id: UUID) -> Agent:
+    """系统自带智能体：每个租户启动时确保存在且已发布，用户配置模型后即可用。
+
+    旧安装的默认父可能是早期 bootstrap 的 `mode=mock` 空壳：这里就地升级其名称/描述，
+    并为其已发布版本补上 router 系统提示快照（不新建版本，避免影响历史任务的版本引用）。
+    """
+    agent = bootstrap_default_parent(
+        db, tenant_id=tenant_id, owner_user_id=None,
+        name=SYSTEM_AGENT_NAME, description=SYSTEM_AGENT_DESCRIPTION,
+        snapshot=SYSTEM_AGENT_SNAPSHOT,
+    )
+    agent.name = SYSTEM_AGENT_NAME
+    agent.description = SYSTEM_AGENT_DESCRIPTION
+    if agent.current_published_version_id is not None:
+        version = db.get(AgentVersion, agent.current_published_version_id)
+        if version is not None and version.config_snapshot != SYSTEM_AGENT_SNAPSHOT:
+            from app.kernel.agent.version_service import _snapshot_hash
+            version.config_snapshot = dict(SYSTEM_AGENT_SNAPSHOT)
+            version.snapshot_hash = _snapshot_hash(version.config_snapshot)
     return agent
 
 

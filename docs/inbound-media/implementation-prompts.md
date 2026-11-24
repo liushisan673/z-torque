@@ -16,7 +16,7 @@
 1. 先完整阅读 docs/inbound-media/design.md 和 docs/111.md，再读相关源码，不要凭猜测改代码。
 2. 技术栈：后端 Python 3.12 + FastAPI + SQLAlchemy + Alembic；前端 React + TypeScript + Vite。
 3. 禁止硬编码配置：所有可调参数进入 app/config.py 的 Settings 并同步 .env.example；通用网关的渠道差异进入 YAML 配置。
-4. 不得破坏现有文本 Webhook、企微文本链路、普通 Chat 任务链路；改动后必须跑回归。
+4. 不得破坏现有文本 Webhook、普通 Chat 任务链路；改动后必须跑回归。
 5. 不实现媒体输出，不实现媒体回复；reply_url 仍然只回写文本。
 6. 前端样式必须使用 CSS 变量，禁止硬编码颜色/尺寸；所有功能接真实后端接口，禁止 mock 数据。
 7. 遵循现有分层与目录约定；不要新增与任务无关的抽象。
@@ -131,7 +131,7 @@
 5. 测试：
    - tests/integration/test_inbound_internal.py：401、404（未启用）、413、415、422、202、200 duplicate。
    - 附件落库、content_parts、message_file 关联、任务创建、chat_event_bus 事件。
-   - 现有 test_inbound_webhook_events.py / test_wecom_events.py 回归通过。
+   - 现有 test_inbound_webhook_events.py 回归通过。
 
 验收：
 - 内部接口可用 multipart 接收 payload + 图片，创建会话和任务。
@@ -140,7 +140,7 @@
 
 验证命令：
 .\.venv\Scripts\python.exe -m ruff check app/services/inbound_message_service.py app/services/inbound_webhook.py app/api/routes/inbound_internal.py app/models/inbound_channel_event.py tests/integration/test_inbound_internal.py
-.\.venv\Scripts\python.exe -m pytest tests/integration/test_inbound_internal.py tests/integration/test_inbound_webhook_events.py tests/integration/test_wecom_events.py -q
+.\.venv\Scripts\python.exe -m pytest tests/integration/test_inbound_internal.py tests/integration/test_inbound_webhook_events.py -q
 .\.venv\Scripts\python.exe -m alembic upgrade head
 
 禁止：
@@ -374,7 +374,7 @@ cd console && npm run build
 ```text
 wechat-bot 媒体读不到时，按顺序检查：
 1. 网关与 Bot 是否挂载了同一个媒体目录。
-2. 渠道配置的媒体根目录是否包含 /tmp/weixin-agent/media。
+2. 渠道配置的媒体根目录是否包含外部服务容器挂载的媒体目录。
 3. filePath 是否为绝对路径、是否符号链接逃逸。
 4. 容器内文件是否存在、可读。
 5. 如果无法共享卷，改为让 Bot 提供 HTTP URL 或直接上传字节。

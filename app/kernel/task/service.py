@@ -87,6 +87,7 @@ def _validate_stage3_context(
     agent_version_id: UUID,
     conversation_id: UUID | None,
     trigger_message_id: UUID | None,
+    allow_conversation_agent_mismatch: bool = False,
 ) -> Message | None:
     agent = _visible_agent(db, tenant_id=tenant_id, owner_user_id=owner_user_id, agent_id=agent_id)
     version = db.scalar(select(AgentVersion).where(AgentVersion.id == agent_version_id, AgentVersion.agent_id == agent_id, AgentVersion.tenant_id == tenant_id, AgentVersion.status == "PUBLISHED"))
@@ -103,11 +104,15 @@ def _validate_stage3_context(
             raise ApiError("AI_AGENT_NOT_FOUND", "agent not found", 404)
         if version is None and db.scalar(select(AgentVersion.id).where(AgentVersion.id == agent_version_id)) is not None:
             raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent version is not published", 409)
-    if conversation_id is not None:
+    if conversation_id is not None and allow_conversation_agent_mismatch:
+        conversation = db.scalar(select(Conversation).where(Conversation.id == conversation_id, Conversation.tenant_id == tenant_id, Conversation.owner_user_id == owner_user_id))
+        if conversation is None:
+            raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
+    elif conversation_id is not None:
         _validate_conversation(db, tenant_id, owner_user_id, agent_id, conversation_id)
     if trigger_message_id is None:
         return None
-    # EXTERNAL：外部系统（Webhook/企微）触发的消息同样可以发起任务（阶段12）
+    # EXTERNAL：外部系统（通用 Webhook）触发的消息同样可以发起任务（阶段12）
     message = db.scalar(select(Message).where(Message.id == trigger_message_id, Message.tenant_id == tenant_id, Message.conversation_id == conversation_id, Message.sender_type.in_(("USER", "EXTERNAL"))))
     if message is None:
         raise ApiError("AI_RESOURCE_NOT_FOUND", "trigger message not found", 404)
@@ -235,6 +240,7 @@ def create_task(
     conversation_id: UUID | None = None,
     trigger_message_id: UUID | None = None,
     message_id: UUID | None = None,
+    allow_conversation_agent_mismatch: bool = False,
 ) -> Task:
     """任务创建（不变量1：身份必须以 SecurityContext 进入，冻结为 Task 行 tenant_id/owner_user_id）。"""
     tenant_id = ctx.tenant_id
@@ -258,7 +264,7 @@ def create_task(
         child_sequence=child_sequence,
     )
     _validate_delegation(db, tenant_id=tenant_id, parent_task_id=parent_task_id, delegation_id=delegation_id, child_sequence=child_sequence)
-    _validate_stage3_context(db, tenant_id=tenant_id, owner_user_id=owner_user_id, agent_id=agent_id, agent_version_id=agent_version_id, conversation_id=conversation_id, trigger_message_id=trigger_message_id)
+    _validate_stage3_context(db, tenant_id=tenant_id, owner_user_id=owner_user_id, agent_id=agent_id, agent_version_id=agent_version_id, conversation_id=conversation_id, trigger_message_id=trigger_message_id, allow_conversation_agent_mismatch=allow_conversation_agent_mismatch)
     try:
         with db.begin_nested():
             return _create_task_records(db, tenant_id=tenant_id, owner_user_id=owner_user_id, agent_id=agent_id, agent_version_id=agent_version_id, idempotency_key=idempotency_key, request_summary=request_summary, parent_task_id=parent_task_id, delegation_id=delegation_id, child_sequence=child_sequence, depends_on_task_ids=depends_on_task_ids, deadline_at=deadline_at, conversation_id=conversation_id, trigger_message_id=trigger_message_id, trace_id=trace_id)

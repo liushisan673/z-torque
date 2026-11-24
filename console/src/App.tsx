@@ -18,6 +18,7 @@ const WebhooksPage = lazy(() => import("./pages/Webhooks").then((m) => ({ defaul
 const AuditPage = lazy(() => import("./pages/Audit").then((m) => ({ default: m.AuditPage })));
 const UsersPage = lazy(() => import("./pages/Users").then((m) => ({ default: m.UsersPage })));
 const OnboardingPage = lazy(() => import("./pages/Onboarding").then((m) => ({ default: m.OnboardingPage })));
+const SettingsPage = lazy(() => import("./pages/Settings").then((m) => ({ default: m.SettingsPage })));
 // 嵌入对话页：第三方宿主 iframe 集成，不走 RequireAccess（自带登录态探测）
 const ChatEmbedPage = lazy(() => import("./pages/embed/ChatEmbed").then((m) => ({ default: m.ChatEmbedPage })));
 
@@ -80,6 +81,7 @@ export function App() {
           <Route path="/audit" element={<RequireAccess><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
           <Route path="/users" element={<RequireAccess navTo="/users"><ConsoleShell><UsersPage /></ConsoleShell></RequireAccess>} />
           <Route path="/onboarding" element={<RequireAccess><OnboardingPage /></RequireAccess>} />
+          <Route path="/settings" element={<RequireAccess><ConsoleShell><SettingsPage /></ConsoleShell></RequireAccess>} />
           <Route path="*" element={<HomeRedirect />} />
         </Routes>
       </Suspense>

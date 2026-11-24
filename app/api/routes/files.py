@@ -105,6 +105,19 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
     return success_response(request, metadata(item))
 
 
+@router.get("", summary="列出文件（可按会话过滤）")
+async def list_files(request: Request, conversation_id: UUID | None = None, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """用户化文件对比入口：列出本人文件，可按会话收敛到该会话上传/产出的文件。"""
+    stmt = select(File).where(File.tenant_id == user.tenant_id, File.owner_user_id == user.id, File.status != "DELETED")
+    if conversation_id is not None:
+        conversation = db.scalar(select(Conversation).where(Conversation.id == conversation_id, Conversation.tenant_id == user.tenant_id, Conversation.owner_user_id == user.id))
+        if conversation is None:
+            raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
+        stmt = stmt.where(File.conversation_id == conversation_id)
+    items = db.scalars(stmt.order_by(File.created_at.desc())).all()
+    return success_response(request, [metadata(item) for item in items])
+
+
 @router.get("/{file_id}", summary="获取文件详情")
 async def detail(file_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return success_response(request, metadata(owned_file(db, user, file_id)))
@@ -148,10 +161,10 @@ async def raw(file_id: UUID, request: Request, user: User = Depends(get_current_
 
 @router.post("/{file_id}/bridge-export", summary="导出文件到 Bridge 共享卷")
 async def bridge_export(file_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """把文件复制到 wechat-Bot 共享卷，返回 Bridge 容器内可发送路径。
+    """把文件导出到外部服务的共享卷，返回其容器内可发送路径。
 
-    同机部署时，智能体可把返回的 ``bridge_path`` 作为 ``weixin.send_media`` 的
-    ``url`` 参数，Bridge 会按容器内本地文件读取并发送到微信。
+    同机部署时，智能体可把返回的 ``bridge_path`` 作为发送工具的 ``url`` 参数，
+    外部服务会按容器内本地文件读取并投递到对应渠道。
     """
     item = owned_file(db, user, file_id)
     if item.status == "DELETED":
@@ -170,26 +183,26 @@ async def bridge_export(file_id: UUID, request: Request, user: User = Depends(ge
         trace_id=request.state.trace_id,
     )
     db.commit()
-    return success_response(
-        request,
-        {
-            "file_id": str(item.id),
-            "bridge_path": exported.bridge_path,
-            "media_type": exported.media_type,
-            "file_name": exported.file_name,
-            "size_bytes": exported.size_bytes,
-            "sha256": exported.sha256,
-            # 直接可用的工具调用参数，前端/智能体编排层可原样透传
-            "send_media": {
-                "tool": "weixin.send_media",
-                "arguments": {
-                    "media_type": exported.media_type,
-                    "url": exported.bridge_path,
-                    "file_name": exported.file_name,
-                },
+    data: dict[str, object] = {
+        "file_id": str(item.id),
+        "bridge_path": exported.bridge_path,
+        "media_type": exported.media_type,
+        "file_name": exported.file_name,
+        "size_bytes": exported.size_bytes,
+        "sha256": exported.sha256,
+    }
+    # 发送工具名由接入方配置；系统不内置任何外部平台工具名
+    send_tool = get_settings().bridge_media_send_tool.strip()
+    if send_tool:
+        data["send_media"] = {
+            "tool": send_tool,
+            "arguments": {
+                "media_type": exported.media_type,
+                "url": exported.bridge_path,
+                "file_name": exported.file_name,
             },
-        },
-    )
+        }
+    return success_response(request, data)
 
 
 @router.delete("/{file_id}", summary="删除文件")

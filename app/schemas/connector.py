@@ -64,6 +64,23 @@ class ConnectorToolSyncRequest(BaseModel):
     names: list[str] = Field(default_factory=list)
 
 
+class McpDiscoverRequest(BaseModel):
+    """分页发现请求；不传 payload 时保持旧的「只取第一页」语义。"""
+
+    cursor: str | None = None
+    max_pages: int = Field(default=1, ge=1, le=10)
+    owner_id: str | None = None
+
+
+class McpRegisterFromDiscoveryRequest(BaseModel):
+    """分页发现后按白名单登记：只有 allowed_names 中的工具会被写入。"""
+
+    allowed_names: list[str] = Field(min_length=1, max_length=50)
+    cursor: str | None = None
+    max_pages: int = Field(default=1, ge=1, le=10)
+    owner_id: str | None = None
+
+
 class CompositeStep(BaseModel):
     key: str = Field(min_length=1, max_length=32)
     tool_version_id: UUID

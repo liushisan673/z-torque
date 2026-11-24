@@ -6,6 +6,8 @@ import type { UserInfo } from "../types";
 export interface NavItem {
   to: string;
   label: string;
+  /** i18n key：有则用字典译文，缺失时回退 label（中文） */
+  labelKey?: string;
   /** 展示所需的权限（与后端 require_permissions 对应）；管理员自动可见 */
   permission?: string;
   /** 仅管理员可见（对应后端 require_admin） */
@@ -15,15 +17,16 @@ export interface NavItem {
 // 全站统一导航：仅包含已实现路由的入口；展示时按用户角色/权限过滤。
 // 权限矩阵：模型/连接器不进普通用户管理页（仅通过 Skill/Agent 间接使用），审计对普通用户开放（仅本人记录）
 export const APP_NAV: NavItem[] = [
-  { to: "/chat", label: "会话管理" },
-  { to: "/agents", label: "智能体管理" },
-  { to: "/skills", label: "技能管理" },
-  { to: "/models", label: "模型管理", adminOnly: true },
-  { to: "/connectors", label: "连接器管理", adminOnly: true },
-  { to: "/webhooks", label: "Webhook 接入", adminOnly: true },
+  { to: "/chat", label: "会话管理", labelKey: "nav.chat" },
+  { to: "/agents", label: "智能体管理", labelKey: "nav.agents" },
+  { to: "/skills", label: "技能管理", labelKey: "nav.skills" },
+  { to: "/models", label: "模型管理", labelKey: "nav.models", adminOnly: true },
+  { to: "/connectors", label: "连接器管理", labelKey: "nav.connectors", adminOnly: true },
+  { to: "/webhooks", label: "Webhook 接入", labelKey: "nav.webhooks", adminOnly: true },
   // 审计为例外入口：普通用户可见，但后端自动限定为仅本人记录
-  { to: "/audit", label: "审计管理" },
-  { to: "/users", label: "用户管理", adminOnly: true },
+  { to: "/audit", label: "审计管理", labelKey: "nav.audit" },
+  { to: "/users", label: "用户管理", labelKey: "nav.users", adminOnly: true },
+  { to: "/settings", label: "偏好设置", labelKey: "nav.settings" },
 ];
 
 /**
@@ -63,7 +66,7 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
   const { user, logout } = useAuth();
   const items = visibleNav(nav, user);
   // 主题由 ThemeProvider 统一管理：同时驱动 antd design token 与手写 CSS 变量
-  const { mode: theme, toggle } = useThemeMode();
+  const { mode: theme, toggle, locale, setLocale, t } = useThemeMode();
   return (
     <header className="chat-topbar">
       <div className="chat-topbar-brand">
@@ -78,17 +81,26 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
             to={item.to}
             className={({ isActive }) => "chat-nav-link" + (isActive ? " active" : "")}
           >
-            {item.label}
+            {item.labelKey ? t(item.labelKey) : item.label}
           </NavLink>
         ))}
       </nav>
       <div className="chat-topbar-user">
         <button
           type="button"
+          className="chat-theme-toggle chat-locale-toggle"
+          onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
+          title={t("top.language")}
+          aria-label={t("top.language")}
+        >
+          <span className="chat-locale-label">{locale === "zh" ? "中" : "EN"}</span>
+        </button>
+        <button
+          type="button"
           className="chat-theme-toggle"
           onClick={toggle}
-          title={theme === "dark" ? "切换为浅色模式" : "切换为深色模式"}
-          aria-label={theme === "dark" ? "切换为浅色模式" : "切换为深色模式"}
+          title={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
+          aria-label={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
         >
           {theme === "dark" ? (
             // 太阳：当前深色，点击切浅色
@@ -99,8 +111,8 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
           )}
         </button>
         <span className="chat-user-avatar">{user?.username.slice(0, 1).toUpperCase() ?? "U"}</span>
-        <span className="chat-user-name">{user?.username ?? "未登录"}</span>
-        <button type="button" className="chat-btn-logout" onClick={() => void logout()}>退出</button>
+        <span className="chat-user-name">{user?.username ?? t("top.notLoggedIn")}</span>
+        <button type="button" className="chat-btn-logout" onClick={() => void logout()}>{t("top.logout")}</button>
       </div>
     </header>
   );

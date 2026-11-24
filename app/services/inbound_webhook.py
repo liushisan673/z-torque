@@ -4,7 +4,7 @@
 - 入站请求先 ACK 再异步执行，回调方不会因为模型/工具耗时而超时；
 - 幂等键落 ``zr_inbound_webhook_event``（webhook_id + event_id 唯一），重复投递不重复执行；
 - 会话按 ``webhook + conversation_key`` 派生 uuid5，同一外部会话始终落同一本地会话；
-- 配置了 ``reply_url`` 时，任务终态后把最终答复回写外部系统（如微信 Bridge 的 REST 发送接口）；
+- 配置了 ``reply_url`` 时，任务终态后把最终答复回写外部系统（外部服务提供的 REST 发送接口）；
   智能体自身已成功调用发送工具时不重复回写。
 """
 
@@ -63,16 +63,6 @@ _PATH_TOKEN_RE = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
 _PATH_RE = re.compile(r"^[A-Za-z0-9_.\[\]]{1,128}$")
 _DEFAULT_PLACEHOLDERS = ("[图片]", "[语音]", "[视频]", "[文件]")
 _MEDIA_KINDS = frozenset({"image", "audio", "video", "file"})
-# 这些工具成功执行即代表外部系统（微信侧）已经收到答复，自动回写要跳过避免重复
-_REPLY_SENT_TOOLS = frozenset(
-    {
-        "weixin.send_text",
-        "weixin.send_message",
-        "weixin.send_media",
-    }
-)
-
-
 def is_valid_path(path: str) -> bool:
     """配置项只允许点路径字符，避免把任意表达式当路径解析。"""
     return bool(_PATH_RE.fullmatch(path or ""))
@@ -367,7 +357,7 @@ class InboundWebhookService:
             try:
                 secret = SecretStore().decrypt(item.secret_ciphertext)
             except SecretStoreError:
-                logger.error("WECOM_ALERT inbound webhook secret cannot be decrypted webhook_id=%s", webhook_id)
+                logger.error("WEBHOOK_ALERT inbound webhook secret cannot be decrypted webhook_id=%s", webhook_id)
                 return None
             reply_token: str | None = None
             if item.reply_token_ciphertext:
@@ -375,7 +365,7 @@ class InboundWebhookService:
                     reply_token = SecretStore().decrypt(item.reply_token_ciphertext)
                 except SecretStoreError:
                     logger.error(
-                        "WECOM_ALERT inbound webhook reply token cannot be decrypted webhook_id=%s",
+                        "WEBHOOK_ALERT inbound webhook reply token cannot be decrypted webhook_id=%s",
                         webhook_id,
                     )
             return WebhookConfig(
@@ -514,7 +504,7 @@ class InboundWebhookService:
             )
         except Exception as exc:  # 后台任务必须自己收口，异常也要落到事件行
             logger.exception(
-                "WECOM_ALERT inbound webhook processing failed webhook_id=%s event_id=%s",
+                "WEBHOOK_ALERT inbound webhook processing failed webhook_id=%s event_id=%s",
                 config.id,
                 event_id,
             )
@@ -602,7 +592,7 @@ class InboundWebhookService:
     ) -> ChatResult:
         if self.model_gateway is None:
             raise ApiError("AI_MODEL_NOT_AVAILABLE", "model gateway is unavailable", 503)
-        # 与企微链路一致：在事件循环内直接 await，复用同一个模型/工具网关
+        # 与任务链路一致：在事件循环内直接 await，复用同一个模型/工具网关
         return await handle_chat(
             db,
             ctx=ctx,
@@ -677,8 +667,8 @@ class InboundWebhookService:
                 max_bytes=max_bytes,
                 mime_type=media.mime_type,
             )
-            # 入站媒体通常已在 Bridge 共享卷里，直接映射为容器内可发送路径；
-            # URL-only 来源则复制一份到共享卷，让后续 weixin.send_media 可用。
+            # 入站媒体通常已在外部服务共享卷里，直接映射为容器内可发送路径；
+            # URL-only 来源则复制一份到共享卷，供后续发送工具使用。
             bridge_path = bridge_path_for_source(media.fallback_source or media.source, settings)
             if bridge_path is None and settings.bridge_media_root is not None:
                 try:
@@ -807,11 +797,14 @@ class InboundWebhookService:
                 await self._reply_to_source(config, parsed, reply_text)
                 return
             await asyncio.sleep(1.0)
-        logger.warning("WECOM_ALERT inbound webhook task watch timeout task_id=%s", task_id)
+        logger.warning("WEBHOOK_ALERT inbound webhook task watch timeout task_id=%s", task_id)
 
     @staticmethod
     def _used_send_tool(db: Session, task_id: UUID) -> bool:
-        """智能体已成功调用发送工具时，外部系统已经收到答复，无需再回写。"""
+        """智能体已成功调用配置中的发送工具时，外部系统已收到答复，无需再回写。"""
+        tool_names = set(get_settings().inbound_webhook_reply_sent_tools)
+        if not tool_names:
+            return False
         count = db.scalar(
             select(func.count())
             .select_from(SkillExecutionLog)
@@ -820,7 +813,7 @@ class InboundWebhookService:
             .where(
                 SkillExecutionLog.task_id == task_id,
                 SkillExecutionLog.status == "SUCCEEDED",
-                Tool.name.in_(_REPLY_SENT_TOOLS),
+                Tool.name.in_(tool_names),
             )
         )
         return bool(count)
@@ -831,12 +824,12 @@ class InboundWebhookService:
         parsed: ParsedInbound | None,
         text: str | None,
     ) -> None:
-        """把最终答复 POST 回外部系统（微信 Bridge 的 /v1/messages/send）。"""
+        """把最终答复 POST 回外部系统（由 Webhook 的 reply_url 指定）。"""
         if not config.reply_url:
             return
         if parsed is None or not parsed.reply_account or not parsed.reply_peer:
             logger.warning(
-                "WECOM_ALERT inbound webhook reply skipped: account/peer not found webhook_id=%s account_path=%s peer_path=%s",
+                "WEBHOOK_ALERT inbound webhook reply skipped: account/peer not found webhook_id=%s account_path=%s peer_path=%s",
                 config.id,
                 config.reply_account_path,
                 config.reply_peer_path,
@@ -862,7 +855,7 @@ class InboundWebhookService:
                 response = await client.post(config.reply_url, json=payload, headers=headers)
         except httpx.HTTPError as exc:
             logger.warning(
-                "WECOM_ALERT inbound webhook reply error webhook_id=%s peer=%s error=%s",
+                "WEBHOOK_ALERT inbound webhook reply error webhook_id=%s peer=%s error=%s",
                 config.id,
                 parsed.reply_peer,
                 exc,
@@ -870,7 +863,7 @@ class InboundWebhookService:
             return
         if response.status_code >= 400:
             logger.warning(
-                "WECOM_ALERT inbound webhook reply failed webhook_id=%s peer=%s status=%s body=%s",
+                "WEBHOOK_ALERT inbound webhook reply failed webhook_id=%s peer=%s status=%s body=%s",
                 config.id,
                 parsed.reply_peer,
                 response.status_code,
@@ -903,7 +896,7 @@ class InboundWebhookService:
                     row.conversation_id = conversation_id
                 db.commit()
         except Exception:
-            logger.exception("WECOM_ALERT inbound webhook event update failed event_row_id=%s", event_row_id)
+            logger.exception("WEBHOOK_ALERT inbound webhook event update failed event_row_id=%s", event_row_id)
 
     async def wait_idle(self, timeout: float = 5.0) -> None:
         tasks = list(self._tasks)

@@ -16,6 +16,7 @@ from app.core.redaction import redact_mapping
 from app.core.servertime import ensure_utc
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import ModelGateway, ModelGatewayError, ModelMessage, ModelRequest
+from app.kernel.model_gateway.contracts import normalize_usage
 from app.kernel.ports.lock_provider import LockProvider
 from app.kernel.ports.memory_short import ShortTermMemoryProvider
 from app.kernel.ports.model_selector import ModelSelection, ModelSelector, resolve_model_selection
@@ -50,6 +51,7 @@ from app.services.context_builder import (
 from app.services.execution_loop import AgentExecutionLoop
 from app.services.model_limits import effective_max_tokens, model_capabilities
 from app.services.tool_mapping_builder import build_tool_mappings
+from app.services.usage_service import record_usage_summary
 
 logger = logging.getLogger("z_torque.task_worker")
 
@@ -320,7 +322,7 @@ class TaskRuntime:
             if task.conversation_id is not None and (conversation is None or trigger is None):
                 return self._fail_model_task(db, task, "AI_TASK_CONTEXT_INVALID", "task context is invalid")
             agent_version = db.get(AgentVersion, task.agent_version_id)
-            mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id)
+            mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id, user_id=task.owner_user_id)
             # 与 chat 页面流式链路一致：系统提示 + 绑定 skill 执行指令
             system_prompt = build_agent_system_prompt(db, agent_version, [m.skill_version_id for m in mappings.values() if m.skill_version_id])
             selection = self._resolve_selection(db, task.tenant_id, agent_version)
@@ -402,7 +404,7 @@ class TaskRuntime:
         if conversation is None or trigger is None:
             return self._fail_model_task(db, task, "AI_TASK_CONTEXT_INVALID", "task context is invalid")
         agent_version = db.get(AgentVersion, task.agent_version_id)
-        mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id)
+        mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id, user_id=task.owner_user_id)
         # 重放挂起的工具调用（checkpoint 合法性与幂等检查：已成功执行过则直接取日志结果）
         call = checkpoint.pending_call
         tool_id = UUID(str(call["tool_version_id"]))
@@ -483,6 +485,14 @@ class TaskRuntime:
         conversation 为 None 表示无会话任务（POST /tasks）：结果只落 task.result，
         不写消息、不更新会话、不触发会话摘要。
         """
+        agent_version = db.get(AgentVersion, task.agent_version_id) if task.agent_version_id else None
+        record_usage_summary(
+            db,
+            tenant_id=task.tenant_id,
+            agent_id=agent_version.agent_id if agent_version else None,
+            model=model or "unknown",
+            usage=response.usage,
+        )
         record_audit(
             db,
             tenant_id=task.tenant_id,
@@ -494,7 +504,7 @@ class TaskRuntime:
             detail={
                 "model": model,
                 "provider_request_id": response.provider_request_id,
-                "usage": response.usage.__dict__ if response.usage else None,
+                "usage": normalize_usage(response.usage),
                 # 耗时 = 任务认领（started_at）→ 本次调用结束，供审计页"耗时"列展示
                 "duration_ms": _duration_ms(task.started_at),
             },
@@ -513,7 +523,7 @@ class TaskRuntime:
                 db.add(result_message)
             db.flush()
             task.result_message_id = result_message.id
-        task.result = {"content": response.content, "usage": response.usage.__dict__ if response.usage else None}
+        task.result = {"content": response.content, "usage": normalize_usage(response.usage)}
         if trigger is not None and trigger.status != "COMPLETED":
             trigger.status = "COMPLETED"
         if conversation is not None:

@@ -1,14 +1,13 @@
-"""出站媒体：把 z-torque 的 File 导出到 Bridge 共享卷。
+"""出站媒体：把 z-torque 的 File 导出到外部服务共享卷。
 
-Bridge 容器只认两种媒体地址：容器内本地路径 ``filePath`` 或 http(s) ``url``。
-同机部署时，把 z-torque 文件复制到 Bridge 已挂载的共享目录，最稳定：
+外部服务通常只认两种媒体地址：容器内本地路径 ``filePath`` 或 http(s) ``url``。
+同机部署时，把 z-torque 文件复制到已挂载的共享目录最稳定：
 
     z-torque File (data/files/<storage_key>)
       -> 共享卷 outbound/<file_id>_<safe_name>
-      -> Bridge 容器内 /tmp/weixin-agent/media/outbound/<file_id>_<safe_name>
+      -> 外部服务容器内 <container_root>/outbound/<file_id>_<safe_name>
 
-导出的容器内路径可直接作为 ``weixin.send_media`` / ``weixin.send_message``
-的 ``url`` 参数（Bridge 会把本地绝对路径当作 filePath）。
+导出的容器内路径可作为外部服务发送工具的 ``url`` 参数；具体工具名由部署配置指定。
 """
 
 from __future__ import annotations
@@ -62,9 +61,9 @@ def _ensure_within(root: Path, target: Path) -> Path:
 
 
 def bridge_path_for_source(source: str | None, settings: Settings) -> str | None:
-    """把共享卷内的宿主机路径映射为 Bridge 容器内路径；不在共享卷时返回 None。
+    """把共享卷内的宿主机路径映射为外部服务容器内路径；不在共享卷时返回 None。
 
-    入站 Webhook 的媒体通常已经在 Bridge 自己的媒体卷里（inbound_media_roots），
+    入站 Webhook 的媒体通常已经在外部服务的媒体卷里（inbound_media_roots），
     优先映射到 ``bridge_media_inbound_container_root``，避免再复制一份；
     其他 z-torque 文件则映射到 ``bridge_media_container_root``（导出目录）。
     """

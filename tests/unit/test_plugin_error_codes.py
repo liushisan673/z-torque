@@ -5,7 +5,7 @@
 `app.kernel.audit.categories` 单一数据源，前端标签与后端筛选才可能一致。
 """
 
-from app.core.errors import PLUGIN_ERROR_CODES, PLUGIN_ERROR_STATUS
+from app.core.errors import PLUGIN_ERROR_CODES, PLUGIN_ERROR_STATUS, SKILL_WINDOWS_UNTRUSTED
 from app.kernel.audit.categories import (
     CATEGORY_A2A,
     CATEGORY_AUDIT,
@@ -19,12 +19,16 @@ EXPECTED_CODES = {
     "AI_SANDBOX_RESOURCE_EXCEEDED",
     "AI_SKILL_TIMEOUT",
     "AI_SKILL_FAILED",
+    "AI_SKILL_WINDOWS_UNTRUSTED",
     "AI_AUDIT_EXPORT_DENIED",
     "AI_AUDIT_EXPORT_TOO_LARGE",
     "AI_AUDIT_EXPORT_FAILED",
     "AI_AUDIT_ARCHIVE_FAILED",
     "AI_AUDIT_ARCHIVE_BUSY",
     "AI_AUDIT_ARCHIVE_KEY_MISSING",
+    "AI_MCP_OWNER_CONFLICT",
+    "AI_MCP_LIFECYCLE_UNAVAILABLE",
+    "AI_MCP_TOOL_REGISTER_FAILED",
     "AI_A2A_DISABLED",
     "AI_A2A_DENIED",
     "AI_A2A_TIMEOUT",
@@ -45,6 +49,7 @@ def test_every_plugin_error_code_has_http_status():
 def test_standard_http_status_mapping():
     # 拒绝 403 / 超限 413 / 资源 429 / 超时 504 / 上游故障 502 / 关闭 503
     assert PLUGIN_ERROR_STATUS["AI_SANDBOX_DENIED"] == 403
+    assert PLUGIN_ERROR_STATUS[SKILL_WINDOWS_UNTRUSTED] == 403
     assert PLUGIN_ERROR_STATUS["AI_SANDBOX_RESOURCE_EXCEEDED"] == 429
     assert PLUGIN_ERROR_STATUS["AI_AUDIT_EXPORT_TOO_LARGE"] == 413
     # 脚本自身失败/导出内部失败都不是"上游故障"，不得沿用 502

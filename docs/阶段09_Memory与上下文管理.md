@@ -758,7 +758,7 @@ Short-term Memory 至少应能表达：
 | `MEMORY_SHORT_SUMMARY_MESSAGE_THRESHOLD` | 短期摘要消息阈值，初始值 20       |
 | `MEMORY_SHORT_IDLE_MINUTES`              | 短期摘要空闲阈值，初始值 10 分钟  |
 | `MEMORY_SHORT_ENABLED`                   | 是否启用短期记忆                  |
-| `MEMORY_LONG_ENABLED`                    | 是否启用长期记忆，默认关闭        |
+| `MEMORY_LONG_ENABLED`                    | 是否启用长期记忆，默认开启（全量优化） |
 | `FILE_STORAGE_DIR`                       | 文件存储根目录，默认 `data/files` |
 | `FILE_MAX_UPLOAD_MB`                     | 单文件上传上限，默认 50 MB        |
 | `FILE_MAX_EXTRACTED_TEXT`                | 单文件允许提取的文本长度          |

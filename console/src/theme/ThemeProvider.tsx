@@ -10,16 +10,32 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { App as AntdApp, ConfigProvider } from "antd";
+import enUS from "antd/locale/en_US";
 import zhCN from "antd/locale/zh_CN";
+import { translate } from "../i18n/messages";
+import type { Locale } from "../i18n/messages";
 import { buildThemeConfig } from "./antdTheme";
 import type { ThemeMode } from "./antdTheme";
 
 const THEME_KEY = "z_torque_theme";
+const LOCALE_KEY = "z_torque_locale";
+const BACKGROUND_KEY = "z_torque_background";
+const FONT_KEY = "z_torque_font_scale";
+
+export type BackgroundChoice = "default" | "soft" | "warm";
+export type FontScale = "compact" | "normal" | "comfortable";
 
 interface ThemeContextValue {
   mode: ThemeMode;
   setMode: (mode: ThemeMode) => void;
   toggle: () => ThemeMode;
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+  background: BackgroundChoice;
+  setBackground: (background: BackgroundChoice) => void;
+  fontScale: FontScale;
+  setFontScale: (scale: FontScale) => void;
+  t: (key: string) => string;
 }
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
@@ -39,8 +55,21 @@ function hasExplicitChoice(): boolean {
   }
 }
 
+/** 读取有白名单的本地偏好；值非法时回退默认，不让脏 localStorage 破坏界面 */
+function storedChoice<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  try {
+    const value = localStorage.getItem(key);
+    return value && allowed.includes(value as T) ? (value as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [mode, setModeState] = useState<ThemeMode>(initialMode);
+  const [locale, setLocaleState] = useState<Locale>(() => storedChoice(LOCALE_KEY, ["zh", "en"] as const, "zh"));
+  const [background, setBackgroundState] = useState<BackgroundChoice>(() => storedChoice(BACKGROUND_KEY, ["default", "soft", "warm"] as const, "default"));
+  const [fontScale, setFontScaleState] = useState<FontScale>(() => storedChoice(FONT_KEY, ["compact", "normal", "comfortable"] as const, "normal"));
 
   /** 应用模式：先改 data-theme（CSS 变量立即生效），再持久化 */
   const apply = useCallback((next: ThemeMode, persist: boolean) => {
@@ -62,6 +91,39 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return next;
   }, [apply]);
 
+  const setLocale = useCallback((next: Locale) => {
+    setLocaleState(next);
+    try {
+      localStorage.setItem(LOCALE_KEY, next);
+    } catch {
+      /* localStorage 不可用时仅当前页生效 */
+    }
+  }, []);
+
+  const setBackground = useCallback((next: BackgroundChoice) => {
+    setBackgroundState(next);
+    try {
+      localStorage.setItem(BACKGROUND_KEY, next);
+    } catch {
+      /* 同上 */
+    }
+  }, []);
+
+  const setFontScale = useCallback((next: FontScale) => {
+    setFontScaleState(next);
+    try {
+      localStorage.setItem(FONT_KEY, next);
+    } catch {
+      /* 同上 */
+    }
+  }, []);
+
+  // 背景/字号通过 data-* 落到根元素，由 index.css 的 CSS 变量统一派生
+  useEffect(() => {
+    document.documentElement.dataset.bg = background;
+    document.documentElement.dataset.font = fontScale;
+  }, [background, fontScale]);
+
   // 用户未显式选择时跟随系统偏好变化
   useEffect(() => {
     if (hasExplicitChoice()) return;
@@ -72,12 +134,16 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     return () => mq.removeEventListener("change", onChange);
   }, [apply]);
 
-  const ctx = useMemo<ThemeContextValue>(() => ({ mode, setMode, toggle }), [mode, setMode, toggle]);
+  const t = useCallback((key: string) => translate(locale, key), [locale]);
+  const ctx = useMemo<ThemeContextValue>(
+    () => ({ mode, setMode, toggle, locale, setLocale, background, setBackground, fontScale, setFontScale, t }),
+    [mode, setMode, toggle, locale, setLocale, background, setBackground, fontScale, setFontScale, t],
+  );
   const themeConfig = useMemo(() => buildThemeConfig(mode), [mode]);
 
   return (
     <ThemeContext.Provider value={ctx}>
-      <ConfigProvider theme={themeConfig} locale={zhCN}>
+      <ConfigProvider theme={themeConfig} locale={locale === "en" ? enUS : zhCN}>
         {/* component={false}：不渲染包裹 div，避免破坏依赖 100vh 的现有布局 */}
         <AntdApp component={false}>{children}</AntdApp>
       </ConfigProvider>
@@ -85,9 +151,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** 取主题上下文；必须在 ThemeProvider 内使用 */
+/** 取主题/偏好上下文；必须在 ThemeProvider 内使用 */
 export function useThemeMode(): ThemeContextValue {
   const ctx = useContext(ThemeContext);
   if (!ctx) throw new Error("useThemeMode 必须在 ThemeProvider 内使用");
   return ctx;
 }
+
+/** 语义别名：新代码用 usePreferences 表达语言/背景/字号偏好 */
+export const usePreferences = useThemeMode;

@@ -84,6 +84,9 @@ class SkillVersionTool(UUIDModel):
     # 绑定角色（prerequisite/normal/followup）与依赖备注，仅软约束
     role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # P1a-4：结构化选择条件与依赖（均属绑定级软约束，不新增内核 Port）
+    selector: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    depends_on: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
 
 class SkillExecutionLog(TenantModel):

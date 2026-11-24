@@ -185,6 +185,7 @@ async def test_file_bridge_export_copies_to_shared_volume(baseline, tmp_path, mo
     monkeypatch.setattr(settings, "bridge_media_shared_root", tmp_path / "shared")
     monkeypatch.setattr(settings, "bridge_media_container_root", "/tmp/weixin-agent/media")
     monkeypatch.setattr(settings, "bridge_media_outbound_subdir", "outbound")
+    monkeypatch.setattr(settings, "bridge_media_send_tool", "ext.send_media")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client, "owner", "pass")
@@ -204,6 +205,7 @@ async def test_file_bridge_export_copies_to_shared_volume(baseline, tmp_path, mo
         data = exported.json()["data"]
         assert data["bridge_path"] == f"/tmp/weixin-agent/media/outbound/{file_id}_hello.txt"
         assert (tmp_path / "shared" / "outbound" / f"{file_id}_hello.txt").read_bytes() == b"hello"
+        assert data["send_media"]["tool"] == "ext.send_media"
         assert data["send_media"]["arguments"]["url"] == data["bridge_path"]
 
 

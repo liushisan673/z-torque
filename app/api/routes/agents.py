@@ -13,6 +13,7 @@ from app.kernel.agent.service import (
     copy_agent,
     create_agent,
     delete_agent,
+    ensure_system_agent,
     set_default_agent,
     update_agent,
 )
@@ -56,6 +57,9 @@ def _with_has_tools(db, agents: list) -> list[dict]:
 
 @router.get("", summary="获取智能体列表")
 async def list_agents(request: Request, include_archived: bool = False, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # 系统自带智能体：启动后新建的租户也能在首次打开会话页时立即拿到
+    ensure_system_agent(db, tenant_id=user.tenant_id)
+    db.commit()
     status_filter = Agent.status.in_(["ACTIVE", "ARCHIVED"]) if include_archived else Agent.status == "ACTIVE"
     rows = db.scalars(select(Agent).where(Agent.tenant_id == user.tenant_id, (Agent.owner_user_id == user.id) | (Agent.source_type == "OFFICIAL") | admin_owned_clause(Agent.owner_user_id, user.tenant_id), status_filter).order_by(Agent.created_at.desc())).all()
     return out(request, _with_has_tools(db, rows))

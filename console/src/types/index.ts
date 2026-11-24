@@ -59,9 +59,9 @@ export interface Message {
   id: string;
   conversation_id: string;
   sender_type: "USER" | "ASSISTANT" | "EXTERNAL" | string;
-  // 消息来源渠道：console / webhook / wecom（外部来源消息渲染独立样式）
+  // 消息来源渠道：console / webhook / api / external（外部来源消息渲染独立样式）
   source?: string | null;
-  // 外部发送者标识（企微 userId / 外部系统 key）
+  // 外部发送者标识（外部系统 key）
   external_sender?: string | null;
   content: string;
   content_parts: MessageContentPart[] | null;

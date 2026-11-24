@@ -64,8 +64,9 @@ class StreamableHttpMcpConnector:
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         return await self._request("tools/call", {"name": name, "arguments": arguments})
 
-    async def list_tools(self) -> Any:
-        return await self._request("tools/list", {})
+    async def list_tools(self, cursor: str | None = None) -> Any:
+        params = {"cursor": cursor} if cursor else {}
+        return await self._request("tools/list", params)
 
     async def close(self) -> None:
         if self.session_id:

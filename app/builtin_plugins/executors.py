@@ -1,4 +1,4 @@
-"""内置工具执行器插件（HTTP / DB_QUERY / MCP 占位 / MD_SCRIPT）。
+"""内置工具执行器插件（HTTP / DB_QUERY / MD_SCRIPT；MCP 经网关协商执行）。
 
 MOCK 执行器已从生产移除；测试替身见 tests/support/fakes.py。
 测试约定：无条件成功的执行器只能由测试 DI 局部 register，禁止回挂生产装配
@@ -38,13 +38,6 @@ _PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "http
 def _global_proxy_configured() -> bool:
     """全局出站代理是否已配置（PROXY_URL 会被写入进程环境，故统一看环境变量）。"""
     return any(os.environ.get(key) for key in _PROXY_ENV_KEYS)
-
-
-class McpExecutor:
-    tool_type = "MCP"
-
-    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
-        return ExecutionResult(status="FAILED", error_code="AI_MCP_UNAVAILABLE", error_message="MCP connector is not connected and negotiated")
 
 
 class _PinnedBackend(httpcore.SyncBackend):

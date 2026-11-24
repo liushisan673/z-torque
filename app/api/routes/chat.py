@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -11,15 +13,19 @@ from app.db.session import get_db
 from app.kernel.model_gateway import ModelRequest
 from app.kernel.ports.model_selector import snapshot_model_params
 from app.kernel.security_context import SecurityContext
+from app.kernel.task.service import create_task
 from app.models import Agent, AgentVersion, Conversation, Message
 from app.schemas.chat import ChatRequest, ChatResponse
 from app.services.chat_application import (
     ensure_conversation_title,
     handle_chat,
+    resolve_agent_mentions,
     resolve_chat_model_name,
 )
 from app.services.context_builder import build_agent_system_prompt, build_context
+from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens
+from app.services.stream_service import sse_event
 from app.services.stream_service import stream_chat as stream_chat_events
 from app.services.tool_mapping_builder import build_tool_mappings
 
@@ -28,7 +34,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 @router.post("", summary="发送对话消息")
 async def chat(payload: ChatRequest, request: Request, idempotency_key: str | None = Header(None, alias="Idempotency-Key"), ctx: SecurityContext = Depends(get_security_context), db: Session = Depends(get_db)):
-    result = await handle_chat(db, ctx=ctx, agent_id=payload.agent_id, conversation_id=payload.conversation_id, content=payload.message, content_parts=payload.content_parts, idempotency_key=idempotency_key, trace_id=request.state.trace_id, model_gateway=getattr(request.app.state, "model_gateway", None), skill_gateway=getattr(request.app.state, "skill_gateway", None), short_memory=request.app.state.port_registry.get("memory.short"))
+    result = await handle_chat(db, ctx=ctx, agent_id=payload.agent_id, conversation_id=payload.conversation_id, content=payload.message, content_parts=payload.content_parts, idempotency_key=idempotency_key, trace_id=request.state.trace_id, model_gateway=getattr(request.app.state, "model_gateway", None), skill_gateway=getattr(request.app.state, "skill_gateway", None), short_memory=request.app.state.port_registry.get("memory.short"), mentions=payload.mentions, generation_preset=payload.generation_preset)
     db.commit()
     response = ChatResponse(
         # CHAT：无任务直答（无工具智能体/无智能体降级），回复文本随响应返回
@@ -59,10 +65,28 @@ async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: s
     conversation = db.scalar(select(Conversation).where(Conversation.id == payload.conversation_id, Conversation.tenant_id == ctx.tenant_id, Conversation.owner_user_id == ctx.user_id))
     if conversation is None:
         raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
-    user_message = Message(tenant_id=ctx.tenant_id, conversation_id=conversation.id, sender_type="USER", content=payload.message, content_parts=payload.content_parts, status="PROCESSING")
+    content, mention_version_id, mention_agent_id = resolve_agent_mentions(
+        db, tenant_id=ctx.tenant_id, mentions=payload.mentions, content=payload.message,
+    )
+    user_message = Message(tenant_id=ctx.tenant_id, conversation_id=conversation.id, sender_type="USER", content=content, content_parts=payload.content_parts, status="PROCESSING")
     db.add(user_message)
     db.flush()
-    ensure_conversation_title(conversation, payload.message)
+    ensure_conversation_title(conversation, content)
+    if mention_version_id is not None and mention_agent_id is not None:
+        task = create_task(
+            db, ctx=ctx, agent_id=mention_agent_id, agent_version_id=mention_version_id,
+            idempotency_key=idempotency_key or str(user_message.id), request_summary=content,
+            conversation_id=conversation.id, trigger_message_id=user_message.id, trace_id=request.state.trace_id,
+            allow_conversation_agent_mismatch=True,
+        )
+        user_message.status = "COMPLETED"
+        conversation.last_message_at = datetime.now(timezone.utc)
+        db.commit()
+
+        async def mention_events():
+            yield sse_event(str(user_message.id), "message.task_created", {"task_id": str(task.id), "conversation_id": str(conversation.id), "status": "QUEUED"})
+
+        return StreamingResponse(mention_events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Trace-ID": request.state.trace_id})
     # 会话绑定智能体时注入其系统提示、绑定 skill 执行指令与工具定义（与任务链路一致）；
     # 模型流式返回纯文本=闲聊直答落库，返回 tool_calls=分流创建任务（见 stream_service.stream_chat）
     agent_version = None
@@ -70,7 +94,7 @@ async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: s
         agent = db.get(Agent, conversation.agent_id)
         if agent is not None and agent.current_published_version_id is not None:
             agent_version = db.get(AgentVersion, agent.current_published_version_id)
-    _, tools = build_tool_mappings(db, agent_version, ctx.tenant_id)
+    _, tools = build_tool_mappings(db, agent_version, ctx.tenant_id, user_id=ctx.user_id)
     # 调用参数：版本快照键优先（快照语义），未设置回退模型档案 max_output_tokens，再退全局兜底
     settings = get_settings()
     snapshot_cfg = agent_version.config_snapshot if agent_version is not None else None
@@ -81,6 +105,7 @@ async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: s
         gateway=gateway,
     )
     max_tokens = effective_max_tokens(db, tenant_id=ctx.tenant_id, model_identifier=model_name, snapshot_max_tokens=(snapshot_cfg or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
+    temperature, max_tokens = apply_generation_preset(payload.generation_preset, temperature, max_tokens)
     model_request = ModelRequest(
         trace_id=request.state.trace_id,
         conversation_id=conversation.id,

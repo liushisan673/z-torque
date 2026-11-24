@@ -1,9 +1,9 @@
 """knowledge.provider 的内置实现：SQLite FTS5 + 带坐标 chunk（Phase 0 §2.1）。
 
-- FTS5 external-content + 触发器由迁移建立；不支持 FTS5 时迁移建普通表，
-  这里切 LIKE 查询并把 mode 置 DEGRADED（由内核 service 写审计，不静默）。
-- 检索必须带 allowed_paths：路径经 resolve 后逐条比对白名单，禁止越界检索。
-- 写入只碰 ORM（doc/chunk）；FTS 同步交给触发器（降级模式应用侧双写）。
+- 索引由应用侧双写（无 external-content 触发器依赖）；FTS5 不可用时建同构
+  普通表并切 LIKE 查询，mode 置 DEGRADED（由内核 service 写审计，不静默）。
+- 文档检索必须带 allowed_paths：路径经 resolve 后逐条比对白名单，禁止越界检索。
+- 消息检索按服务端派生的 user_id 限会话属主，不暴露跨用户消息。
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def ensure_schema(bind: Any) -> bool:
         return False
     with bind.begin() as connection:
         connection.exec_driver_sql(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS zr_knowledge_fts USING fts5(chunk_id, text, tokenize='unicode61')"
+            "CREATE VIRTUAL TABLE IF NOT EXISTS zr_knowledge_fts USING fts5(tenant_id, chunk_id, text, tokenize='unicode61')"
         )
     return True
 
@@ -111,8 +111,8 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
             db.flush()
             rowid = db.execute(text("SELECT rowid FROM zr_knowledge_chunk WHERE id = :id"), {"id": str(chunk.id)}).scalar()
             db.execute(
-                text("INSERT INTO zr_knowledge_fts(rowid, chunk_id, text) VALUES (:rowid, :cid, :text)"),
-                {"rowid": rowid, "cid": str(chunk.id), "text": block.text},
+                text("INSERT INTO zr_knowledge_fts(rowid, tenant_id, chunk_id, text) VALUES (:rowid, :tenant, :cid, :text)"),
+                {"rowid": rowid, "tenant": str(tenant_id), "cid": str(chunk.id), "text": block.text},
             )
         return {"doc_id": str(doc.id), "chunks": len(kept), "truncated": truncated, "mode": self.mode()}
 
@@ -172,7 +172,8 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                     "d.path AS path, d.file_id AS file_id, bm25(zr_knowledge_fts) AS score "
                     "FROM zr_knowledge_fts JOIN zr_knowledge_chunk c ON c.id = zr_knowledge_fts.chunk_id "
                     "JOIN zr_knowledge_doc d ON d.id = c.doc_id "
-                    "WHERE zr_knowledge_fts MATCH :query AND d.tenant_id = :tenant_id AND d.status = 'ACTIVE' "
+                    "WHERE zr_knowledge_fts MATCH :query AND zr_knowledge_fts.tenant_id = :tenant_id "
+                    "AND d.tenant_id = :tenant_id AND d.status = 'ACTIVE' "
                     "ORDER BY score LIMIT :limit"
                 ),
                 {"query": _fts_query(query), "tenant_id": str(tenant_id), "limit": limit},
@@ -185,7 +186,8 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                     "d.path AS path, d.file_id AS file_id, 0.0 AS score "
                     "FROM zr_knowledge_fts f JOIN zr_knowledge_chunk c ON c.id = f.chunk_id "
                     "JOIN zr_knowledge_doc d ON d.id = c.doc_id "
-                    "WHERE f.text LIKE :pattern AND d.tenant_id = :tenant_id AND d.status = 'ACTIVE' "
+                    "WHERE f.tenant_id = :tenant_id AND f.text LIKE :pattern "
+                    "AND d.tenant_id = :tenant_id AND d.status = 'ACTIVE' "
                     "ORDER BY c.seq LIMIT :limit"
                 ),
                 {"pattern": pattern, "tenant_id": str(tenant_id), "limit": limit},
@@ -201,6 +203,50 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                 )
             )
         return results
+
+    def search_messages(self, db: Any, *, tenant_id: UUID, user_id: UUID | None, query: str, top_k: int = 5, conversation_id: UUID | None = None) -> list[KnowledgeChunk]:
+        return self.search_messages_db(
+            db, tenant_id=tenant_id, user_id=user_id, query=query,
+            top_k=top_k, conversation_id=conversation_id,
+        )
+
+    def search_messages_db(
+        self, db: Session, *, tenant_id: UUID, user_id: UUID | None, query: str,
+        top_k: int = 5, conversation_id: UUID | None = None,
+    ) -> list[KnowledgeChunk]:
+        """消息级全文检索：只查当前用户拥有的会话，不依赖 FTS5（短文本 LIKE 足够）。"""
+        text_value = query.strip()
+        if not text_value or user_id is None:
+            return []
+        escaped = text_value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = db.execute(
+            text(
+                "SELECT m.id, m.conversation_id, m.sender_type, m.content, m.created_at "
+                "FROM zr_message m JOIN zr_conversation c ON c.id = m.conversation_id "
+                "WHERE m.tenant_id = :tenant AND c.owner_user_id = :user "
+                "AND m.content LIKE :pattern ESCAPE '\\' "
+                "AND (:conv IS NULL OR m.conversation_id = :conv) "
+                "ORDER BY m.created_at DESC LIMIT :limit"
+            ),
+            {
+                "tenant": str(tenant_id), "user": str(user_id),
+                "pattern": f"%{escaped}%",
+                "conv": str(conversation_id) if conversation_id is not None else None,
+                "limit": max(1, min(int(top_k), 50)),
+            },
+        ).mappings().all()
+        return [
+            KnowledgeChunk(
+                source=f"message:{row['id']}", content=row["content"], score=0.0,
+                metadata={
+                    "source_type": "message", "message_id": str(row["id"]),
+                    "conversation_id": str(row["conversation_id"]),
+                    "sender_type": row["sender_type"],
+                    "created_at": str(row["created_at"]) if row["created_at"] else None,
+                },
+            )
+            for row in rows
+        ]
 
 
 class KnowledgePlugin:

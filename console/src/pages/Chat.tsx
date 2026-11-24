@@ -14,25 +14,28 @@ import { useNavigate } from "react-router-dom";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Attachments, Bubble, Conversations, Prompts, Sender } from "@ant-design/x";
-import { Avatar, Button, Checkbox, Input, Progress, Select, Tooltip } from "antd";
+import { Avatar, Button, Checkbox, Input, Progress, Tooltip } from "antd";
 import type { MenuProps } from "antd";
 import { HistoryOutlined, PaperClipOutlined, SearchOutlined } from "@ant-design/icons";
-import { ApiRequestError, downloadFile, fetchBlob, request, uploadFile } from "../services/api";
+import { ApiRequestError, downloadFile, request, uploadFile } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import { openGetStream, openPostStream } from "../services/sse";
 import type { Agent, ChatResponse, Confirmation, Conversation, FileContent, FileMetadata, FileStatus, Message, MessageContentPart, Task, TaskEvent } from "../types";
+import { MessageBubble } from "../components/MessageBubble";
 import { StatusTag, EmptyState, Alert } from "../components/ui";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
+import { CapabilityStrip, ComposerExtras, FileCompareDrawer } from "../components/Phase1Panels";
+import { ConversationPane } from "../components/ConversationPane";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { AppTopbar, APP_NAV, isAdminUser } from "../components/AppTopbar";
 import { useAuth } from "../stores/auth";
 // 内联执行块共享模块：与嵌入对话页（/embed/chat）共用类型/工具函数/渲染组件，保证实时链路展示一致
-import { HistoricalRun, RunBlock, eventLabel, localStep, payloadOf, TERMINAL, type ActiveRun, type TaskStep } from "./chatRun";
+import { RunBlock, eventLabel, localStep, payloadOf, TERMINAL, type ActiveRun, type TaskStep } from "./chatRun";
 
 // 会话记忆摘要（GET /memory 与 POST /memory/summarize 共用返回结构）
 interface MemorySummary {
@@ -61,93 +64,15 @@ const RENDER_STEP = 50;
 const CONV_KEY = "zt.chat.conversationId";
 const AGENT_KEY = "zt.chat.agentId";
 
-const MEDIA_PLACEHOLDER_RE = /^\[(图片|语音|视频|文件)\]$/;
-const MEDIA_KINDS = new Set(["image", "audio", "video"]);
+// @智能体：把结构化提及从输入框文本里分离，前端展示干净文本，后端按 mentions 直调目标智能体
+function parseAgentMentions(text: string): { text: string; mentions: Array<{ type: "agent"; id: string }> } {
+  const found = [...text.matchAll(/@\[agent:([0-9a-f-]{36})\]/gi)].map((match) => ({ type: "agent" as const, id: match[1] }));
+  const cleaned = text.replace(/@\[[^\]]*?\]/g, "").replace(/\s+/g, " ").trim();
+  return { text: cleaned || text, mentions: found.slice(0, 1) };
+}
 
 type SenderHandle = ComponentRef<typeof Sender>;
 
-// 外部来源消息（Webhook/企微）的徽标文案
-const EXTERNAL_SOURCE_LABELS: Record<string, string> = {
-  webhook: "Webhook",
-  wecom: "企微",
-  api: "API",
-};
-function externalSourceLabel(m: Message): string {
-  const label = EXTERNAL_SOURCE_LABELS[String(m.source ?? "")] ?? "外部";
-  // external_sender 存储格式为「Webhook接入名称:会话标识」，徽标只展示接入名称（冒号前的部分）；
-  // 企微来源的 sender 为 userId（无冒号），原样展示
-  const sender = m.external_sender ? m.external_sender.split(":")[0] : "";
-  return sender ? `${label} · ${sender}` : label;
-}
-
-// 外部来源消息头像：按渠道展示对应图标（Webhook=链接、企微=对话气泡、API=代码），替代固定"外"字
-function ExternalSourceAvatar({ source }: { source: string }) {
-  const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
-  if (source === "wecom") {
-    return (
-      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-        <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" {...stroke} />
-      </svg>
-    );
-  }
-  if (source === "api") {
-    return (
-      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-        <polyline points="16 18 22 12 16 6" {...stroke} />
-        <polyline points="8 6 2 12 8 18" {...stroke} />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" {...stroke} />
-      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" {...stroke} />
-    </svg>
-  );
-}
-
-function partKind(part: MessageContentPart): "image" | "file" | "audio" | "video" {
-  const kind = String(part.type ?? "");
-  return MEDIA_KINDS.has(kind) ? (kind as "image" | "audio" | "video") : "file";
-}
-
-// 媒体气泡：带鉴权取 blob 再转 object URL，卸载时 revoke，避免 <img> 401 与内存泄漏
-function MessageMedia({ part }: { part: MessageContentPart }) {
-  const kind = partKind(part);
-  const fileId = String(part.file_id ?? "");
-  const name = String(part.file_name ?? `附件 ${fileId.slice(0, 8)}`);
-  const [url, setUrl] = useState<string | null>(null);
-  const [error, setError] = useState(false);
-  useEffect(() => {
-    if (!fileId || !MEDIA_KINDS.has(kind)) return;
-    let active = true;
-    let objectUrl: string | null = null;
-    void (async () => {
-      try {
-        const blob = await fetchBlob(`/api/z-torque/files/${fileId}/raw`);
-        if (!active) return;
-        objectUrl = URL.createObjectURL(blob);
-        setUrl(objectUrl);
-      } catch {
-        if (active) setError(true);
-      }
-    })();
-    return () => {
-      active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [fileId, kind]);
-  if (!url) {
-    return <div className="chat-msg-media-state">{error ? "媒体加载失败" : "媒体加载中…"}</div>;
-  }
-  if (kind === "image") {
-    return <img className="chat-msg-media-image" src={url} alt={name} onClick={() => window.open(url, "_blank", "noopener")} />;
-  }
-  if (kind === "audio") {
-    return <audio className="chat-msg-media-audio" src={url} controls />;
-  }
-  return <video className="chat-msg-media-video" src={url} controls />;
-}
 
 /** 等待首个字/首步的计时：让用户看见「确实在跑」而不是一块空白（借鉴 DSH 的执行行） */
 function useWaitElapsed(startedAt: number | null, active: boolean): string {
@@ -162,135 +87,14 @@ function useWaitElapsed(startedAt: number | null, active: boolean): string {
   return `${Math.max(0, Math.round((now - startedAt) / 1000))}s`;
 }
 
-/** 一条消息气泡：Bubble 承担头像/气泡/头脚槽位，Markdown 与附件仍在内容槽内 */
-function MessageBubble({
-  m,
-  lastAssistantId,
-  busy,
-  copiedId,
-  onCopy,
-  onRegenerate,
-  onEdit,
-  onRetry,
-  onDownload,
-}: {
-  m: Message;
-  lastAssistantId: string | null;
-  busy: boolean;
-  copiedId: string | null;
-  onCopy: (text: string, key: string) => void;
-  onRegenerate: (m: Message) => void;
-  onEdit: (m: Message) => void;
-  onRetry: (m: Message) => void;
-  onDownload: (fileId: string, name: string) => void;
-}) {
-  const isUser = m.sender_type === "USER";
-  // 外部来源（Webhook/企微）消息：用户侧内容 + 独立虚线气泡与来源徽标
-  const isExternal = m.sender_type === "EXTERNAL";
-  const externalSource = isExternal ? String(m.source ?? "") : "";
-  const failed = !isUser && m.status === "FAILED";
-  const parts = Array.isArray(m.content_parts) ? m.content_parts.filter((p) => p?.file_id) : [];
-  const hasAttachment = parts.length > 0;
-  // 占位文本只在没有附件时兜底显示
-  const hidePlaceholder = hasAttachment && MEDIA_PLACEHOLDER_RE.test(m.content.trim());
-  const showActions =
-    failed ||
-    ((!isUser || isExternal) && !failed && Boolean(m.content)) ||
-    (isUser && !busy);
-
-  const body = (
-    <>
-      {isExternal && <div className="chat-msg-source-badge">{externalSourceLabel(m)}</div>}
-      {isUser || isExternal ? (
-        <div className="chat-plain">{hidePlaceholder ? "" : m.content}</div>
-      ) : (
-        <div className="chat-md">
-          <Markdown remarkPlugins={[remarkGfm]}>{m.content}</Markdown>
-        </div>
-      )}
-      {hasAttachment && (
-        <div className="chat-msg-files">
-          {parts.map((p, i) => {
-            if (partKind(p) !== "file") return <MessageMedia key={i} part={p} />;
-            const name = String(p.file_name ?? `附件 ${String(p.file_id).slice(0, 8)}`);
-            return (
-              <button key={i} className="chat-msg-file" type="button" onClick={() => onDownload(String(p.file_id), name)} title="下载附件">
-                {name}
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {failed && <div className="chat-msg-failed">发送失败{m.error_code ? `（${m.error_code}）` : ""}</div>}
-    </>
-  );
-
-  const footer = (
-    <div className="chat-msg-foot">
-      {showActions && (
-        <div className="chat-msg-actions">
-          {failed && (
-            <button className="chat-msg-action" type="button" disabled={busy} onClick={() => onRetry(m)}>
-              重试
-            </button>
-          )}
-          {!failed && m.content && (
-            <button className="chat-msg-action" type="button" onClick={() => onCopy(m.content, m.id)}>
-              {copiedId === m.id ? "已复制" : "复制"}
-            </button>
-          )}
-          {/* 重新生成：仅最新一条正常助手回复提供（外部来源消息不参与） */}
-          {!isUser && !isExternal && !failed && m.id === lastAssistantId && !busy && (
-            <button className="chat-msg-action" type="button" onClick={() => onRegenerate(m)} title="基于你上一条消息重新生成一份回答（原回答保留）">
-              重新生成
-            </button>
-          )}
-          {/* 编辑重发：用户消息可回填输入框修改后重发（后端无消息删除接口，原对话保留） */}
-          {isUser && !busy && (
-            <button className="chat-msg-action" type="button" onClick={() => onEdit(m)} title="将该消息内容填入输入框，修改后重新发送（原对话保留）">
-              编辑重发
-            </button>
-          )}
-        </div>
-      )}
-      <span className="chat-msg-meta">{new Date(m.created_at).toLocaleTimeString()}</span>
-    </div>
-  );
-
-  return (
-    <Bubble
-      placement={isUser ? "end" : "start"}
-      variant={isUser || isExternal ? "filled" : "borderless"}
-      shape="corner"
-      className={`chat-bubble${isUser ? " chat-bubble-user" : ""}${isExternal ? ` chat-bubble-external src-${externalSource}` : ""}`}
-      classNames={{ body: "chat-bubble-body", content: "chat-bubble-content", header: "chat-bubble-header", footer: "chat-bubble-footer", avatar: "chat-bubble-avatar" }}
-      avatar={
-        isUser ? (
-          <Avatar size={30} className="chat-avatar-user">我</Avatar>
-        ) : isExternal ? (
-          <span title={externalSourceLabel(m)}>
-            <Avatar size={30} className="chat-avatar-external">
-              <ExternalSourceAvatar source={externalSource} />
-            </Avatar>
-          </span>
-        ) : (
-          <Avatar size={30} className="chat-avatar-ai">Z</Avatar>
-        )
-      }
-      // 历史任务的执行链路内联在结论之上（与发生顺序一致，替代原来的右侧滑窗）
-      header={!isUser && !isExternal && m.task_id ? <HistoricalRun taskId={String(m.task_id)} /> : undefined}
-      content={body}
-      footer={footer}
-      footerPlacement={isUser ? "outer-end" : "outer-start"}
-    />
-  );
-}
 
 export function ChatPage() {
   const { user } = useAuth();
   const admin = isAdminUser(user);
   // 左右分栏宽度：拖拽把手调整左侧会话列表宽度，会话内保持，退出登录恢复默认
   const listPane = usePaneWidth("chat", "--chat-sidebar-w");
+  // 双会话工作区右侧宽度：与会话列表宽度独立记忆
+  const splitPane = usePaneWidth("chat-split", "--chat-split-right-w");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   // 会话标题客户端过滤（服务端分页/摘要能力待后端支持后再升级）
@@ -303,10 +107,16 @@ export function ChatPage() {
     [conversations, convFilter],
   );
   const [agentId, setAgentId] = useState<string>("");
+  // 系统自带智能体：新会话永远绑定到它，与当前查看的会话所绑定的智能体解耦
+  const [systemAgentId, setSystemAgentId] = useState<string>("");
+  const [generationPreset, setGenerationPreset] = useState("balanced");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  // 排队仅存当前页面状态，刷新后不保留（界面会明确提示）
+  const [sendQueue, setSendQueue] = useState<Array<{ text: string; parts: Array<{ file_id: string }> }>>([]);
+  const [splitOpen, setSplitOpen] = useState(false);
   const [loadingConv, setLoadingConv] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 模型未配置是「可修复的引导状态」而非普通错误：单独标记以渲染开通入口
@@ -390,10 +200,14 @@ export function ChatPage() {
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
   // 窄屏抽屉：原实现在 <768px 直接隐藏侧栏，手机上无法切换会话与智能体
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // 宽屏会话列表折叠：点击可隐藏/展开左侧会话列表，让对话区更宽
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const navigate = useNavigate();
   const { push: toast } = useToast();
   const senderRef = useRef<SenderHandle | null>(null);
+  // 能力条「去上传资料」复用输入框的附件选择器，避免再造一个上传入口
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadAgentsAndConversations = useCallback(async () => {
     setError(null);
@@ -407,10 +221,9 @@ export function ChatPage() {
       setAgents(a);
       setConversations(c);
       const usable = a.filter((x) => x.current_published_version_id);
-      // 智能体恢复：上次选中的仍在可用列表则优先，否则回退默认父智能体 / 第一个
-      const rememberedAgentId = readSelectedId(AGENT_KEY);
-      const rememberedAgent = rememberedAgentId ? usable.find((x) => x.id === rememberedAgentId) : null;
-      const def = rememberedAgent ?? usable.find((x) => x.is_default_parent) ?? usable[0];
+      // 系统自带智能体（平台内置，is_default_parent）优先；用户创建的智能体作为可被调用的专业智能体。
+      const def = usable.find((x) => x.is_default_parent) ?? usable[0];
+      if (def) setSystemAgentId(def.id);
       if (def && !agentId) setAgentId(def.id);
       // 会话恢复：跳转回来时优先回到上次会话；记忆为空串表示上次停留在新对话（保持空白）；
       // 从未有记录或记忆会话已不存在（删除/归档）则默认展示第一个，避免主区空白
@@ -830,12 +643,18 @@ export function ChatPage() {
 
   async function newConversation() {
     setError(null);
-    if (!agentId) return;
+    const target = systemAgentId || agentId;
+    if (!target) return;
     try {
       const c = await request<Conversation>("/api/z-torque/conversations", {
         method: "POST",
-        body: { agent_id: agentId },
+        // 不传 agent_id，让后端用 is_default_parent 兜底为系统自带智能体（前端 target 仅用于校验）
+        body: {},
       });
+      if (c.agent_id && c.agent_id !== target) {
+        // 后端绑定的应是系统智能体；若不一致以服务端为准并纠正展示
+        setAgentId(c.agent_id);
+      }
       setConversations((prev) => [c, ...prev]);
       selectConversation(c);
       setSidebarOpen(false);
@@ -863,17 +682,6 @@ export function ChatPage() {
     } catch (err) {
       setError(errorText(err, "重命名失败"));
     }
-  }
-
-  // 切换智能体：若当前有正在推进的执行链路（任务运行中 / 流式输出中），先确认再切换，
-  // 否则用户一次误选就会丢失正在进行的回答。
-  function handleAgentChange(nextId: string) {
-    const busy = (activeRun !== null && !TERMINAL.has(activeRun.status)) || streamingText !== null;
-    if (busy) {
-      setPendingAgentId(nextId);
-      return;
-    }
-    applyAgentSwitch(nextId);
   }
 
   function applyAgentSwitch(nextId: string) {
@@ -1082,7 +890,8 @@ export function ChatPage() {
   // opts.fromRetry：重试/重新生成，不清空输入框
   async function sendMessage(opts?: { text?: string; parts?: { file_id: string }[]; fromRetry?: boolean }) {
     const fromRetry = opts?.fromRetry === true;
-    const text = (opts?.text ?? input).trim();
+    const rawText = (opts?.text ?? input).trim();
+    const { text, mentions } = parseAgentMentions(rawText);
     if (!text || sending) return;
     setError(null);
     setModelMissing(false);
@@ -1108,7 +917,9 @@ export function ChatPage() {
     }
     try {
       if (!convId) {
-        const c = await request<Conversation>("/api/z-torque/conversations", { method: "POST", body: { agent_id: agentId || null } });
+        // 首条消息创建会话：不指定 agent_id，让后端绑定到系统自带智能体（自动派发）
+        const c = await request<Conversation>("/api/z-torque/conversations", { method: "POST", body: {} });
+        if (c.agent_id) setSystemAgentId(c.agent_id);
         setConversations((prev) => [c, ...prev]);
         convId = c.id;
         setConversationId(c.id);
@@ -1116,7 +927,7 @@ export function ChatPage() {
     } catch (err) {
       // 会话创建失败：移除乐观消息并恢复输入内容，便于用户重试
       setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-      if (!fromRetry) setInput(text);
+      if (!fromRetry) setInput(rawText);
       setError(errorText(err, "发送失败"));
       setModelMissing(isModelMissingError(err));
       setSending(false);
@@ -1131,10 +942,11 @@ export function ChatPage() {
         const resp = await request<ChatResponse>("/api/z-torque/chat", {
           method: "POST",
           body: {
-            agent_id: agentId || null,
             conversation_id: convId,
             message: text,
             content_parts: contentParts.length ? contentParts : null,
+            mentions,
+            generation_preset: generationPreset,
           },
           idempotencyKey,
         });
@@ -1158,7 +970,7 @@ export function ChatPage() {
       } catch (err) {
         // 发送失败：移除乐观消息并恢复输入内容，便于用户重试
         setMessages((prev) => prev.filter((m) => m.id !== optimistic.id));
-        if (!fromRetry) setInput(text);
+        if (!fromRetry) setInput(rawText);
         setError(errorText(err, "发送失败"));
         setModelMissing(isModelMissingError(err));
       } finally {
@@ -1182,7 +994,7 @@ export function ChatPage() {
     let resultSeen = false;
     streamRef.current = openPostStream(
       "/api/z-torque/chat/stream",
-      { agent_id: agentId || null, conversation_id: convId, message: text, content_parts: null, stream: true },
+      { conversation_id: convId, message: text, content_parts: null, stream: true, mentions, generation_preset: generationPreset },
       {
         onEvent: (msg) => {
           if (msg.event === "message.delta") {
@@ -1229,6 +1041,16 @@ export function ChatPage() {
     );
   }
 
+  const queueDrainingRef = useRef(false);
+  useEffect(() => {
+    if (sending || sendQueue.length === 0 || queueDrainingRef.current) return;
+    queueDrainingRef.current = true;
+    const [next, ...rest] = sendQueue;
+    setSendQueue(rest);
+    void sendMessage({ text: next.text, parts: next.parts, fromRetry: true }).finally(() => { queueDrainingRef.current = false; });
+    // sendMessage 每次渲染重建；只按队列与忙碌态驱动，避免重复出队。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sending, sendQueue]);
   // 失败重试：取失败助手消息之前最近一条用户消息（含附件）原样重发
   function retryFailedMessage(failed: Message) {
     const idx = messages.findIndex((x) => x.id === failed.id);
@@ -1395,7 +1217,7 @@ export function ChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeRun?.taskId, task?.id, taskRunning, runLive]);
 
-  // 后台入站消息（通用 Webhook / 企微）由后端 SSE 主动推送：收到后立刻刷新会话列表/当前会话，不再轮询。
+  // 后台入站消息（通用 Webhook）由后端 SSE 主动推送：收到后立刻刷新会话列表/当前会话，不再轮询。
   useEffect(() => {
     let disposed = false;
     let retryTimer: number | null = null;
@@ -1451,7 +1273,7 @@ export function ChatPage() {
                     },
                   ],
             );
-            // 后台 Webhook/企微触发的任务：像手动发送一样展示内联执行块并订阅任务事件流
+            // 后台 Webhook 触发的任务：像手动发送一样展示内联执行块并订阅任务事件流
             if ((payload.sender_type === "USER" || payload.sender_type === "EXTERNAL") && payload.pending_task_id) {
               startRun(payload.pending_task_id);
               subscribeTask(payload.pending_task_id, { convId: payload.conversation_id });
@@ -1556,42 +1378,23 @@ export function ChatPage() {
   return (
     <div className="chat-page">
       <AppTopbar nav={APP_NAV} />
-      <div className="chat-shell" style={listPane.style}>
+      <div className={`chat-shell${sidebarCollapsed ? " chat-shell-sidebar-collapsed" : ""}`} style={listPane.style}>
         {/* 窄屏遮罩：侧栏以抽屉形式覆盖（原实现直接隐藏，手机上无法切换会话/智能体） */}
         {sidebarOpen && <div className="chat-sidebar-mask" onClick={() => setSidebarOpen(false)} />}
 
-        {/* 左侧栏：Agent 选择 + 会话列表 */}
+        {/* 左侧栏：系统智能体（只读） + 会话列表。会话不再手动选择执行智能体 */}
         <aside className={`chat-sidebar${sidebarOpen ? " open" : ""}`}>
           <div className="chat-agent-picker">
-            <div className="chat-agent-label">当前智能体</div>
-            <Select
-              className="chat-agent-select"
-              value={agentId || undefined}
-              disabled={agents.length === 0}
-              placeholder={agents.length === 0 ? "加载中…" : "选择智能体"}
-              popupMatchSelectWidth={300}
-              onChange={(next) => {
-                if (next !== agentId) handleAgentChange(next);
-              }}
-              options={agents.map((a) => ({
-                value: a.id,
-                label: `${a.name}${a.is_default_parent ? "（默认）" : ""}`,
-                disabled: !a.current_published_version_id,
-              }))}
-              optionRender={(option) => {
-                const a = agents.find((x) => x.id === String(option.value));
-                const usable = Boolean(a?.current_published_version_id);
-                return (
-                  <div className="chat-agent-opt">
-                    <div className="chat-agent-opt-name">
-                      <span>{option.label}</span>
-                      {!usable && <span className="chat-agent-opt-tag">未发布</span>}
-                    </div>
-                    {a?.description && <div className="chat-agent-opt-desc">{a.description}</div>}
-                  </div>
-                );
-              }}
-            />
+            <div className="chat-agent-label">系统智能体</div>
+            <div className="chat-agent-select" title="系统智能体会自动把需求派发给合适的智能体；也可以用 @ 指定智能体">
+              {currentAgent?.name ?? (agents.length === 0 ? "加载中…" : "未配置系统智能体")}
+            </div>
+            {currentAgent && !currentAgent.current_published_version_id && (
+              <div className="chat-split-pane-error">系统智能体尚未发布版本，无法派发任务。请到智能体管理发布版本。</div>
+            )}
+            {currentAgent && currentAgent.current_published_version_id && agents.filter((a) => a.current_published_version_id && a.id !== currentAgent.id).length === 0 && (
+              <div className="chat-split-pane-error">还没有其他已发布智能体可供派发。请先创建并发布一个专业智能体。</div>
+            )}
             {agentMetaTag && (
               <div className="chat-agent-meta">
                 <span className={`chat-tag-mini ${agentMetaTag.cls}`}>{agentMetaTag.label}</span>
@@ -1673,11 +1476,12 @@ export function ChatPage() {
           )}
         </aside>
 
-        {/* 左右分栏拖拽把手 */}
-        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+        {/* 左右分栏拖拽把手（会话列表折叠时不显示） */}
+        {!sidebarCollapsed && <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />}
 
-        {/* 中间对话区 */}
-        <section className="chat-main">
+        {/* 中间对话区：分栏时左侧保留当前会话，右侧是可独立收发的另一会话 */}
+        <section className={`chat-main${splitOpen ? " chat-main-split" : ""}`} style={splitPane.style}>
+          <div className="chat-split-left">
           <div className="chat-header">
             <div className="chat-header-title-area">
               {/* 窄屏入口：侧栏抽屉（>768px 由 CSS 隐藏此按钮） */}
@@ -1690,12 +1494,30 @@ export function ChatPage() {
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
               </button>
+              {/* 宽屏会话列表折叠开关：点击隐藏/展开左侧会话列表（窄屏由抽屉 toggle 接管） */}
+              <button
+                className="chat-sidebar-collapse-toggle"
+                type="button"
+                onClick={() => setSidebarCollapsed((v) => !v)}
+                aria-label={sidebarCollapsed ? "展开会话列表" : "隐藏会话列表"}
+                title={sidebarCollapsed ? "展开会话列表" : "隐藏会话列表"}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  {sidebarCollapsed
+                    ? <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /><path d="M15 9l3 3-3 3" /></>
+                    : <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /><path d="M15 9l-3 3 3 3" /></>}
+                </svg>
+              </button>
               <span className="chat-header-title">{currentConversation?.title ?? "新会话"}</span>
               {currentAgent && <span className="chat-agent-chip">{currentAgent.name}</span>}
               {/* 执行中实时指示（对齐 chat.html 的 live-pill） */}
               {runLive && <span className="chat-live-pill"><span className="dot" />执行中</span>}
             </div>
             <div className="chat-header-actions">
+              <FileCompareDrawer conversationId={conversationId} />
+              <Button size="small" type="text" onClick={() => setSplitOpen((v) => !v)} title="多会话分栏">{splitOpen ? "收起分栏" : "分栏"}</Button>
+              {busy && <Button size="small" type="text" onClick={() => void stopActive()} title="停止当前回答">停止</Button>}
+              {sendQueue.length > 0 && <span className="chat-queue-badge" title="刷新页面后队列不会保留">排队中：{sendQueue.length}</span>}
               <Button size="small" type="text" onClick={() => void loadConfirmations()} title="查看确认记录">确认记录</Button>
               {task && (
                 <button
@@ -1709,6 +1531,9 @@ export function ChatPage() {
               )}
             </div>
           </div>
+
+          {/* P1b-UX-1：能力状态与今日用量直接横排在头部，文字优先，点击展开原因与处理动作 */}
+          <CapabilityStrip onUpload={() => uploadInputRef.current?.click()} />
 
           <div className="chat-messages" ref={messagesScrollRef}>
             {loadingConv ? (
@@ -1820,7 +1645,34 @@ export function ChatPage() {
           </div>
 
           {/* 输入区：Sender（内置 Enter 发送 / loading 时停止按钮） */}
-          <div className="chat-composer">
+          <div
+            className="chat-composer"
+            onDragOver={(e) => { if (Array.from(e.dataTransfer.types).includes("Files")) e.preventDefault(); }}
+            onDrop={(e) => {
+              const files = Array.from(e.dataTransfer.files);
+              if (files.length === 0) return;
+              e.preventDefault();
+              files.slice(0, 3).forEach((file) => void handleUpload(file));
+            }}
+          >
+            <ComposerExtras
+              agents={agents.filter((agent) => agent.current_published_version_id && agent.id !== agentId)}
+              input={input}
+              onInputChange={setInput}
+              preset={generationPreset}
+              onPresetChange={setGenerationPreset}
+            />
+            {sendQueue.length > 0 && (
+              <div className="chat-queue-list">
+                <span className="chat-queue-title">排队中：{sendQueue.length}（刷新页面后不保留）</span>
+                {sendQueue.map((item, index) => (
+                  <span className="chat-queue-item" key={`${index}-${item.text}`}>
+                    {index + 1}. {item.text.slice(0, 24)}{item.text.length > 24 ? "…" : ""}
+                    <button type="button" onClick={() => setSendQueue((prev) => prev.filter((_, i) => i !== index))}>取消</button>
+                  </span>
+                ))}
+              </div>
+            )}
             <Sender
               ref={senderRef}
               className="chat-sender"
@@ -1828,10 +1680,16 @@ export function ChatPage() {
               onChange={(next) => setInput(next)}
               onSubmit={(text) => {
                 if (!text.trim()) return;
+                if (busy) {
+                  const parts = attachments.map((file) => ({ file_id: file.id }));
+                  setSendQueue((prev) => [...prev, { text: text.trim(), parts }]);
+                  setInput("");
+                  setAttachments([]);
+                  toast("success", "已加入队列，将在当前回答完成后自动发送");
+                  return;
+                }
                 void sendMessage({ text });
               }}
-              loading={busy}
-              onCancel={() => void stopActive()}
               submitType="enter"
               autoSize={{ minRows: 1, maxRows: 6 }}
               disabled={agents.length === 0}
@@ -1872,6 +1730,7 @@ export function ChatPage() {
                   <label className="chat-upload-btn">
                     {uploading ? <span className="spinner" style={{ width: 15, height: 15 }} /> : <PaperClipOutlined />}
                     <input
+                      ref={uploadInputRef}
                       type="file"
                       hidden
                       onChange={(e) => {
@@ -1906,6 +1765,19 @@ export function ChatPage() {
               </div>
             )}
           </div>
+          </div>
+
+          {splitOpen && (
+            <>
+              <PaneResizer invert onPreview={splitPane.previewWidth} onCommit={splitPane.commitWidth} />
+              <ConversationPane
+                conversations={conversations}
+                currentId={conversationId}
+                onClose={() => setSplitOpen(false)}
+                generationPreset={generationPreset}
+              />
+            </>
+          )}
         </section>
 
         {/* 右侧 Task 执行过程面板：可折叠，等待确认时自动展开并高亮（文档 5.1） */}

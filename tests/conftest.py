@@ -30,9 +30,9 @@ def _test_database():
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE IF EXISTS zr_knowledge_fts"))
         try:
-            connection.execute(text("CREATE VIRTUAL TABLE zr_knowledge_fts USING fts5(chunk_id, text, tokenize='unicode61')"))
+            connection.execute(text("CREATE VIRTUAL TABLE zr_knowledge_fts USING fts5(tenant_id, chunk_id, text, tokenize='unicode61')"))
         except Exception:  # noqa: BLE001 - 无 FTS5 的 sqlite3 走同构普通表（LIKE 降级）
-            connection.execute(text("CREATE TABLE zr_knowledge_fts (chunk_id VARCHAR(36), text TEXT)"))
+            connection.execute(text("CREATE TABLE zr_knowledge_fts (tenant_id VARCHAR(36), chunk_id VARCHAR(36), text TEXT)"))
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
     yield
@@ -50,10 +50,18 @@ def _assembled_app_state():
     from app.main import app  # noqa: E402
 
     result = assemble(get_settings(), engine)
+    for object_key, object_value in result.objects.items():
+        setattr(app.state, object_key, object_value)
     app.state.port_registry = result.registry
     app.state.skill_gateway = result.skill_gateway
     # capabilities 依赖装配插件名派生能力面（与 main.py lifespan 一致）
     app.state.assembly_plugins = tuple(manifest.name for manifest in result.plugins)
+    # Phase 2 capability ladder 治理摘要（与 main.py lifespan 一致）
+    app.state.capability_governance = result.capability_governance
+    # Phase 2 统一调度器（测试 fixture 不启动长生命周期任务，只提供实例）
+    from app.kernel.local_scheduler import LocalScheduler  # noqa: E402
+
+    app.state.scheduler = LocalScheduler()
     # 决策（阶段13）：生产装配不再在“未配置模型”时降级为 MockModelGateway。
     # 测试需要可预测、不触网的模型行为，故在此显式注入 —— 这是 Mock 的唯一注入点，
     # 绝不出现在生产装配路径（app/builtin_plugins/plugins.py）。

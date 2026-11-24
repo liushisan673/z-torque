@@ -4,7 +4,7 @@ Revision ID: a8c2e5d7b1f3
 Revises: e7b3c1d9a2f4
 Create Date: 2026-11-20
 
-为 zr_message 增加来源渠道与外部发送者字段：外部系统（Webhook/企微）回调消息
+为 zr_message 增加来源渠道与外部发送者字段：外部系统（通用 Webhook）回调消息
 不再以 owner 用户身份落库，改用 sender_type=EXTERNAL 并携带 source/external_sender。
 两列均可空，存量数据不回填（读取时 NULL 视为 console 来源）。
 

@@ -237,7 +237,7 @@ def store_media(
     suffix = Path(safe_name).suffix.lower()
     head = _read_head(stream)
     if suffix not in _SUFFIX_BY_KIND[kind]:
-        # wechat-bot 等渠道可能落成 .bin（无扩展名），按魔术字节/声明 MIME 还原
+        # 外部渠道可能落成 .bin（无扩展名），按魔术字节/声明 MIME 还原
         inferred = detect_suffix(head, kind, mime_type)
         if inferred is None:
             raise ApiError("AI_FILE_TYPE_UNSUPPORTED", "attachment extension is not supported", 415)

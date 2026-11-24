@@ -472,7 +472,7 @@ export function WebhooksPage() {
           onChange={(e) => setForm((prev) => ({ ...prev, mediaPath: e.target.value }))}
           placeholder="message.media"
         />
-        <div className="field-help">留空表示纯文本 Webhook；wechat-bot 填 message.media。媒体文件仍受 INBOUND_MEDIA_ROOTS 白名单约束。</div>
+        <div className="field-help">留空表示纯文本 Webhook；按外部服务回调结构填写媒体数组字段的点路径。媒体文件仍受 INBOUND_MEDIA_ROOTS 白名单约束。</div>
       </div>
       {form.mediaPath.trim() && (
         <>
@@ -560,7 +560,7 @@ export function WebhooksPage() {
               onChange={(e) => setForm((prev) => ({ ...prev, replyPeerPath: e.target.value }))}
               placeholder="peer_id"
             />
-            <div className="field-help">从回调 JSON 中取回写目标用户（如微信 peer_id）。</div>
+            <div className="field-help">从回调 JSON 中取回写目标用户的字段路径。</div>
           </div>
         </div>
       </details>

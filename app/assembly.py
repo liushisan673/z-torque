@@ -24,6 +24,7 @@ from app.kernel.ports.specs import PORT_SPEC_BY_NAME
 from app.kernel.registry.active import bind_registry
 from app.kernel.registry.port_registry import AssemblyError, PortPriority, PortRegistry, PortState
 from app.kernel.skill_gateway import SkillGateway
+from app.plugin_sdk.capability import summarize_governance
 
 __all__ = ["AssemblyResult", "assemble", "expand_profile", "resolve_profile"]
 
@@ -52,6 +53,8 @@ class AssemblyResult:
     # 插件实例按装配顺序保留：lifespan 收尾时逆序调用可选的 shutdown(objects)，
     # 释放线程池 / 定时器（插件不得自行注册 signal 或 atexit）
     plugin_instances: tuple[Any, ...] = ()
+    # Phase 2 capability ladder：装配期汇总的能力声明治理摘要（main.py 转挂 app.state）
+    capability_governance: dict[str, Any] = field(default_factory=dict)
 
     def shutdown(self) -> None:
         for plugin in reversed(self.plugin_instances):
@@ -194,4 +197,5 @@ def assemble(
         plugins=tuple(plugin.manifest for plugin in [*selected, *external]),
         objects=dict(context.objects),
         plugin_instances=tuple([*selected, *external]),
+        capability_governance=summarize_governance([plugin.manifest for plugin in [*selected, *external]]),
     )

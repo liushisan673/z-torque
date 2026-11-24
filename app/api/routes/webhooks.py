@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import secrets
@@ -24,6 +25,7 @@ from app.core.servertime import iso_utc
 from app.db.session import get_db
 from app.kernel.audit.service import record_audit
 from app.models import Agent, InboundWebhook, InboundWebhookEvent, User
+from app.repositories import get_owned
 from app.schemas.webhook import WebhookCreateRequest, WebhookPatchRequest
 from app.security.permissions import require_permissions
 from app.security.secret_store import SecretStore
@@ -92,9 +94,12 @@ def _get_webhook(db: Session, user: User, webhook_id: UUID) -> InboundWebhook:
 
 
 def _require_agent(db: Session, user: User, agent_id: UUID) -> Agent:
-    agent = db.get(Agent, agent_id)
-    if agent is None or agent.tenant_id != user.tenant_id:
-        raise ApiError("AI_AGENT_NOT_FOUND", "agent not found", 404)
+    # Phase 2 属主收口：目标智能体必须属主可见（本人 / OFFICIAL / 管理员创建），
+    # 不允许把 webhook 指向同租户他人的私有智能体。
+    agent = get_owned(
+        db, Agent, resource_id=agent_id, tenant_id=user.tenant_id, user_id=user.id,
+        error_code="AI_AGENT_NOT_FOUND", label="agent",
+    )
     if agent.status != "ACTIVE" or agent.current_published_version_id is None:
         raise ApiError("AI_WEBHOOK_AGENT_UNAVAILABLE", "agent must be active and published", 409)
     return agent
@@ -163,6 +168,17 @@ async def create_webhook(payload: WebhookCreateRequest, request: Request, user: 
         summary="inbound webhook created",
         detail={"agent_id": str(item.target_agent_id), "auth_mode": item.auth_mode},
     )
+    # Phase 2：渠道凭据生命周期单独记账（只记密钥 hash 与渠道，不记明文/密文）
+    record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="CHANNEL_CREDENTIAL_STORED",
+        resource_type="SECRET",
+        resource_id=item.id,
+        summary="channel signing credential stored",
+        detail={"channel": "webhook", "ref_hash": hashlib.sha256(secret.encode("utf-8")).hexdigest()},
+    )
     db.commit()
     db.refresh(item)
     agent = db.get(Agent, item.target_agent_id)
@@ -228,6 +244,16 @@ async def rotate_secret(webhook_id: UUID, request: Request, user: ManageUser, db
         resource_type="WEBHOOK",
         resource_id=item.id,
         summary="inbound webhook secret rotated",
+    )
+    record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="CHANNEL_CREDENTIAL_ROTATED",
+        resource_type="SECRET",
+        resource_id=item.id,
+        summary="channel signing credential rotated",
+        detail={"channel": "webhook", "ref_hash": hashlib.sha256(secret.encode("utf-8")).hexdigest()},
     )
     db.commit()
     agent = db.get(Agent, item.target_agent_id)
@@ -300,7 +326,7 @@ async def receive_webhook(webhook_id: UUID, request: Request):
     except ValueError:
         return JSONResponse(status_code=400, content={"ok": False, "error": "invalid json"})
 
-    # Bridge 探测包（weixin.test_callback）：{"event": "callback.ping", ...} 无 message 字段，
+    # 外部服务探测包：{"event": "callback.ping", ...} 无 message 字段，
     # 验签通过即 ACK，不进入消息处理
     if isinstance(payload, dict) and payload.get("event") == "callback.ping":
         logger.info("inbound webhook ping acknowledged webhook_id=%s", webhook_id)

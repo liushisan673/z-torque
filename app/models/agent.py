@@ -54,7 +54,7 @@ class Agent(TenantModel):
     current_published_version_id: Mapped[UUID | None] = mapped_column(GUID(), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="ACTIVE")
     is_default_parent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
-    # M12-4：用户指定的默认智能体（区别于平台默认父 Agent）；会话页/企微桥接在无明确目标时优先使用。
+    # M12-4：用户指定的默认智能体（区别于平台默认父 Agent）；外部接入在无明确目标时优先使用。
     # 不建普通索引：低基数布尔列收益有限，查询走 is_default=1 的部分唯一索引
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 

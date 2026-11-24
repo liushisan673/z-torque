@@ -1,6 +1,6 @@
 """通用入站 Webhook：外部系统回调消息 → 指定智能体对话。
 
-与企微订阅不同，这里是租户自配置的通用接入点：
+这里是租户自配置的通用接入点，不绑定任何外部平台：
 - 每条 webhook 指向一个已发布智能体；
 - 外部系统按配置的签名方式调用 `POST /webhooks/{id}`；
 - 入站事件落 `zr_inbound_webhook_event` 做幂等，重复投递不会重复执行。
@@ -53,11 +53,11 @@ class InboundWebhook(TenantModel):
     media_file_name_path: Mapped[str] = mapped_column(String(64), nullable=False, default="file_name")
     # 占位文本（如 [图片]）不作为真实用户输入；为空时使用内置默认列表
     media_placeholder_texts: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
-    # 可选回写：任务终态后把最终答复 POST 回外部系统（如微信 Bridge 的 /v1/messages/send）
+    # 可选回写：任务终态后把最终答复 POST 回外部系统（地址由 Webhook 配置指定）
     reply_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     # 回写请求的 Bearer 令牌密文（SecretStore/Fernet），为空表示不鉴权
     reply_token_ciphertext: Mapped[str | None] = mapped_column(String(1024), nullable=True)
-    # 从入站 payload 取回写目标账号 / 用户的点路径（默认对齐 wechat-Bot 契约）
+    # 从入站 payload 取回写目标账号 / 用户的点路径（按外部服务契约配置）
     reply_account_path: Mapped[str] = mapped_column(String(128), nullable=False, default="account_id")
     reply_peer_path: Mapped[str] = mapped_column(String(128), nullable=False, default="peer_id")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

@@ -145,8 +145,13 @@ def test_transition_emits_observability_event():
 
 
 def test_build_context_uses_working_memory_and_long_memory(monkeypatch):
-    """memory.working 缓存上下文快照；memory.long 在开关打开时召回摘要。"""
+    """memory.working 缓存上下文快照；memory.long 在开关打开时召回摘要。
+
+    生产默认已全量开启长期记忆（working 分支不再使用）；这里临时关闭以保留
+    对 working 分支的回归覆盖，随后再显式开启验证长期记忆召回。
+    """
     tenant_id, user_id, agent_id, _ = _bootstrap()
+    monkeypatch.setattr(get_settings(), "memory_long_enabled", False)
     with SessionLocal.begin() as db:
         conversation = Conversation(tenant_id=tenant_id, owner_user_id=user_id, agent_id=agent_id, title="p2")
         db.add(conversation)

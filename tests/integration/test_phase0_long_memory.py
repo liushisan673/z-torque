@@ -145,3 +145,23 @@ async def test_capabilities_reports_long_memory_persistent(monkeypatch):
     memory = response.json()["data"]["memory"]
     assert memory["long_persistent"] is True
     assert memory["long_scopes"] == ["CONVERSATION", "AGENT", "USER"]
+
+
+def test_long_memory_enabled_by_default_and_recalled_in_real_context():
+    """默认开启：写入后经真实 context_builder 注入 prompt（不再需要测试里手动开开关）。"""
+    from app.services.context_builder import build_context
+
+    assert get_settings().memory_long_enabled is True
+    tenant_id, user_id, (agent_a, _), conversation_id = _bootstrap()
+    store = DbLongTermMemoryStore()
+    with SessionLocal.begin() as db:
+        store.remember_scoped(
+            db, tenant_id=tenant_id, user_id=user_id, agent_id=agent_a,
+            scope="AGENT", key="e2e:recall-token", value="e2e-recall-token-42",
+            source_ref="test:e2e-default-on",
+        )
+    with SessionLocal() as db:
+        rendered = "\n".join(
+            message.content or "" for message in build_context(db, db.get(Conversation, conversation_id))
+        )
+    assert "e2e-recall-token-42" in rendered

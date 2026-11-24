@@ -22,7 +22,6 @@ from app.builtin_plugins.db_executors import ConnectorDbExecutor
 from app.builtin_plugins.executors import (
     DbQueryExecutor,
     HttpExecutor,
-    McpExecutor,
     MdSkillScriptExecutor,
 )
 from app.builtin_plugins.identity_provider import IdentityProviderPlugin
@@ -37,6 +36,7 @@ from app.builtin_plugins.manifest import (
     validate_manifest,
 )
 from app.builtin_plugins.mcp import StdioServerRegistry, make_http_connector
+from app.builtin_plugins.mcp_lifecycle import MCP_LIFECYCLE_KEY, McpLifecycleService
 from app.builtin_plugins.model_gateway import (
     ModelRoutingGateway,
     OpenAICompatibleGateway,
@@ -56,6 +56,8 @@ from app.kernel.plugin_guard import GuardedModelGateway, PluginGuardRegistry
 from app.kernel.ports.specs import PORT_SPEC_BY_NAME
 from app.kernel.registry.port_registry import AssemblyError
 from app.kernel.skill_gateway import SkillGateway
+from app.plugin_sdk import CapabilityDeclaration, CapabilityLevel
+from app.plugin_sdk.contract import SKILL_GATEWAY_KEY
 
 logger = logging.getLogger("z_torque.plugins")
 
@@ -129,7 +131,7 @@ class ModelProviderPlugin:
 class SkillExecutorPlugin:
     manifest = PluginManifest(
         name="skill_executors",
-        description="SkillGateway 与内置工具执行器（HTTP/DB_QUERY/DB_SQL/MD_SCRIPT/MCP 占位；MOCK 仅测试 DI）",
+        description="SkillGateway 与内置工具执行器（HTTP/DB_QUERY/DB_SQL/MD_SCRIPT；MCP 经网关协商执行；MOCK 仅测试 DI）",
         provides=("skill.executor",),
         requires=("authz.provider",),
         permissions=("skill.execute", "tool.execute", "db.query"),
@@ -155,7 +157,6 @@ class SkillExecutorPlugin:
         gateway.register(HttpExecutor())
         gateway.register(DbQueryExecutor(engine))
         gateway.register(ConnectorDbExecutor())
-        gateway.register(McpExecutor())
         gateway.register(MdSkillScriptExecutor())
         sdk.expose_skill_gateway(gateway)
         sdk.register_port("skill.executor", lambda: gateway, label="builtin_skill_gateway")
@@ -168,6 +169,10 @@ class McpConnectorPlugin:
         provides=("connector",),
         requires=("skill.executor",),
         permissions=("connector.manage",),
+        published_services=(MCP_LIFECYCLE_KEY,),
+        capabilities=(
+            CapabilityDeclaration("mcp.lifecycle", CapabilityLevel.NARROW_EXTENSION, "窄扩展 connector：分页发现 + 白名单登记"),
+        ),
     )
 
     def contribute(self, sdk: PluginSdk) -> None:
@@ -175,6 +180,9 @@ class McpConnectorPlugin:
         sdk.attach_stdio_registry(registry)
         service = McpConnectorService(make_http_connector, registry)
         sdk.register_port("connector", lambda: service, label="builtin_mcp(http+stdio)")
+        # 领域服务共享给 API 层：不新增内核 Port，装配根会把它转挂 app.state
+        lifecycle = McpLifecycleService(sdk.shared(SKILL_GATEWAY_KEY))
+        sdk.publish(MCP_LIFECYCLE_KEY, lifecycle)
 
 
 class McpConnectorService:

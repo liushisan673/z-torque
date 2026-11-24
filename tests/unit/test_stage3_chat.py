@@ -112,9 +112,10 @@ def test_child_agent_delegation_uses_mapping_builder(monkeypatch):
 
     calls: dict = {}
 
-    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False):
+    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False, user_id=None):
         calls["version"] = version
         calls["exclude_requires_confirmation"] = exclude_requires_confirmation
+        calls["user_id"] = user_id
         return {}, []  # 无工具 → 走 generate 分支
 
     monkeypatch.setattr(execution_loop, "build_tool_mappings", fake_builder)
@@ -158,8 +159,9 @@ def test_child_delegation_request_carries_snapshot_model_params(monkeypatch):
 
     captured: dict = {}
 
-    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False):
+    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False, user_id=None):
         captured["exclude_requires_confirmation"] = exclude_requires_confirmation
+        captured["user_id"] = user_id
         return {}, []  # 无工具 → 走 generate 分支
 
     monkeypatch.setattr(execution_loop, "build_tool_mappings", fake_builder)
@@ -258,7 +260,7 @@ def test_trigger_alias_mapping_and_conflict():
 
 
 def test_external_trigger_message_can_create_task():
-    """阶段12：外部来源（Webhook/企微）EXTERNAL 消息同样可触发任务，且携带 source/external_sender。"""
+    """阶段12：外部来源（通用 Webhook）EXTERNAL 消息同样可触发任务，且携带 source/external_sender。"""
     with SessionLocal() as db:
         tenant, user, agent, version, conversation = _fixture(db)
         external = Message(tenant_id=tenant.id, conversation_id=conversation.id, sender_type="EXTERNAL", source="webhook", external_sender="demo:conv-1", content="run", status="PROCESSING")

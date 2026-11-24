@@ -23,6 +23,7 @@ from app.models.tool_skill import (
     Tool,
     ToolVersion,
 )
+from app.models.usage_summary import UsageSummary as UsageSummary
 from app.models.webhook import InboundWebhook, InboundWebhookEvent
 
 # 插件自有表（AuditExportJob / AuditExportShard / AuditArchiveBatch）不在此处导出：

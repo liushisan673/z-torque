@@ -14,7 +14,14 @@ from __future__ import annotations
 from app.builtin_plugins.audit_export_archive.archiver import AuditArchiveService
 from app.builtin_plugins.audit_export_archive.config import AuditExportConfig
 from app.builtin_plugins.audit_export_archive.jobs import AuditExportService
-from app.plugin_sdk import AUDIT_READ_PERMISSION, ENGINE_PERMISSION, AssemblyError, PluginManifest
+from app.plugin_sdk import (
+    AUDIT_READ_PERMISSION,
+    ENGINE_PERMISSION,
+    AssemblyError,
+    CapabilityDeclaration,
+    CapabilityLevel,
+    PluginManifest,
+)
 
 SERVICE_AUDIT_EXPORT = "audit_export_service"
 SERVICE_AUDIT_ARCHIVE = "audit_archive_service"
@@ -29,6 +36,10 @@ class AuditExportArchivePlugin:
         # 仅自有 zr_audit_export_* / zr_audit_archive_* 表；审计事件数据只走 sdk.read_audit
         permissions=(ENGINE_PERMISSION, AUDIT_READ_PERMISSION),
         read_audit=True,
+        published_services=(SERVICE_AUDIT_EXPORT, SERVICE_AUDIT_ARCHIVE),
+        capabilities=(
+            CapabilityDeclaration("audit.export", CapabilityLevel.EXISTING_CONTRACT, "经 audit.read / object.store 现有契约导出与归档审计"),
+        ),
         # 结构化 JSON Schema：装配期按 Settings 投影校验（类型/枚举/必填）；
         # 数值边界与跨字段约束（chunk <= max_rows、strict 模式需密钥）在 AuditExportConfig.validate()。
         config_schema={

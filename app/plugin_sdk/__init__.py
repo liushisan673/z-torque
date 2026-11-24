@@ -16,6 +16,13 @@
 """
 
 from app.plugin_sdk.audit import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, AuditQuery, AuditRecord
+from app.plugin_sdk.capability import (
+    CAPABILITY_LEVELS,
+    CapabilityDeclaration,
+    CapabilityLevel,
+    summarize_governance,
+    validate_capability_declarations,
+)
 from app.plugin_sdk.context import SecurityContext
 from app.plugin_sdk.contract import (
     AUDIT_READ_PERMISSION,
@@ -55,6 +62,9 @@ from app.plugin_sdk.ports import (
 
 __all__ = [
     "AUDIT_READ_PERMISSION",
+    "CAPABILITY_LEVELS",
+    "CapabilityDeclaration",
+    "CapabilityLevel",
     "ENGINE_PERMISSION",
     "MAX_PAGE_SIZE",
     "DEFAULT_PAGE_SIZE",
@@ -90,6 +100,8 @@ __all__ = [
     "TimestampMixin",
     "is_structured_config_schema",
     "project_plugin_config",
+    "summarize_governance",
+    "validate_capability_declarations",
     "validate_manifest",
     "validate_module",
     "validate_plugin_config",
