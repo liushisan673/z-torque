@@ -25,7 +25,7 @@ def safe_function_name(name: str) -> str:
 @dataclass(frozen=True)
 class ToolMapping:
     model_name: str
-    skill_version_id: UUID
+    skill_version_id: UUID | None
     tool_version_id: UUID | None
     input_schema: dict[str, Any]
     # 非空表示这是委派工具：skill_version_id 字段复用为子智能体版本 ID，执行时走子智能体而非 skill
