@@ -361,9 +361,9 @@ class AgentExecutionLoop:
 
         settings = get_settings()
         if delegation_depth >= settings.delegation_max_depth:
-            return _error("delegation depth exceeded")
+            return _error("delegation depth exceeded", "AI_A2A_DEPTH_EXCEEDED")
         if not task_text:
-            return _error("delegated task text is empty")
+            return _error("delegated task text is empty", "AI_A2A_ROUTE_FAILED")
         # 站内 A2A 是新请求的发现路由：执行前再次校验当前发布版和用户可见性。
         # 显式父子委派则遵守父 AgentVersion 快照白名单，允许执行快照固定的旧发布版本；
         # 不在这里重复应用目录可见性规则，否则会破坏管理员显式配置的跨属主子 Agent 授权。
