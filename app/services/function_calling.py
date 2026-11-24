@@ -32,6 +32,8 @@ class ToolMapping:
     child_agent_version_id: UUID | None = None
     # 非空表示这是站内 A2A 派发工具：执行时把任务交给该智能体版本，复用子执行链路
     dispatch_agent_version_id: UUID | None = None
+    # 非空表示这是受控路由工具；只能从服务端生成的候选 AgentVersion 集合中选择。
+    dispatch_candidate_ids: tuple[UUID, ...] | None = None
     # 工具原始名；模型可能按系统提示直接输出原名而非 ASCII 别名
     original_name: str | None = None
 
