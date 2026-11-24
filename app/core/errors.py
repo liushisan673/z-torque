@@ -68,8 +68,6 @@ PLUGIN_ERROR_CODES = {
     "AI_A2A_PEER_UNAVAILABLE",
     "AI_A2A_DEPTH_EXCEEDED",
     "AI_A2A_ROUTE_FAILED",
-    "AI_A2A_DISPATCH_LIMIT",
-    "AI_A2A_CHILD_FAILED",
 }
 
 # 错误码 → 默认 HTTP 状态码（§8 表；实现抛错时若显式给 status_code 以显式为准）
@@ -95,8 +93,6 @@ PLUGIN_ERROR_STATUS: dict[str, int] = {
     "AI_A2A_PEER_UNAVAILABLE": 503,
     "AI_A2A_DEPTH_EXCEEDED": 400,
     "AI_A2A_ROUTE_FAILED": 404,
-    "AI_A2A_DISPATCH_LIMIT": 409,
-    "AI_A2A_CHILD_FAILED": 502,
 }
 
 # 语义常量：调用点用常量而非字面量，拼写错误在 import 期即暴露
