@@ -394,7 +394,7 @@ class AgentExecutionLoop:
             seen: set[UUID] = set()
             instructions: list[str] = []
             for m in mappings.values():
-                if m.child_agent_version_id is not None or m.skill_version_id in seen:
+                if m.child_agent_version_id is not None or m.skill_version_id is None or m.skill_version_id in seen:
                     continue
                 seen.add(m.skill_version_id)
                 sv = db.get(_SV, m.skill_version_id)
