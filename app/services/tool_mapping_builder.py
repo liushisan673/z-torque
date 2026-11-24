@@ -139,25 +139,37 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             mappings[alias] = ToolMapping(alias, child_ver_id, None, schema, child_agent_version_id=child_ver_id)
             desc = f"委派给子智能体「{child_agent.name}」独立处理任务：{(child_agent.description or '').strip()}".rstrip("：")[:512]
             tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
-    # 站内 A2A：被标记为用户默认的智能体作为系统智能体，把所有已发布智能体暴露为派发工具。
-    # 只对系统智能体生效，普通智能体（含默认父）的工具集合完全不变。
+    # 站内 A2A：仅系统默认父智能体可发现并派发专业 Agent。
+    # 只暴露 Agent 当前发布版本，历史 PUBLISHED 版本继续保留给旧任务快照，
+    # 但不得作为新请求的路由候选，避免同一 Agent 重复出现在工具目录。
     system_agent = db.get(Agent, agent_version.agent_id)
-    # 系统自带智能体（is_default_parent）才有派发能力；用户 is_default 仅表示个人默认智能体，
-    # 不应获得跨智能体调度权限，避免普通智能体被误当成系统智能体。
     if system_agent is not None and system_agent.is_default_parent and not exclude_requires_confirmation:
-        candidates = db.query(AgentVersion).filter(
-            AgentVersion.tenant_id == tenant_id,
-            AgentVersion.status == "PUBLISHED",
-            AgentVersion.id != agent_version.id,
-        ).all()
+        candidate_query = (
+            select(AgentVersion)
+            .join(Agent, Agent.id == AgentVersion.agent_id)
+            .where(
+                AgentVersion.tenant_id == tenant_id,
+                AgentVersion.status == "PUBLISHED",
+                Agent.current_published_version_id == AgentVersion.id,
+                Agent.status == "ACTIVE",
+                Agent.id != system_agent.id,
+            )
+        )
+        # 用户可见性与任务/会话入口保持一致：本人、官方、管理员创建。
+        # 无用户上下文的内核调用仅允许发现官方 Agent，默认拒绝暴露用户私有资源。
+        if user_id is not None:
+            candidate_query = candidate_query.where(visible_owner_clause(Agent, tenant_id, user_id))
+        else:
+            candidate_query = candidate_query.where(Agent.source_type == "OFFICIAL")
+        candidates = db.scalars(candidate_query).all()
         for target in candidates:
             target_agent = db.get(Agent, target.agent_id)
-            if target_agent is None or target_agent.status != "ACTIVE":
+            if target_agent is None:
                 continue
             alias = f"call_agent_{hashlib.md5(str(target.id).encode('utf-8')).hexdigest()[:12]}"
             if alias in mappings:
                 continue
-            schema = {"type": "object", "properties": {"task": {"type": "string", "description": f"交给「{target_agent.name}」完整处理的任务描述，需包含该智能体所需的全部上下文"}}, "required": ["task"]}
+            schema = {"type": "object", "properties": {"task": {"type": "string", "description": f"交给「{target_agent.name}」完整处理的任务描述，必须包含完成任务所需的目标、约束、相关上下文和输出要求"}}, "required": ["task"]}
             mappings[alias] = ToolMapping(alias, target.id, None, schema, dispatch_agent_version_id=target.id)
             desc = f"调用智能体「{target_agent.name}」处理任务：{(target_agent.description or '').strip()}".rstrip("：")[:512]
             tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
