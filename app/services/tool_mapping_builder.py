@@ -162,7 +162,7 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             candidate_query = candidate_query.where(visible_owner_clause(Agent, tenant_id, user_id))
         else:
             candidate_query = candidate_query.where(Agent.source_type == "OFFICIAL")
-        candidates = db.scalars(candidate_query.order_by(Agent.name, Agent.id).limit(20)).all()
+        candidates = db.scalars(candidate_query.order_by(Agent.name, Agent.id).limit(15)).all()
         route_options: list[dict[str, str]] = []
         candidate_ids: list[UUID] = []
         for target in candidates:
@@ -196,9 +196,9 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             candidate_ids.append(target.id)
             route_options.append({
                 "id": str(target.id),
-                "name": target_agent.name,
-                "description": (target_agent.description or "").strip()[:160],
-                "skills": capability_text[:220],
+                "name": target_agent.name[:80],
+                "description": (target_agent.description or "").strip()[:80],
+                "skills": capability_text[:120],
             })
         # 不把 N 个 Agent 暴露成 N 个独立执行工具。模型只看到一个结构化路由入口，
         # 并且 agent_version_id 使用服务端候选 ID 枚举约束，执行侧还会再次校验成员资格。
