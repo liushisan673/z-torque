@@ -54,7 +54,7 @@ def test_builtin_system_agent_exposes_dispatch_tool():
         assert len(dispatch) == 1
         assert dispatch[0].dispatch_candidate_ids == (target_version.id,)
         assert len([tool for tool in tools if tool["function"]["name"] == dispatch[0].model_name]) == 1\n        assert len([m for m in mappings.values() if m.dispatch_candidate_ids is not None]) == 1
-        assert dispatch[0].input_schema["required"] == ["agent_version_id", "task"]
+        assert dispatch[0].input_schema["required"] == ["agent_version_id", "task"]\n        assert dispatch[0].input_schema["properties"]["agent_version_id"]["enum"] == [str(target_version.id)]
 
     with SessionLocal.begin() as db:
         tenant_id, system_version, _ = _agents(db, system_parent=False)
