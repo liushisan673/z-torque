@@ -443,9 +443,11 @@ class AgentExecutionLoop:
                 .order_by(Message.created_at.desc())
                 .limit(6)
             )
-            if parent_task is not None and parent_task.trigger_message_id is not None:
-                history_query = history_query.where(Message.id != parent_task.trigger_message_id)
-            history = list(db.scalars(history_query).all())
+            trigger_message_id = getattr(parent_task, "trigger_message_id", None)
+            if trigger_message_id is not None:
+                history_query = history_query.where(Message.id != trigger_message_id)
+            history_result = db.scalars(history_query)
+            history = list(history_result.all()) if history_result is not None else []
             for history_message in reversed(history):
                 text = (history_message.content or "").strip()
                 if not text:
