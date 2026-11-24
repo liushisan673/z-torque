@@ -249,6 +249,7 @@ class AgentExecutionLoop:
                             child_agent_version_id=dispatch_target,
                             task_text=str(arguments.get("task", "")).strip(),
                             delegation_depth=delegation_depth,
+                            require_current_version=is_site_a2a,
                             cancellation_event=cancellation_event,
                             deadline_at=deadline_at,
                             task_id=task_id,
@@ -320,6 +321,7 @@ class AgentExecutionLoop:
         child_agent_version_id: UUID,
         task_text: str,
         delegation_depth: int,
+        require_current_version: bool = False,
         cancellation_event: asyncio.Event | None,
         deadline_at: datetime | None,
         task_id: UUID | None = None,
@@ -347,18 +349,22 @@ class AgentExecutionLoop:
         if not task_text:
             return _error("delegated task text is empty")
         # 执行时二次校验：候选构建后可能发生版本发布/归档/权限变化，不能只信任模型工具映射。
-        child = db.scalar(
+        child_query = (
             select(AgentVersion)
             .join(Agent, Agent.id == AgentVersion.agent_id)
             .where(
                 AgentVersion.id == child_agent_version_id,
                 AgentVersion.tenant_id == tenant_id,
                 AgentVersion.status == "PUBLISHED",
-                Agent.current_published_version_id == AgentVersion.id,
                 Agent.status == "ACTIVE",
                 visible_owner_clause(Agent, tenant_id, ctx.user_id),
             )
         )
+        # 站内 A2A 是新请求的发现路由，必须使用当前发布版；
+        # 显式父子委派则遵守父 AgentVersion 快照白名单，可继续执行快照固定的旧发布版。
+        if require_current_version:
+            child_query = child_query.where(Agent.current_published_version_id == AgentVersion.id)
+        child = db.scalar(child_query)
         if child is None:
             return _error("child agent version is not current, published, or visible", "AI_AGENT_NOT_FOUND")
         child_agent = db.get(Agent, child.agent_id)
