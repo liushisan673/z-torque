@@ -184,6 +184,7 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
                     or capability_skill is None
                     or capability_skill.status != "ACTIVE"
                     or (visible_skill_ids is not None and capability_skill.id not in visible_skill_ids)
+                    or (user_id is None and capability_skill.official is not True)
                 ):
                     continue
                 label = capability_skill.name
