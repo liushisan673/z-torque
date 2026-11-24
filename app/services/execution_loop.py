@@ -364,27 +364,30 @@ class AgentExecutionLoop:
             return _error("delegation depth exceeded")
         if not task_text:
             return _error("delegated task text is empty")
-        # 执行时二次校验：候选构建后可能发生版本发布/归档/权限变化，不能只信任模型工具映射。
-        child_query = (
-            select(AgentVersion)
-            .join(Agent, Agent.id == AgentVersion.agent_id)
-            .where(
-                AgentVersion.id == child_agent_version_id,
-                AgentVersion.tenant_id == tenant_id,
-                AgentVersion.status == "PUBLISHED",
-                Agent.status == "ACTIVE",
-                visible_owner_clause(Agent, tenant_id, ctx.user_id),
-            )
-        )
-        # 站内 A2A 是新请求的发现路由，必须使用当前发布版；
-        # 显式父子委派则遵守父 AgentVersion 快照白名单，可继续执行快照固定的旧发布版。
+        # 站内 A2A 是新请求的发现路由：执行前再次校验当前发布版和用户可见性。
+        # 显式父子委派则遵守父 AgentVersion 快照白名单，允许执行快照固定的旧发布版本；
+        # 不在这里重复应用目录可见性规则，否则会破坏管理员显式配置的跨属主子 Agent 授权。
         if require_current_version:
-            child_query = child_query.where(Agent.current_published_version_id == AgentVersion.id)
-        child = db.scalar(child_query)
+            child = db.scalar(
+                select(AgentVersion)
+                .join(Agent, Agent.id == AgentVersion.agent_id)
+                .where(
+                    AgentVersion.id == child_agent_version_id,
+                    AgentVersion.tenant_id == tenant_id,
+                    AgentVersion.status == "PUBLISHED",
+                    Agent.current_published_version_id == AgentVersion.id,
+                    Agent.status == "ACTIVE",
+                    visible_owner_clause(Agent, tenant_id, ctx.user_id),
+                )
+            )
+        else:
+            child = db.get(AgentVersion, child_agent_version_id)
+            if child is not None and (child.tenant_id != tenant_id or child.status != "PUBLISHED"):
+                child = None
         if child is None:
             return _error("child agent version is not current, published, or visible", "AI_AGENT_NOT_FOUND")
         child_agent = db.get(Agent, child.agent_id)
-        if child_agent is None:
+        if child_agent is None or child_agent.status != "ACTIVE":
             return _error("child agent is not available", "AI_AGENT_NOT_FOUND")
         mappings, tools = build_tool_mappings(db, child, tenant_id, exclude_requires_confirmation=True, user_id=ctx.user_id)
         # 与 chat 主路径一致：注入子智能体绑定 skill 的执行指令
