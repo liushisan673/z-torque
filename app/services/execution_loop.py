@@ -253,7 +253,7 @@ class AgentExecutionLoop:
                         child_result = {
                             "status": "SKIPPED",
                             "agent_version_id": str(dispatch_target),
-                            "error_code": "AI_A2A_DISPATCH_LIMIT",
+                            "error_code": "AI_A2A_ROUTE_FAILED",
                             "error_message": "本次任务已派发一个专业智能体；为避免重复调度，本次调用未执行。",
                         }
                     else:
@@ -351,7 +351,7 @@ class AgentExecutionLoop:
 
         tenant_id = ctx.tenant_id
 
-        def _error(message: str, code: str = "AI_A2A_CHILD_FAILED") -> dict[str, Any]:
+        def _error(message: str, code: str = "AI_A2A_PEER_UNAVAILABLE") -> dict[str, Any]:
             return {
                 "status": "FAILED",
                 "agent_version_id": str(child_agent_version_id),
@@ -508,7 +508,7 @@ class AgentExecutionLoop:
         except ApiError as exc:
             return _error(f"child agent execution failed: {exc.message}", exc.code)
         if not content or not content.strip():
-            return _error("child agent returned an empty response", "AI_A2A_CHILD_FAILED")
+            return _error("child agent returned an empty response", "AI_A2A_PEER_UNAVAILABLE")
         return {
             "status": "SUCCEEDED",
             "agent_version_id": str(child_agent_version_id),
