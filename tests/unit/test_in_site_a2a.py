@@ -7,7 +7,7 @@ from sqlalchemy import delete
 
 from app.db.session import SessionLocal
 from app.kernel.agent.service import ensure_system_agent
-from app.models import Agent, AgentVersion, Tenant
+from app.models import Agent, AgentVersion, Tenant, User
 from app.services.tool_mapping_builder import build_tool_mappings
 from tests.support.ddl import fk_off, fk_on
 
@@ -19,6 +19,7 @@ def cleanup():
         fk_off(db)
         db.execute(delete(AgentVersion))
         db.execute(delete(Agent))
+        db.execute(delete(User))
         db.execute(delete(Tenant))
         fk_on(db)
 
@@ -33,12 +34,14 @@ def _agents(db, *, system_parent: bool, user_default: bool = False):
     target_version = AgentVersion(tenant_id=tenant.id, agent_id=target.id, version_number=1, status="PUBLISHED", config_schema_version="1", config_snapshot={})
     db.add(target_version)
     db.flush()
+    target.current_published_version_id = target_version.id
     system = Agent(tenant_id=tenant.id, owner_user_id=None, name="系统智能体", description="路由需求", source_type="OFFICIAL", status="ACTIVE", is_default=user_default, is_default_parent=system_parent)
     db.add(system)
     db.flush()
     system_version = AgentVersion(tenant_id=tenant.id, agent_id=system.id, version_number=1, status="PUBLISHED", config_schema_version="1", config_snapshot={})
     db.add(system_version)
     db.flush()
+    system.current_published_version_id = system_version.id
     return tenant.id, system_version, target_version
 
 
@@ -46,7 +49,7 @@ def test_builtin_system_agent_exposes_dispatch_tool():
     """系统自带智能体（默认父）暴露派发工具，普通智能体不暴露。"""
     with SessionLocal.begin() as db:
         tenant_id, system_version, target_version = _agents(db, system_parent=True)
-        mappings, tools = build_tool_mappings(db, system_version, tenant_id)
+        mappings, tools = build_tool_mappings(db, system_version, tenant_id, user_id=uuid4())
         dispatch = [mapping for mapping in mappings.values() if mapping.dispatch_agent_version_id is not None]
         assert len(dispatch) == 1
         assert dispatch[0].dispatch_agent_version_id == target_version.id
@@ -57,6 +60,26 @@ def test_builtin_system_agent_exposes_dispatch_tool():
         tenant_id, system_version, _ = _agents(db, system_parent=False)
         mappings, _ = build_tool_mappings(db, system_version, tenant_id)
         assert [m for m in mappings.values() if m.dispatch_agent_version_id is not None] == []
+
+
+def test_dispatch_candidates_only_include_current_published_version():
+    """同一 Agent 的历史 PUBLISHED 版本不得作为第二个路由候选。"""
+    with SessionLocal.begin() as db:
+        tenant_id, system_version, target_version = _agents(db, system_parent=True)
+        historical = AgentVersion(
+            tenant_id=tenant_id,
+            agent_id=target_version.agent_id,
+            version_number=2,
+            status="PUBLISHED",
+            config_schema_version="1",
+            config_snapshot={},
+        )
+        db.add(historical)
+        db.flush()
+        # current_published_version_id 仍指向 target_version，historical 不应暴露。
+        mappings, _ = build_tool_mappings(db, system_version, tenant_id, user_id=uuid4())
+        dispatch = [m.dispatch_agent_version_id for m in mappings.values() if m.dispatch_agent_version_id]
+        assert dispatch == [target_version.id]
 
 
 def test_user_default_agent_does_not_get_dispatch_tool():
