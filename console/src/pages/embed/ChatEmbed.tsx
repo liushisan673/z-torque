@@ -223,14 +223,22 @@ export function ChatEmbedPage() {
     }
   }, []);
 
-  // 结论打字机：逐字上屏（与主 Chat 结论体验一致），完成后执行收尾
+  // 结论打字机：逐字上屏（与主 Chat 结论体验一致），完成后执行收尾。
+  // 节奏按长度自适应（阶段13 性能优化）：整段约 1.1s 播完，超长回答直接整段上屏，
+  // 避免"任务已经结束、用户还在等动画"的观感延迟。
   const startTypewriter = useCallback(
     (content: string, done: () => void) => {
       clearTypeTimer();
+      if (content.length > 4000) {
+        setResultText(content);
+        done();
+        return;
+      }
+      const step = Math.max(2, Math.ceil(content.length / 46));
       setResultText("");
       let i = 0;
       typeTimerRef.current = window.setInterval(() => {
-        i += 2;
+        i += step;
         if (i >= content.length) {
           setResultText(content);
           clearTypeTimer();

@@ -164,7 +164,14 @@ class AuditExportService:
 
     # ---- 生命周期 ----
     def start(self) -> None:
-        self.recover_interrupted()
+        # 单机首次安装：alembic 迁移可能尚未建表，此时装配插件不应让整个进程启动失败。
+        # 仅吞「no such table」类结构性缺失；真实查询故障仍原样抛出。
+        try:
+            self.recover_interrupted()
+        except Exception as exc:  # noqa: BLE001
+            message = str(exc).lower()
+            if "no such table" not in message and "doesn't exist" not in message:
+                raise
         with self._lock:
             if self._executor is None and not self._closed:
                 self._executor = ThreadPoolExecutor(max_workers=self._config.max_concurrency, thread_name_prefix="audit-export")

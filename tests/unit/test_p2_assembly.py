@@ -76,11 +76,11 @@ def test_sdk_publish_shared_roundtrip():
 # ---- ③ Module 装配层 ----
 
 
-def test_profile_community_expands_to_all_19_plugins():
+def test_profile_community_expands_to_all_builtin_plugins():
     expanded = expand_profile(PROFILE_COMMUNITY)
-    assert len(expanded) == 19
-    # v1.3：内置插件集合扩到 21（+audit_export_archive / a2a_gateway），但社区 Profile 不变
-    assert set(expanded) < {p.manifest.name for p in BUILTIN_PLUGINS}
+    # 2026-11-24 单一系统决策 + Phase 0 §2.1 知识库内置实现：现为 22 插件
+    assert len(expanded) == 22
+    assert set(expanded) == {p.manifest.name for p in BUILTIN_PLUGINS}
     # 依赖顺序约束：secret 先于 model_provider；authz/approval/sandbox/interceptor 先于 skill_executors；mcp 最后于 skill_executors
     order = {name: i for i, name in enumerate(expanded)}
     assert order["secret_provider"] < order["model_provider"]
@@ -123,11 +123,12 @@ def test_module_requires_ports_enforced():
 def test_assembly_result_smoke_after_module_refactor():
     result = assemble(get_settings(), engine)
     resolved = [item for item in result.registry.status() if item["state"] == PortState.RESOLVED]
-    assert len(result.plugins) == 19
-    assert len(resolved) == 19
-    # 社区版不装配企业插件：不得有导出/归档/A2A 服务句柄
-    assert "audit_export_service" not in result.objects
-    assert "a2a_gateway" not in result.objects
+    assert len(result.plugins) == 22
+    # 22 插件中 20 个解析为独立 Port（知识库落地 knowledge.provider；21 Port 仍冻结）
+    assert len(resolved) == 20
+    # 单一系统：默认档即含导出/归档/A2A 服务句柄（无版本差距）
+    assert "audit_export_service" in result.objects
+    assert "a2a_gateway" in result.objects
 
 
 def test_sdk_accepts_legacy_duck_context_shape():

@@ -101,6 +101,8 @@ export function WebhooksPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 分步向导：默认只暴露必要字段，媒体映射与签名高级项按需展开
+  const [step, setStep] = useState(1);
   const [createOpen, setCreateOpen] = useState(false);
   const [editTarget, setEditTarget] = useState<InboundWebhook | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -139,6 +141,7 @@ export function WebhooksPage() {
 
   function openCreate() {
     setForm({ ...EMPTY_FORM, targetAgentId: publishedAgents[0]?.id ?? "" });
+    setStep(1);
     setCreateOpen(true);
   }
 
@@ -174,6 +177,7 @@ export function WebhooksPage() {
       toleranceSeconds: String(item.timestamp_tolerance_seconds),
     });
     setEditTarget(item);
+    setStep(1);
   }
 
   function payloadOf(state: FormState) {
@@ -333,8 +337,31 @@ export function WebhooksPage() {
     }
   }
 
+  const stepTitles = ["接入信息", "消息映射", "高级设置"];
+  const stepIndicator = (
+    <div className="webhook-steps">
+      {stepTitles.map((title, index) => {
+        const value = index + 1;
+        return (
+          <button
+            key={title}
+            type="button"
+            className={`webhook-step-item${step === value ? " active" : ""}${step > value ? " done" : ""}`}
+            onClick={() => setStep(value)}
+          >
+            <span className="webhook-step-index">{step > value ? "✓" : value}</span>
+            {title}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   const formBody = (
-    <div className="form-grid">
+    <>
+      {stepIndicator}
+      {step === 1 && (
+        <div className="form-grid">
       <div className="form-field">
         <label>名称</label>
         <input
@@ -383,6 +410,29 @@ export function WebhooksPage() {
           onChange={(e) => setForm((prev) => ({ ...prev, description: e.target.value }))}
           placeholder="可选"
         />
+      </div>
+      <div className="form-field">
+        <label>
+          <input
+            type="checkbox"
+            checked={form.enabled}
+            onChange={(e) => setForm((prev) => ({ ...prev, enabled: e.target.checked }))}
+          />{" "}
+          启用
+        </label>
+      </div>
+        </div>
+      )}
+      {step === 2 && (
+        <div className="form-grid">
+      <div className="form-field webhook-example">
+        <label>外部系统会推送这样的消息</label>
+        <pre className="webhook-json">{`{
+  "event_id": "evt_123",
+  "text": "帮我查一下订单",
+  "conversation_key": "user_42"
+}`}</pre>
+        <div className="field-help">下面的「字段路径」就是从这个 JSON 里取值，支持 a.b / a[0].b。</div>
       </div>
       <div className="form-field">
         <label>消息内容路径</label>
@@ -462,17 +512,11 @@ export function WebhooksPage() {
           </div>
         </>
       )}
-      <div className="form-field">
-        <label>
-          <input
-            type="checkbox"
-            checked={form.enabled}
-            onChange={(e) => setForm((prev) => ({ ...prev, enabled: e.target.checked }))}
-          />{" "}
-          启用
-        </label>
-      </div>
-      <details style={{ gridColumn: "1 / -1" }}>
+        </div>
+      )}
+      {step === 3 && (
+        <div className="form-grid">
+      <details style={{ gridColumn: "1 / -1" }} open>
         <summary style={{ cursor: "pointer", fontWeight: 600 }}>回写：把智能体最终答复送回外部系统</summary>
         <div className="form-grid" style={{ marginTop: 12 }}>
           <div className="form-field">
@@ -639,7 +683,9 @@ export function WebhooksPage() {
           </div>
         </div>
       </details>
-    </div>
+        </div>
+      )}
+    </>
   );
 
   return (
@@ -746,17 +792,27 @@ export function WebhooksPage() {
 
       <Modal
         open={createOpen}
-        title="新建 Webhook"
+        title={`新建 Webhook · ${stepTitles[step - 1]}（${step}/3）`}
         onClose={() => setCreateOpen(false)}
         width={680}
         footer={
           <div className="form-actions">
-            <button className="btn btn-secondary" onClick={() => setCreateOpen(false)}>
-              取消
+            <button className="btn btn-secondary" onClick={() => (step === 1 ? setCreateOpen(false) : setStep(step - 1))}>
+              {step === 1 ? "取消" : "上一步"}
             </button>
-            <button className="btn btn-primary" disabled={busy || !form.name.trim() || !form.targetAgentId} onClick={() => void submitCreate()}>
-              创建
-            </button>
+            {step < 3 ? (
+              <button
+                className="btn btn-primary"
+                disabled={step === 1 && (!form.name.trim() || !form.targetAgentId)}
+                onClick={() => setStep(step + 1)}
+              >
+                下一步
+              </button>
+            ) : (
+              <button className="btn btn-primary" disabled={busy || !form.name.trim() || !form.targetAgentId} onClick={() => void submitCreate()}>
+                创建
+              </button>
+            )}
           </div>
         }
       >
@@ -765,17 +821,27 @@ export function WebhooksPage() {
 
       <Modal
         open={editTarget !== null}
-        title={`编辑：${editTarget?.name ?? ""}`}
+        title={`编辑：${editTarget?.name ?? ""} · ${stepTitles[step - 1]}（${step}/3）`}
         onClose={() => setEditTarget(null)}
         width={680}
         footer={
           <div className="form-actions">
-            <button className="btn btn-secondary" onClick={() => setEditTarget(null)}>
-              取消
+            <button className="btn btn-secondary" onClick={() => (step === 1 ? setEditTarget(null) : setStep(step - 1))}>
+              {step === 1 ? "取消" : "上一步"}
             </button>
-            <button className="btn btn-primary" disabled={busy || !form.name.trim() || !form.targetAgentId} onClick={() => void submitEdit()}>
-              保存
-            </button>
+            {step < 3 ? (
+              <button
+                className="btn btn-primary"
+                disabled={step === 1 && (!form.name.trim() || !form.targetAgentId)}
+                onClick={() => setStep(step + 1)}
+              >
+                下一步
+              </button>
+            ) : (
+              <button className="btn btn-primary" disabled={busy || !form.name.trim() || !form.targetAgentId} onClick={() => void submitEdit()}>
+                保存
+              </button>
+            )}
           </div>
         }
       >
@@ -814,6 +880,14 @@ export function WebhooksPage() {
               {reveal.authMode === "TOKEN"
                 ? `调用时携带请求头：${reveal.tokenHeader}: ${reveal.tokenPrefix}<密钥>`
                 : `调用时携带：${reveal.timestampHeader}（秒级时间戳）与 ${reveal.signatureHeader}；签名值 = ${reveal.signaturePrefix}${reveal.signatureAlgorithm}-${reveal.signatureEncoding}(密钥, ${reveal.signatureTemplate})`}
+            </div>
+            <div className="form-field" style={{ marginTop: 12 }}>
+              <label>调用示例（curl）</label>
+              <pre className="webhook-json">{`curl -X POST '${reveal.endpoint}' \\
+  -H 'Content-Type: application/json' \\
+  ${reveal.authMode === "TOKEN" ? `-H '${reveal.tokenHeader}: ${reveal.tokenPrefix}<密钥>'` : `-H '${reveal.timestampHeader}: <秒级时间戳>' \\\n  -H '${reveal.signatureHeader}: <签名值>'`} \\
+  -d '{"event_id":"evt_123","text":"你好","conversation_key":"user_42"}'`}</pre>
+              <div className="field-help">复制后替换尖括号占位即可联调；字段路径与示例 JSON 保持一致。</div>
             </div>
           </div>
         )}

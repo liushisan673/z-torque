@@ -21,10 +21,10 @@ from app.kernel.registry.port_registry import AssemblyError
 def test_builtin_profiles_expand_unchanged():
     community = expand_profile(resolve_profile("community"))
     enterprise = expand_profile(resolve_profile("enterprise"))
-    # 社区默认路径不得被选配语法改变：仍是不含两个企业插件的集合
-    assert "audit_export_archive" not in community and "a2a_gateway" not in community
-    assert set(enterprise) - set(community) == {"audit_export_archive", "a2a_gateway"}
-    assert enterprise[: len(community)] == community, "企业档是社区集合的追加，前缀必须一致"
+    # 2026-11-24 单一系统：两档展开完全一致，均含审计导出归档与 A2A
+    assert "audit_export_archive" in community and "a2a_gateway" in community
+    assert enterprise == community
+    assert len(community) == len(set(community)) == 22
 
 
 def test_default_profile_without_name_is_community():
@@ -32,14 +32,14 @@ def test_default_profile_without_name_is_community():
     assert resolve_profile("  COMMUNITY ") == PROFILE_COMMUNITY
 
 
-def test_community_plus_selects_enterprise_plugins_on_top_of_community():
-    profile = resolve_profile("community+audit_export_archive,a2a")
+def test_community_plus_selects_optional_plugin_on_top_of_full_base():
+    profile = resolve_profile("community+nonexistent_optional")
     assert profile[: len(PROFILE_COMMUNITY)] == PROFILE_COMMUNITY
-    expanded = expand_profile(profile)
-    # 追加顺序即 contribute 顺序：审计导出归档先于 a2a（a2a 依赖 skill.executor）
-    assert expanded.index("audit_export_archive") < expanded.index("a2a_gateway")
-    assert {"sandbox_driver", "audit_export_archive", "a2a_gateway"} <= set(expanded)
-    assert len(expanded) == len(set(expanded)), "选配不得让同一插件被装配两次"
+    # 选配语法保留给外部插件；内置插件已全在基础档，重复选配必须拒绝
+    with pytest.raises(AssemblyError, match="already provided"):
+        resolve_profile("community+audit_export_archive,a2a")
+    with pytest.raises(AssemblyError, match="unknown module or plugin"):
+        expand_profile(profile)
 
 
 def test_reselecting_plugin_already_in_base_is_rejected():
@@ -64,7 +64,7 @@ def test_empty_or_unknown_selection_is_rejected_at_assembly():
 
 
 def test_settings_accept_selection_syntax_but_reject_malformed():
-    get_settings().model_copy(update={"assembly_profile": "community+audit_export_archive,a2a"}).validate_runtime()
+    get_settings().model_copy(update={"assembly_profile": "community+custom_extra_plugin"}).validate_runtime()
     for bad in ("community+", "community+,", "unknown+audit_export_archive", "community+a2a,audit-export"):
         settings = get_settings().model_copy(update={"assembly_profile": bad})
         with pytest.raises(ValueError, match="ASSEMBLY_PROFILE"):

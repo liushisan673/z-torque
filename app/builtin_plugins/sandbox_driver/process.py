@@ -28,12 +28,13 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from app.builtin_plugins.sandbox_driver.patch import FilePatchMixin
 from app.core.errors import ApiError
 from app.plugin_sdk import SandboxDriver
 from app.plugin_sdk.observability import emit_event
 
 
-class ProcessSandboxDriver(SandboxDriver):
+class ProcessSandboxDriver(FilePatchMixin, SandboxDriver):
     """sandbox.driver 的进程内实现：独立解释器 -I + 最小环境变量 + cwd 白名单 + rlimit。
 
     平台降级：Windows 无 rlimit 与进程组语义，超时仅 process.kill()（子进程可能残留，

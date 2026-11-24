@@ -1,0 +1,14 @@
+[
+  {
+    "query": "golden token alpha",
+    "document": "golden-alpha.pdf",
+    "expected_text": "golden token alpha",
+    "expected_coord": { "page_no": 1 }
+  },
+  {
+    "query": "golden token beta",
+    "document": "golden-beta.pdf",
+    "expected_text": "golden token beta",
+    "expected_coord": { "page_no": 1 }
+  }
+]

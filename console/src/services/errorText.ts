@@ -46,6 +46,7 @@ const CODE_TEXT: Record<string, string> = {
   AI_TOOL_NOT_FOUND: "工具不存在或已被删除",
   AI_TOOL_VERSION_NOT_FOUND: "工具版本不存在",
   // ---- 模型 ----
+  AI_MODEL_NOT_CONFIGURED: "还没有配置模型，请先完成一次开通",
   AI_MODEL_NOT_AVAILABLE: "模型或供应商当前不可用（未启用、缺少密钥或无可用 Endpoint）",
   AI_MODEL_UPSTREAM_ERROR: "模型服务返回异常，请稍后重试",
   AI_MODEL_RESPONSE_INVALID: "模型返回内容无法解析，请重试",

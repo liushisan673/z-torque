@@ -8,11 +8,13 @@ from sqlalchemy import update
 
 from app.core.errors import ApiError
 from app.kernel.model_gateway import (
+    ModelContentPart,
     ModelGateway,
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelToolCall,
 )
 from app.kernel.ports.model_selector import ModelSelector, resolve_model_selection
 from app.kernel.ports.skill_executor import ExecutionResult
@@ -21,6 +23,7 @@ from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import append_task_event
 from app.models import Task, TaskCheckpoint
+from app.services.context_governance import heal_context
 from app.services.function_calling import ToolMapping, map_tool_calls
 from app.services.model_limits import effective_max_tokens
 from app.services.tool_mapping_builder import build_tool_mappings
@@ -33,12 +36,95 @@ MAX_TOOL_RESULT_CHARS = 20_000
 
 
 def _serialize_message(m: ModelMessage) -> dict:
-    return {"role": m.role, "content": m.content, "tool_call_id": m.tool_call_id, "tool_calls": m.tool_calls, "reasoning_content": getattr(m, "reasoning_content", None)}
+    """消息快照（JSON 可序列化）：审批恢复与决策轮种子共用。
+
+    多模态片段必须一并序列化：漏掉 content_parts 会让恢复/续跑后的模型看不到历史图片，
+    表现为"同一段对话里前文图片突然失效"。
+    """
+    parts = [
+        {"type": part.type, "text": part.text, "image_url": part.image_url}
+        for part in (m.content_parts or [])
+    ]
+    return {
+        "role": m.role,
+        "content": m.content,
+        "tool_call_id": m.tool_call_id,
+        "tool_calls": m.tool_calls,
+        "reasoning_content": getattr(m, "reasoning_content", None),
+        "content_parts": parts or None,
+    }
+
+
+def _deserialize_message(raw: dict) -> ModelMessage:
+    data = dict(raw)
+    parts = data.pop("content_parts", None)
+    if parts:
+        data["content_parts"] = [ModelContentPart(**part) for part in parts]
+    return ModelMessage(**data)
 
 
 def _brief(value: Any, limit: int = 1000) -> str:
     text = value if isinstance(value, str) else str(value)
     return text[:limit]
+
+
+def serialize_seed(*, messages: list[ModelMessage], response: ModelResponse) -> dict:
+    """把「流式决策轮已经拿到的模型结论」序列化进任务，供 worker 直接执行工具。
+
+    背景：/chat/stream 已经用同一份消息 + 同一组工具跑完了一轮推理（模型返回 tool_calls），
+    随后才创建任务；worker 若再从第 1 轮重跑一遍，等于把同一轮模型调用付两次钱、等两次延迟。
+    这里把结论冻结成任务种子，worker 跳过决策轮直接执行工具，再从第 2 轮继续推理。
+    """
+    return {
+        "messages": [_serialize_message(m) for m in messages],
+        "assistant": {
+            "content": response.content,
+            "tool_calls": [dict(call.__dict__) for call in response.tool_calls],
+            "reasoning_content": response.reasoning_content,
+        },
+        "finish_reason": response.finish_reason,
+    }
+
+
+def seed_round(seed: dict | None, mappings: dict[str, ToolMapping]) -> tuple[list[ModelMessage], ModelResponse] | None:
+    """校验并还原种子；不可用（工具已解绑、结构损坏）时返回 None，让执行循环照常推理。
+
+    种子只是省掉一次重复推理，绝不能改变语义：任何一处对不上就当作没给种子。
+    """
+    if not isinstance(seed, dict):
+        return None
+    try:
+        messages = [_deserialize_message(m) for m in seed.get("messages") or []]
+        assistant = seed.get("assistant") or {}
+        calls = [
+            ModelToolCall(id=str(call.get("id") or ""), name=str(call.get("name") or ""), arguments=dict(call.get("arguments") or {}))
+            for call in (assistant.get("tool_calls") or [])
+        ]
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not messages or not calls or any(call.name not in mappings for call in calls):
+        return None
+    return messages, ModelResponse(
+        content=assistant.get("content"),
+        tool_calls=calls,
+        finish_reason=seed.get("finish_reason") or "tool_calls",
+        reasoning_content=assistant.get("reasoning_content"),
+    )
+
+
+def _progress_event(db: Any, task: Task | None, event_type: str, summary: str, *, trace_id: str, payload: dict | None = None) -> None:
+    """写一条「过程事件」并立刻提交。
+
+    worker 的整个执行体共用一个事务：不提交时，/tasks/{id}/stream 的轮询会话看不到任何事件，
+    用户只能等任务结束才一次性看到全部过程（这正是「执行中页面不动」的根因）。
+    过程事件不参与状态一致性判断，提前提交不会破坏状态机不变量。
+    """
+    if task is None:
+        return
+    append_task_event(db, task, event_type, summary, trace_id=trace_id, payload_summary=payload)
+    commit = getattr(db, "commit", None)
+    if commit is not None:
+        commit()
 
 
 @dataclass(frozen=True)
@@ -69,15 +155,22 @@ class AgentExecutionLoop:
         deadline_at: datetime | None = None,
         delegation_depth: int = 0,
         resume: dict | None = None,
+        seed: dict | None = None,
     ) -> LoopResult:
         task = db.get(Task, task_id) if task_id else None
+        seeded: tuple[list[ModelMessage], ModelResponse] | None = None
         if resume is not None:
             # 审批恢复续跑：从挂起时的上下文快照重建消息，回填已重放的工具结果后继续循环
-            messages = [ModelMessage(**m) for m in resume.get("messages", [])]
+            messages = [_deserialize_message(m) for m in resume.get("messages", [])]
             messages.append(ModelMessage("tool", resume.get("tool_result") or "", tool_call_id=resume.get("tool_call_id")))
         else:
-            messages = list(request.messages)
+            # 决策轮种子（/chat/stream 已完成的那一轮）：命中则跳过重复推理，直接从工具执行开始
+            seeded = seed_round(seed, mappings)
+            messages = seeded[0] if seeded is not None else list(request.messages)
         for round_number in range(1, MAX_ROUNDS + 1):
+            # §2.4 自愈管线：每次模型调用前修复畸形 tool call / 孤儿 result，
+            # 保证 tool_calls 与 toolResult 成对，且超长结果不撑爆上下文。
+            messages = heal_context(messages, tool_result_max_chars=MAX_TOOL_RESULT_CHARS)
             if cancellation_event is not None and cancellation_event.is_set():
                 raise ApiError("AI_TASK_NOT_CANCELABLE", "task cancellation requested", 409)
             timeout = request.timeout_seconds
@@ -85,9 +178,17 @@ class AgentExecutionLoop:
                 timeout = min(timeout, (deadline_at - datetime.now(timezone.utc)).total_seconds())
                 if timeout <= 0:
                     raise ApiError("AI_TASK_TIMEOUT", "task deadline exceeded", 504)
-            response = await self.model_gateway.generate(
-                ModelRequest(**{**request.__dict__, "messages": messages, "round_number": round_number, "timeout_seconds": timeout})
-            )
+            if round_number == 1 and seeded is not None:
+                # 复用决策轮结论：v1 的 message.delta 已经把这个过程实时推给用户了，不再补事件
+                response = seeded[1]
+            else:
+                # 「模型推理中」先落库再调用：一轮推理动辄数秒，用户必须能看见当前在等什么。
+                # 推理完成不再单独发事件——紧随其后的工具调用/终态事件本身就是它的结束标志，
+                # 少一条重复的「模型推理完成」时间线也更好读。
+                _progress_event(db, task, "TASK_MODEL_STARTED", f"model round {round_number} started", trace_id=request.trace_id, payload={"round": round_number})
+                response = await self.model_gateway.generate(
+                    ModelRequest(**{**request.__dict__, "messages": messages, "round_number": round_number, "timeout_seconds": timeout})
+                )
             if not response.tool_calls:
                 if response.content is None:
                     raise ApiError("AI_MODEL_RESPONSE_INVALID", "model returned neither text nor tool calls", 502)
@@ -96,8 +197,7 @@ class AgentExecutionLoop:
                 raise ApiError("AI_FUNCTION_CALL_INVALID", "too many tool calls in one round", 422)
             messages.append(ModelMessage("assistant", response.content, tool_calls=[call.__dict__ for call in response.tool_calls], reasoning_content=response.reasoning_content))
             for call, (mapping, arguments) in zip(response.tool_calls, map_tool_calls(response.tool_calls, mappings), strict=True):
-                if task is not None:
-                    append_task_event(db, task, "TASK_TOOL_CALL", f"calling tool {call.name}", trace_id=request.trace_id, payload_summary={"tool_name": call.name, "arguments": _brief(arguments)})
+                _progress_event(db, task, "TASK_TOOL_CALL", f"calling tool {call.name}", trace_id=request.trace_id, payload={"tool_name": call.name, "arguments": _brief(arguments)})
                 if mapping.child_agent_version_id is not None:
                     # 委派调用：把任务交给子智能体独立执行，其最终回答作为工具结果返回
                     child_content = await self._run_child_agent(
@@ -111,8 +211,7 @@ class AgentExecutionLoop:
                         task_id=task_id,
                     )
                     messages.append(ModelMessage("tool", child_content, tool_call_id=call.id))
-                    if task is not None:
-                        append_task_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload_summary={"tool_name": call.name, "status": "SUCCEEDED", "result": _brief(child_content)})
+                    _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload={"tool_name": call.name, "status": "SUCCEEDED", "result": _brief(child_content)})
                     continue
                 result: ExecutionResult = await self.skill_gateway.execute_async(
                     db,
@@ -146,11 +245,10 @@ class AgentExecutionLoop:
                     return LoopResult(response, messages, round_number, pending_confirmation=info)
                 tool_content = self._tool_result(result)
                 messages.append(ModelMessage("tool", tool_content, tool_call_id=call.id))
-                if task is not None:
-                    if result.status == "SUCCEEDED":
-                        append_task_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload_summary={"tool_name": call.name, "status": result.status, "result": _brief(result.data)})
-                    else:
-                        append_task_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} failed: {result.error_code}", trace_id=request.trace_id, payload_summary={"tool_name": call.name, "status": result.status, "error": result.error_message})
+                if result.status == "SUCCEEDED":
+                    _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload={"tool_name": call.name, "status": result.status, "result": _brief(result.data)})
+                else:
+                    _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} failed: {result.error_code}", trace_id=request.trace_id, payload={"tool_name": call.name, "status": result.status, "error": result.error_message})
         raise ApiError("AI_MAX_ROUNDS_EXCEEDED", "maximum model execution rounds exceeded", 422)
 
     async def _run_child_agent(

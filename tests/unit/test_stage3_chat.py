@@ -24,7 +24,7 @@ from app.models import (
 )
 from app.security.passwords import hash_password
 from app.services.chat_application import ensure_conversation_title
-from app.services.chat_service import handle_mock_chat
+from tests.support.fakes import handle_mock_chat
 
 
 @pytest.fixture(autouse=True)

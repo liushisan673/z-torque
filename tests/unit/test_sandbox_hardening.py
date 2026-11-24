@@ -336,10 +336,10 @@ async def test_timeout_kills_whole_process_group(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="仅验证 Windows 平台差异")
 @pytest.mark.asyncio
-async def test_windows_runtime_refuses_scripts_instead_of_pretending_isolation(tmp_path):
+async def test_windows_runtime_refuses_untrusted_scripts_instead_of_pretending_isolation(tmp_path):
     root = tmp_path / "skill"
     root.mkdir()
-    runtime = MdSkillRuntime(root, enabled=True, sandbox_driver=ProcessSandboxDriver())
+    runtime = MdSkillRuntime(root, enabled=True, sandbox_driver=ProcessSandboxDriver(), windows_process_enabled=True)
     manifest = MdSkillManifest(
         name="demo",
         description="d",
@@ -353,12 +353,13 @@ async def test_windows_runtime_refuses_scripts_instead_of_pretending_isolation(t
         script_files=["main.py"],
         file_fingerprint="f",
         relative_path="demo",
+        windows_trusted=False,
     )
 
     with pytest.raises(ApiError) as excinfo:
         await runtime.execute(manifest, {})
 
-    assert excinfo.value.code == "AI_CAPABILITY_UNAVAILABLE", "Windows 无强隔离时必须 fail closed"
+    assert excinfo.value.code == "AI_SKILL_WINDOWS_UNTRUSTED", "Windows 未声明可信必须 fail closed"
 
 
 # ---------------------------------------------------------------- 装配期策略

@@ -15,12 +15,14 @@ from app.core.ids import new_uuid7
 from app.core.responses import success_response
 from app.core.servertime import iso_utc
 from app.db.session import get_db
-from app.kernel.audit.service import record_audit
+from app.kernel.audit.service import record_audit, record_audit_detached
 from app.kernel.ports.object_store import ObjectStore
+from app.kernel.security_context import SecurityContext
 from app.models import Conversation, File, User
 from app.models.message import message_file
+from app.services import knowledge_service
 from app.services.bridge_media import export_file_to_bridge
-from app.services.file_parser import SUPPORTED, parse_file
+from app.services.file_parser import SUPPORTED, parse_file_structured
 from app.services.media_ingest import signature_matches
 
 router = APIRouter(prefix="/files", tags=["files"])
@@ -70,8 +72,28 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         raise ApiError("AI_FILE_TYPE_UNSUPPORTED", "file content does not match its type", 415)
     item = File(id=file_id, tenant_id=user.tenant_id, owner_user_id=user.id, conversation_id=conversation_id, original_name=Path(upload.filename or "file").name[:255], media_type=upload.content_type or "application/octet-stream", size_bytes=size, sha256=digest, storage_key=str(file_id), status="UPLOADED")
     try:
-        item.extracted_text = parse_file(target, suffix, settings.file_max_extracted_text)
+        parsed = parse_file_structured(
+            target, suffix, settings.file_max_extracted_text,
+            max_blocks=settings.knowledge_max_chunks_per_file,
+            max_block_chars=settings.knowledge_chunk_max_chars,
+        )
+        item.extracted_text = parsed.text
         item.status = "PARSED"
+        provider = knowledge_service.get_provider(request)
+        if provider is not None:
+            try:
+                knowledge_service.index_uploaded_file(
+                    db, provider=provider,
+                    ctx=SecurityContext(tenant_id=user.tenant_id, user_id=user.id, trace_id=request.state.trace_id),
+                    file_id=file_id, path=str(target), sha256=digest, parsed=parsed, size_bytes=size,
+                )
+            except Exception as exc:  # noqa: BLE001 - chunk 入库失败不阻断上传，但检索能力降级必须审计
+                logger.warning("knowledge index failed: id=%s err=%s", file_id, exc, exc_info=True)
+                record_audit_detached(
+                    tenant_id=user.tenant_id, actor_user_id=user.id, action="KNOWLEDGE_DEGRADED",
+                    resource_type="FILE", resource_id=file_id, summary="knowledge indexing failed",
+                    detail={"state": "DEGRADED", "reason": str(exc)[:300]}, trace_id=request.state.trace_id,
+                )
     except Exception as exc:  # noqa: BLE001 - 解析器的第三方异常类型不可控，解析失败一律降级为 PARSE_FAILED，不阻断上传
         logger.warning("file parse failed: id=%s suffix=%s err=%s", file_id, suffix, exc, exc_info=True)
         item.status = "PARSE_FAILED"
@@ -185,6 +207,17 @@ async def remove(file_id: UUID, request: Request, user: User = Depends(get_curre
         raise ApiError("AI_FILE_DELETE_FAILED", "failed to delete stored file", 500) from None
     item.status = "DELETED"
     item.extracted_text = None
+    # 删除级联：doc/chunk/FTS 同步清理，检索不再命中（失败不阻断文件删除，但审计留痕）
+    try:
+        knowledge_service.delete_index(db, provider=knowledge_service.get_provider(request), tenant_id=user.tenant_id, file_id=item.id)
+    except Exception:
+        logger.exception("failed to delete knowledge index for file %s", item.id)
+        record_audit_detached(
+            tenant_id=user.tenant_id, actor_user_id=user.id, action="KNOWLEDGE_DEGRADED",
+            resource_type="FILE", resource_id=item.id, summary="knowledge index deletion failed",
+            detail={"state": "DEGRADED", "reason": "index cleanup failed after file deletion"},
+            trace_id=request.state.trace_id,
+        )
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="FILE_DELETED", resource_type="FILE", resource_id=item.id, summary="file deleted", trace_id=request.state.trace_id)
     db.commit()
     return success_response(request, {"id": str(item.id), "status": item.status})

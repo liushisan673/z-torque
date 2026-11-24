@@ -3,8 +3,8 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
-from uuid import UUID
+from datetime import UTC, datetime, timedelta
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
@@ -23,7 +23,7 @@ from app.kernel.ports.queue_driver import QueueDriver
 from app.kernel.registry.active import call_optional
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
-from app.kernel.task.checkpoints import latest_checkpoint
+from app.kernel.task.checkpoints import latest_checkpoint, take_seed_checkpoint
 from app.kernel.task.dispatcher import OutboxDispatcher, execute_simulated
 from app.kernel.task.service import sanitize_summary, transition_task
 from app.kernel.task.states import TERMINAL_STATES, TaskStatus
@@ -114,6 +114,8 @@ class TaskRuntime:
         self.worker = Worker(self.queue, self._execute, concurrency=settings.worker_concurrency)
         self.gateway = gateway
         self.model_gateway = model_gateway
+        # 单机 lease owner：同进程内区分不同 TaskRuntime 实例；不做跨实例抢占。
+        self._lease_owner = f"runtime-{uuid4()}"
         self._tasks: list[asyncio.Task] = []
         self._cancellation_events: dict[UUID, asyncio.Event] = {}
 
@@ -130,12 +132,17 @@ class TaskRuntime:
                         db.rollback()
                         # 强制取消也写提示气泡：与协作式取消收敛路径一致的会话反馈
                         write_task_cancel_notice(db, task)
-                        db.execute(
+                        changed = db.execute(
                             update(Task)
-                            .where(Task.id == task_id, Task.status.in_([TaskStatus.RUNNING, TaskStatus.CANCELING, TaskStatus.QUEUED]))
-                            .values(status=TaskStatus.CANCELLED, error_code="AI_TASK_CANCELLED", error_message="已按用户要求取消", finished_at=datetime.now(UTC), last_event_seq=Task.last_event_seq + 1)
+                            .where(
+                                Task.id == task_id,
+                                Task.status.in_([TaskStatus.RUNNING, TaskStatus.CANCELING, TaskStatus.QUEUED]),
+                                Task.attempt_epoch == task.attempt_epoch,
+                            )
+                            .values(status=TaskStatus.CANCELLED, error_code="AI_TASK_CANCELLED", error_message="已按用户要求取消", finished_at=datetime.now(UTC), last_event_seq=Task.last_event_seq + 1, lease_owner=None, lease_expires_at=None)
                         )
-                        db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq + 1, event_type="TASK_CANCELLED", to_state=TaskStatus.CANCELLED, summary=sanitize_summary("task cancelled")))
+                        if changed.rowcount == 1:
+                            db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq + 1, event_type="TASK_CANCELLED", to_state=TaskStatus.CANCELLED, summary=sanitize_summary("task cancelled")))
                         db.commit()
             except Exception:
                 logger.exception("task %s cancel-safe marking failed", task_id)
@@ -148,12 +155,17 @@ class TaskRuntime:
                     task = db.get(Task, task_id)
                     if task is not None and task.status not in TERMINAL_STATES:
                         db.rollback()
-                        db.execute(
+                        changed = db.execute(
                             update(Task)
-                            .where(Task.id == task_id, Task.status.in_([TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.RUNNING]))
-                            .values(status=TaskStatus.FAILED, error_code="AI_TASK_FAILED", error_message="task executor crashed", finished_at=datetime.now(UTC), last_event_seq=Task.last_event_seq + 1)
+                            .where(
+                                Task.id == task_id,
+                                Task.status.in_([TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.RUNNING]),
+                                Task.attempt_epoch == task.attempt_epoch,
+                            )
+                            .values(status=TaskStatus.FAILED, error_code="AI_TASK_FAILED", error_message="task executor crashed", finished_at=datetime.now(UTC), last_event_seq=Task.last_event_seq + 1, lease_owner=None, lease_expires_at=None)
                         )
-                        db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq + 1, event_type="TASK_FAILED", to_state=TaskStatus.FAILED, summary=sanitize_summary("task executor crashed")))
+                        if changed.rowcount == 1:
+                            db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq + 1, event_type="TASK_FAILED", to_state=TaskStatus.FAILED, summary=sanitize_summary("task executor crashed")))
                         db.commit()
             except Exception:
                 logger.exception("task %s fail-safe marking failed", task_id)
@@ -182,9 +194,16 @@ class TaskRuntime:
                 result = await self._execute_model_task(db, task_id)
                 if result is not None:
                     return result
-            execute_simulated(db, task_id)
+            # 无 model_gateway 或模型执行未接管时，不再走“模拟成功”兜底：
+            # execute_simulated 只做真实 pending call，无法执行则显式 FAILED。
+            result = await execute_simulated(
+                db, task_id,
+                gateway=self.gateway,
+                cancellation_event=cancel_event,
+                lease_owner=self._lease_owner,
+            )
             self._cancellation_events.pop(task_id, None)
-        return {"task_id": str(task_id)}
+            return result
 
     def request_cancellation(self, task_id: UUID) -> None:
         self._cancellation_events.setdefault(task_id, asyncio.Event()).set()
@@ -227,9 +246,18 @@ class TaskRuntime:
         commit，避免两段提交间崩溃产生「RUNNING 但无开始事件」的任务
         （契约不变量2：状态迁移与事件流一致性）。
         """
+        now = datetime.now(UTC)
         claimed = db.execute(
             update(Task).where(Task.id == task_id, Task.status == TaskStatus.QUEUED)
-            .values(status=TaskStatus.RUNNING, started_at=datetime.now(UTC), attempt_count=Task.attempt_count + 1)
+            .values(
+                status=TaskStatus.RUNNING,
+                started_at=now,
+                attempt_count=Task.attempt_count + 1,
+                attempt_epoch=Task.attempt_epoch + 1,
+                lease_owner=self._lease_owner,
+                lease_expires_at=now + timedelta(seconds=300),
+                lease_heartbeat_at=now,
+            )
         )
         if claimed.rowcount != 1:
             db.rollback()
@@ -250,9 +278,9 @@ class TaskRuntime:
         if task is None:
             return {"task_id": str(task_id), "status": "NOT_FOUND"}
         if task.status == TaskStatus.RUNNING:
-            transition_task(db, task, TaskStatus.CANCELING, "TASK_CANCEL_REQUESTED", "task cancellation requested")
+            transition_task(db, task, TaskStatus.CANCELING, "TASK_CANCEL_REQUESTED", "task cancellation requested", expected_epoch=task.attempt_epoch)
         if task.status == TaskStatus.CANCELING:
-            transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled")
+            transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled", expected_epoch=task.attempt_epoch)
             # 取消以模型气泡告知：会话流出现"任务已取消"提示，前端据终态事件收起执行块
             write_task_cancel_notice(db, task)
             record_audit(
@@ -278,6 +306,11 @@ class TaskRuntime:
         if not await self._claim(db, task_id):
             return {"task_id": str(task_id), "status": "SKIPPED"}
         db.refresh(task)
+        # 决策轮种子（/chat/stream 已完成的那一轮推理）：取走即删，随后交给执行循环跳过重复推理。
+        # 取不到（老任务、直连 POST /chat、种子已被消费）时 seed=None，行为与改造前完全一致。
+        seed = take_seed_checkpoint(db, task_id)
+        if seed is not None:
+            db.commit()
         cancel_event = self._cancellation_events.setdefault(task_id, asyncio.Event())
         try:
             # 无会话任务（POST /tasks 未绑定会话）同样进入真实模型执行：上下文取 request_summary，
@@ -298,6 +331,8 @@ class TaskRuntime:
                 system_prompt=system_prompt,
                 supports_vision=capabilities.supports_vision,
                 supports_audio=capabilities.supports_audio,
+                model=selection.model,
+                trace_id=str(task.id),
             ) if conversation is not None else [ModelMessage(role="user", content=task.request_summary or "")]
             request = ModelRequest(
                 trace_id=str(task.id), task_id=task.id, conversation_id=task.conversation_id,
@@ -318,6 +353,7 @@ class TaskRuntime:
                     task_id=task.id,
                     cancellation_event=cancel_event,
                     deadline_at=task.deadline_at,
+                    seed=seed,
                 )
                 if result.pending_confirmation is not None:
                     # 写入类工具挂起等待审批：确认机制已把任务置为 WAITING_HUMAN，worker 直接让出，不判失败。
@@ -482,7 +518,7 @@ class TaskRuntime:
             trigger.status = "COMPLETED"
         if conversation is not None:
             conversation.last_message_at = datetime.now(UTC)
-        transition_task(db, task, TaskStatus.SUCCESS, "TASK_MODEL_SUCCEEDED", "model task completed")
+        transition_task(db, task, TaskStatus.SUCCESS, "TASK_MODEL_SUCCEEDED", "model task completed", expected_epoch=task.attempt_epoch)
         db.commit()
         if conversation is None:
             return
@@ -506,19 +542,24 @@ class TaskRuntime:
             logger.warning("memory.short provider is not injected; skip post-task summarization for conversation %s", conversation.id)
             return
         item = await self._short_memory.summarize(db, conversation=conversation, user_id=conversation.owner_user_id, trace_id=str(conversation.id), model_gateway=self.model_gateway)
-        # 长期记忆（memory.long Port）：开关打开时把摘要写入用户级长期 KV，供后续会话召回（P2-14）
+        # 长期记忆（memory.long Port，§2.2）：摘要写 CONVERSATION 作用域，来源引用必填。
         if settings.memory_long_enabled and item is not None:
             call_optional(
                 db,
                 audit_tenant_id=conversation.tenant_id,
                 port_name="memory.long",
-                method="remember",
+                method="remember_scoped",
                 actor_user_id=conversation.owner_user_id,
                 trace_id=str(conversation.id),
+                pass_db=True,
                 tenant_id=conversation.tenant_id,
                 user_id=conversation.owner_user_id,
+                agent_id=conversation.agent_id,
+                scope="CONVERSATION",
                 key=f"conversation:{conversation.id}:summary",
                 value=item.summary,
+                immutable=False,
+                source_ref=f"short_memory:{item.id}",
             )
 
     async def _resume_skill_task(self, db, task: Task, checkpoint: TaskCheckpoint, cancel_event: asyncio.Event) -> dict:
@@ -532,7 +573,7 @@ class TaskRuntime:
         if not skill or skill.tenant_id != task.tenant_id or skill.status != "PUBLISHED" or not tool or tool.tenant_id != task.tenant_id or tool.status != "PUBLISHED" or link is None:
             task.error_code = "AI_CHECKPOINT_INVALID"
             task.error_message = "checkpoint resource snapshot is no longer valid"
-            transition_task(db, task, TaskStatus.FAILED, "TASK_CHECKPOINT_INVALID", "checkpoint resource snapshot is invalid")
+            transition_task(db, task, TaskStatus.FAILED, "TASK_CHECKPOINT_INVALID", "checkpoint resource snapshot is invalid", expected_epoch=task.attempt_epoch)
             db.commit()
             return {"task_id": str(task.id), "status": "FAILED"}
         existing = db.query(SkillExecutionLog).filter(
@@ -542,7 +583,7 @@ class TaskRuntime:
         ).first()
         if existing is not None and _pending_call_matches(existing, call):
             task.result = existing.result or {"data": None}
-            transition_task(db, task, TaskStatus.SUCCESS, "TASK_SKILL_IDEMPOTENT", "skill execution already completed")
+            transition_task(db, task, TaskStatus.SUCCESS, "TASK_SKILL_IDEMPOTENT", "skill execution already completed", expected_epoch=task.attempt_epoch)
             db.commit()
             return {"task_id": str(task.id), "status": "SUCCEEDED", "idempotent": True}
         result = await self.gateway.execute_async(
@@ -562,11 +603,11 @@ class TaskRuntime:
         if result.status != "SUCCEEDED":
             task.error_code = result.error_code or "AI_SKILL_FAILED"
             task.error_message = result.error_message or "skill execution failed"
-            transition_task(db, task, TaskStatus.FAILED, "TASK_SKILL_FAILED", "skill execution failed")
+            transition_task(db, task, TaskStatus.FAILED, "TASK_SKILL_FAILED", "skill execution failed", expected_epoch=task.attempt_epoch)
             db.commit()
             return {"task_id": str(task.id), "status": result.status}
         task.result = {"skill_result": result.data}
-        transition_task(db, task, TaskStatus.SUCCESS, "TASK_SKILL_SUCCEEDED", "skill execution completed")
+        transition_task(db, task, TaskStatus.SUCCESS, "TASK_SKILL_SUCCEEDED", "skill execution completed", expected_epoch=task.attempt_epoch)
         db.commit()
         return {"task_id": str(task.id), "status": result.status}
 
@@ -576,7 +617,7 @@ class TaskRuntime:
         task.error_message = message
         # 幂等容错：重复收尾（如 recover 重放）时任务可能已是终态，跳过状态迁移只补失败气泡
         if task.status not in TERMINAL_STATES:
-            transition_task(db, task, TaskStatus.FAILED, "TASK_MODEL_FAILED", "model task failed")
+            transition_task(db, task, TaskStatus.FAILED, "TASK_MODEL_FAILED", "model task failed", expected_epoch=task.attempt_epoch)
         # 失败以模型气泡输出：写一条 ASSISTANT 失败消息（幂等复用，避免重复收尾时唯一约束冲突）；
         # 无会话任务没有可挂载的消息载体，失败原因只落在 task.error_code / error_message
         if task.conversation_id is not None:
@@ -674,7 +715,7 @@ class TaskRuntime:
                             payload={"task_id": str(task.id), "recovered": True},
                         ))
                 elif task.status == TaskStatus.CANCELING:
-                    transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled during recovery")
+                    transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled during recovery", expected_epoch=task.attempt_epoch)
                 elif task.status == TaskStatus.WAITING_HUMAN:
                     checkpoint = latest_checkpoint(db, task.id)
                     confirmation = db.get(Confirmation, checkpoint.confirmation_id) if checkpoint and checkpoint.confirmation_id else None
@@ -718,7 +759,7 @@ class TaskRuntime:
                                 checkpoint = latest_checkpoint(db, task.id)
                                 if checkpoint and checkpoint.status in {"WAITING_APPROVAL", "APPROVED"}:
                                     checkpoint.status = "EXPIRED"
-                                transition_task(db, task, TaskStatus.TIMEOUT, "TASK_TIMEOUT", "task timed out")
+                                transition_task(db, task, TaskStatus.TIMEOUT, "TASK_TIMEOUT", "task timed out", expected_epoch=task.attempt_epoch)
                         except ApiError:
                             # 单个任务迁移失败（如并发已终态）不得拖垮整批超时处理
                             logger.warning("task %s timeout transition skipped: state changed concurrently", task.id)

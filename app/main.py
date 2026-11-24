@@ -205,8 +205,10 @@ def _sandbox_capability(registry, plugins: tuple[str, ...], settings) -> dict:
     """沙箱能力如实上报：未实现级别禁止上报（§7.3）。"""
     resolution = registry.resolution("sandbox.driver") if registry is not None else None
     assembled = "sandbox_driver" in plugins and resolution is not None and resolution.state == PortState.RESOLVED
+    # §2.3：Scope 显式贯穿 + gateway 唯一入口 + 事务式补丁，如实上报（不暴露绝对路径）
+    scope_capability = {"explicit": True, "modes": ["restricted", "full"], "full_requires_container": True, "gateway_only": True}
     if not assembled:
-        return {"available": False, "impl": None, "isolation_level": "none"}
+        return {"available": False, "impl": None, "isolation_level": "none", "scope": scope_capability, "patch": {"available": False, "artifact_ttl_hours": 24}, "untrusted_execution": "unavailable"}
     label = str(getattr(resolution, "label", "") or "")
     if "container" in label:
         level = "container"
@@ -214,7 +216,20 @@ def _sandbox_capability(registry, plugins: tuple[str, ...], settings) -> dict:
         level = "rlimit"
     else:
         level = "none"
-    return {"available": True, "impl": label or "builtin_process", "isolation_level": level}
+    # Windows 有限解禁（§2.3）：脚本能力默认开，但需技能声明可信 + 每次人工确认
+    script = {
+        "enabled": bool(settings.md_skill_script_enabled),
+        "windows_process": bool(settings.md_skill_windows_process_enabled) and sys.platform == "win32",
+        "windows_requires_trusted": True,
+        "windows_requires_confirmation": True,
+    }
+    return {
+        "available": True, "impl": label or "builtin_process", "isolation_level": level, "script": script,
+        "scope": scope_capability,
+        "patch": {"available": True, "artifact_ttl_hours": 24},
+        # 无容器隔离时不可信（full/工作区级）执行显式不可用，绝不降级为 process
+        "untrusted_execution": "container" if level == "container" else "unavailable",
+    }
 
 
 def _audit_export_capability(plugins: tuple[str, ...], settings) -> dict:
@@ -240,6 +255,8 @@ async def capabilities(request: Request, user: User | None = Depends(get_optiona
     # stage 由装配状态推导（P2-5），不再硬编码
     registry = getattr(request.app.state, "port_registry", None)
     assembled_plugins = getattr(request.app.state, "assembly_plugins", ())
+    skill_gateway = getattr(request.app.state, "skill_gateway", None)
+    tool_executors = skill_gateway.registered_tool_types() if skill_gateway is not None else []
     ports = registry.status() if registry is not None else []
     model_resolution = registry.resolution("model.provider") if registry is not None else None
     model_implementation = model_resolution.label if model_resolution is not None else None
@@ -251,11 +268,24 @@ async def capabilities(request: Request, user: User | None = Depends(get_optiona
     md_skill = {"script_enabled": settings.md_skill_script_enabled}
     files = {"max_upload_mb": settings.max_upload_size_mb}
     connectors = {"max_response_bytes": settings.connector_max_response_bytes}
+    # §2.4：P0 用字符数/系数估算 token（不引入重型 tokenizer），如实上报。
+    context = {"token_estimate": True, "max_tokens": settings.context_max_tokens, "chars_per_token": settings.context_chars_per_token}
+    # §2.2：长期记忆已落 SQLite，三级作用域（无 project_id）。
+    memory = {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled, "long_persistent": True, "long_scopes": ["CONVERSATION", "AGENT", "USER"]}
+    # §2.1：本地检索能力三态（AVAILABLE / DEGRADED / UNAVAILABLE），DEGRADED 必须可见
+    knowledge_provider = registry.try_get("knowledge.provider") if registry is not None else None
+    if knowledge_provider is None:
+        knowledge = {"local": {"search": "UNAVAILABLE", "fts5": False}, "citation_enforcement": True}
+    else:
+        knowledge = {
+            "local": {"search": knowledge_provider.mode(), "fts5": bool(getattr(knowledge_provider, "fts5", False))},
+            "citation_enforcement": True,
+        }
     if is_admin:
         md_skill["directory"] = str(settings.md_skills_dir)
         files["storage_dir"] = str(settings.file_storage_dir)
         connectors["allowed_targets"] = settings.connector_allowed_targets
-    return success_response(request, {"stage": derive_stage(registry), "features": _available_features(registry, assembled_plugins), "ports": ports, "sandbox": _sandbox_capability(registry, assembled_plugins, settings), "audit_export": _audit_export_capability(assembled_plugins, settings), "a2a": _a2a_capability(assembled_plugins, settings), "md_skill": md_skill, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": {"short_enabled": settings.memory_short_enabled, "long_enabled": settings.memory_long_enabled}, "files": files, "connectors": connectors})
+    return success_response(request, {"stage": derive_stage(registry), "features": _available_features(registry, assembled_plugins), "ports": ports, "tool_executors": tool_executors, "sandbox": _sandbox_capability(registry, assembled_plugins, settings), "audit_export": _audit_export_capability(assembled_plugins, settings), "a2a": _a2a_capability(assembled_plugins, settings), "md_skill": md_skill, "model": {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}, "memory": memory, "context": context, "knowledge": knowledge, "files": files, "connectors": connectors})
 
 
 def _resolve_console_dist(settings) -> Path:

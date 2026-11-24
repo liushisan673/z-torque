@@ -55,7 +55,7 @@ def test_projection_fills_defaults_when_settings_lacks_key():
     projected = project_plugin_config(AuditExportArchivePlugin.manifest, _EmptySettings())
     assert projected["audit_archive_prefix"] == "audit-archive"
     assert projected["audit_export_redaction_profile"] == "standard"
-    assert projected["audit_export_formats"] == ["jsonl"]
+    assert projected["audit_export_formats"] == ["jsonl", "csv"]
 
 
 def test_projection_prefers_settings_value():

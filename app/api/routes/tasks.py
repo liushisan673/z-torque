@@ -83,7 +83,7 @@ async def cancel(task_id: str, request: Request, user: User = Depends(get_curren
     if task.status in {TaskStatus.PENDING, TaskStatus.QUEUED}:
         task.error_code = "AI_TASK_CANCELLED"
         task.error_message = "已按用户要求取消"
-        transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled", request.state.trace_id)
+        transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled", request.state.trace_id, expected_epoch=task.attempt_epoch)
         write_task_cancel_notice(db, task)
     elif task.status == TaskStatus.WAITING_HUMAN:
         # 等待审批中允许取消：过期挂起的 checkpoint（审批晚到时任务已非 WAITING_HUMAN，resolve 不再生效）
@@ -92,7 +92,7 @@ async def cancel(task_id: str, request: Request, user: User = Depends(get_curren
             checkpoint.status = "EXPIRED"
         task.error_code = "AI_TASK_CANCELLED"
         task.error_message = "已按用户要求取消"
-        transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled while waiting for approval", request.state.trace_id)
+        transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled while waiting for approval", request.state.trace_id, expected_epoch=task.attempt_epoch)
         write_task_cancel_notice(db, task)
     elif task.status == TaskStatus.RUNNING:
         task.cancel_requested_at = datetime.now(timezone.utc)

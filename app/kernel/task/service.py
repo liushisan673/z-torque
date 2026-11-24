@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.core.ids import new_uuid7
+from app.kernel.audit.service import record_audit_detached
 from app.kernel.registry.active import emit_event
 from app.kernel.security_context import SecurityContext
 from app.kernel.task.states import TERMINAL_STATES, TaskStatus, can_transition
@@ -277,7 +278,12 @@ def transition_task(
     trace_id: str | None = None,
     *,
     expected_state: TaskStatus | None = None,
+    expected_epoch: int | None = None,
 ) -> Task:
+    """统一状态迁移；终态写入可用 expected_epoch 做 fencing token 校验。
+
+    单机语义：attempt_epoch 在每次认领时递增，过期持有者持有的旧 epoch 不得写终态。
+    """
     current = TaskStatus(task.status)
     if expected_state is not None and current != expected_state:
         raise ApiError("AI_TASK_INVALID_TRANSITION", f"expected {expected_state}, got {current}", 409)
@@ -286,17 +292,47 @@ def transition_task(
     if not can_transition(current, target):
         raise ApiError("AI_TASK_INVALID_TRANSITION", f"invalid transition {current} -> {target}", 409)
     next_event_seq = task.last_event_seq + 1
+    fenced = target in TERMINAL_STATES and expected_epoch is not None
     # 并发失败只用 SAVEPOINT 回滚本函数自身的 UPDATE/事件追加：
     # 直接 db.rollback() 会连带回滚调用方已 flush 的审计与同批其他任务的迁移（P2-16）。
     with db.begin_nested():
-        changed = db.execute(
+        current_epoch = db.scalar(select(Task.attempt_epoch).where(Task.id == task.id))
+        if fenced and current_epoch != expected_epoch:
+            record_audit_detached(
+                tenant_id=task.tenant_id,
+                action="TASK_FENCING_REJECT",
+                resource_type="TASK",
+                resource_id=task.id,
+                actor_user_id=task.owner_user_id,
+                summary="stale lease epoch rejected on terminal write",
+                detail={"expected_epoch": expected_epoch, "current_epoch": current_epoch, "target": target},
+                trace_id=trace_id or str(task.id),
+            )
+            emit_event(
+                "lease.fencing_reject",
+                {
+                    "task_id": str(task.id),
+                    "tenant_id": str(task.tenant_id),
+                    "expected_epoch": expected_epoch,
+                    "current_epoch": current_epoch,
+                    "target": target,
+                },
+            )
+            raise ApiError("AI_TASK_FENCING_REJECT", "lease epoch changed; terminal write rejected", 409)
+        stmt = (
             update(Task)
             .where(Task.id == task.id, Task.status == current, Task.last_event_seq == task.last_event_seq)
-            .values(
+        )
+        if fenced:
+            stmt = stmt.where(Task.attempt_epoch == expected_epoch)
+        changed = db.execute(
+            stmt.values(
                 status=target,
                 started_at=_now() if target == TaskStatus.RUNNING else Task.started_at,
                 finished_at=_now() if target in TERMINAL_STATES else Task.finished_at,
                 last_event_seq=Task.last_event_seq + 1,
+                lease_owner=None if target in TERMINAL_STATES else Task.lease_owner,
+                lease_expires_at=None if target in TERMINAL_STATES else Task.lease_expires_at,
             )
         )
         if changed.rowcount != 1:
@@ -307,6 +343,8 @@ def transition_task(
             task.started_at = _now()
         if target in TERMINAL_STATES:
             task.finished_at = _now()
+            task.lease_owner = None
+            task.lease_expires_at = None
         db.add(TaskEvent(id=new_uuid7(), tenant_id=task.tenant_id, task_id=task.id, seq=task.last_event_seq, event_type=event_type, from_state=current, to_state=target, summary=sanitize_summary(summary), trace_id=trace_id))
     # 观测事件经 observability.sink Port 外发（状态机是统一收口点，P2-14）
     emit_event(

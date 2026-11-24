@@ -44,6 +44,16 @@ def test_migrations_match_models(tmp_path):
         with engine.connect() as conn:
             context = MigrationContext.configure(conn, opts={"compare_type": compare_type})
             diff = compare_metadata(context, Base.metadata)
+            # FTS5 虚表及影子表（_config/_idx/_data/_docsize）由迁移 raw SQL 管理，
+            # 不属于 ORM metadata；DB 中存在是预期状态，不能判为漂移。降级路径的
+            # 普通 zr_knowledge_fts 同理（插件用 raw SQL 读写）。
+            diff = [
+                item for item in diff
+                if not (
+                    isinstance(item, tuple) and len(item) >= 2
+                    and str(getattr(item[1], "name", "")).startswith("zr_knowledge_fts")
+                )
+            ]
     finally:
         engine.dispose()
     assert diff == [], f"迁移与模型存在漂移: {diff}"
@@ -79,6 +89,16 @@ def test_postgres_schema_matches_models():
         with engine.connect() as conn:
             context = MigrationContext.configure(conn, opts={"compare_type": compare_type})
             diff = compare_metadata(context, Base.metadata)
+            # FTS5 虚表及影子表（_config/_idx/_data/_docsize）由迁移 raw SQL 管理，
+            # 不属于 ORM metadata；DB 中存在是预期状态，不能判为漂移。降级路径的
+            # 普通 zr_knowledge_fts 同理（插件用 raw SQL 读写）。
+            diff = [
+                item for item in diff
+                if not (
+                    isinstance(item, tuple) and len(item) >= 2
+                    and str(getattr(item[1], "name", "")).startswith("zr_knowledge_fts")
+                )
+            ]
     finally:
         engine.dispose()
     assert diff == [], f"PG 上迁移与模型存在漂移: {diff}"

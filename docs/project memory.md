@@ -1,7 +1,7 @@
 # Z-Torque Community M1 — 项目记忆（会话交接）
 
-**更新**：2026-10-26　**状态**：本地开发中，**已提交并推送 GitHub**（master = `2e7b7a1`，github 远端；2026-10-26 一次性授权代提交，后续改动仍默认由用户本人提交，禁止代重置）
-**最新文档**：`docs/Z-Torque_标准化插件_A2A_审计导出归档_沙箱_v1.3.md`（v1.4，M4 收口；§12 验证 / §13 缺陷修订）
+**更新**：2026-11-25（阶段13 进行中，见 §10）　**状态**：本地开发中，**已提交并推送 GitHub**（master = `2e7b7a1`，github 远端；2026-10-26 一次性授权代提交，后续改动仍默认由用户本人提交，禁止代重置）
+**最新文档**：`docs/阶段13_控制台UI与使用流程优化方案_v1.1.md`（**阶段13 进行中，接手先读 §10**）；上一版基线 `docs/Z-Torque_标准化插件_A2A_审计导出归档_沙箱_v1.3.md`（v1.4，M4 收口）
 
 ---
 
@@ -40,6 +40,7 @@ AI Runtime 内核（M0–M3 阶段成果）+ 轻量控制台。核心架构是�
 | M2 `audit_export_archive` | ⚠️ 代码完成 | 导出/归档/脱敏/清理/下载留痕齐备；**仅单副本语义**（`AUDIT_EXPORT_MAX_CONCURRENCY=1`） |
 | M3 `a2a_gateway` | ✅ 完成 | 协议/深度扇出/熔断/白名单/发现投影齐备；**远端已真联调**（`tests/integration/test_a2a_live_peers.py`，uvicorn 子进程 + 真 TCP/TLS，`ZTORQUE_A2A_LIVE=1` 打开），真联调修掉「统一封装不解包」「出站载荷把路由信息当执行指令」两个缺陷 |
 | M4 | ✅ 完成（v1.4，2026-10-26） | sidecar 容器隔离（`SANDBOX_ISOLATION_MODE=container`，docker CLI 子进程，同 Port 同契约、社区默认 process 零变化）+ A2A 联邦身份（方案 B service account 入站 + per-peer 出站 mTLS）；入站真 mTLS 登记为部署层职责（uvicorn 不向 ASGI 暴露客户端证书）。未做：`object.store.list` |
+| 阶段13（控制台 UI/流程） | 🚧 进行中（5 批已完成） | ①设计令牌 ②删模型兜底 ③执行链路内联化 ④会话页迁 `@ant-design/x` ⑤执行过程实时可见 + 延迟优化；详见 §10 |
 
 **测试**：全集 **491** 项（阶段 2/3 新增 36 项：发现 11、配置契约 15、manifest 契约 4、单插件隔离 6；D 组新增 12 项观测接线用例；E 组新增 5 项租约用例；F 组新增 2 项出站语义单测；归档对象对账新增 14 项；归档密钥轮换新增 7 项）。**另有 8 项 A2A 真联调用例**（`tests/integration/test_a2a_live_peers.py`）默认 skip，`ZTORQUE_A2A_LIVE=1` 才跑（约 12~20s，起 uvicorn 子进程 + 真 TCP/TLS 对端）。**2026-10-26 三平台实测（F 组后）**：Windows+SQLite `470 passed / 11 skipped`（含 8 项 live skip）；Linux+SQLite（`zt-test` 容器）`471 passed / 10 skipped`；Linux+PostgreSQL 16（`zt_suite` 临时库）`471 passed / 10 skipped`；live 8 项在 Windows 与 Linux 容器内均 `8 passed`。**2026-10-26 对账脚本落地后三平台复跑**：Windows+SQLite `484 passed / 11 skipped`；Linux+SQLite `485 passed / 10 skipped`；Linux+PG16 `485 passed / 10 skipped`（Linux 多出 1 项为仅 POSIX 的沙箱用例）。**2026-10-26 密钥轮换落地后三平台复跑**：Windows+SQLite `491 passed / 11 skipped`；Linux+SQLite `492 passed / 10 skipped`；Linux+PG16 `492 passed / 10 skipped`；`ruff check app scripts tests` 全绿。**2026-10-26 Port 协议解耦后三平台复跑（新增 1 项子进程探针）**：Windows+SQLite `492 passed / 11 skipped`；Linux+SQLite `493 passed / 10 skipped`；Linux+PG16 `493 passed / 10 skipped`。**2026-10-26 M4 落地后三平台复跑**：Windows+SQLite `507 passed / 23 skipped`；Linux+SQLite `513 passed / 17 skipped`；Linux+PG16 `513 passed / 17 skipped`（A2A live 10 条全过：8 旧 + 出站 mTLS 双向认证 + 联邦入站真执行）。skip 恒为「未设 `ZTORQUE_MIGRATION_CHECK_URL`」+「Windows-only 沙箱用例」+「未开 `ZTORQUE_A2A_LIVE`」+「未开 `ZTORQUE_SANDBOX_CONTAINER_LIVE`（且 Windows 恒 skip）」四类，不是失败。
 **迁移**（A 组 2026-10-26 实测）：`zt_clean` 上 `alembic upgrade head` → `alembic check` 输出 `No new upgrade operations detected`、`scripts/check_migration_drift.py` `total=0`；`upgrade head --sql` 生成的 1018 行离线脚本在空库 `zt_ddl` 执行后同样 `total=0`；`zt_mig` 先 `upgrade head` 再跑 `tests/integration/test_alembic_migrations.py` → `3 passed`。存量 PG / 干净 SQLite 两处此前已零漂移。
@@ -83,6 +84,16 @@ AI Runtime 内核（M0–M3 阶段成果）+ 轻量控制台。核心架构是�
 21. **熔断是进程内状态**：真联调/集成用例断言「连续 N 次失败后开路」时，若与其他用例共用同一实例，失败计数互相污染，靠用例顺序"消灾"就是假通过 → 该用例单独起实例并显式给 `PLUGIN_BREAKER_FAILURE_THRESHOLD`。另外 `A2AConfig.circuit_failure_threshold` 目前只做装配期校验，实际阈值来自内核 `plugin_breaker_*`。
 22. **插件 config 是 dataclass，校验只在 `validate()` 里**：`AuditExportConfig(...)` 直接构造/`from_settings` 反序列化都**不会**触发边界校验（`__post_init__` 没接），所以「配了非法组合」在测试里不会自己炸——断言必须调 `config.validate()`，脚本入口也必须显式调一次再动密钥/数据，否则带着错配置继续跑。
 23. **「索引说旧密钥」≠「真依赖旧密钥」**：`objects[].key_id` 是人写进去的，可能滞后（对象已用当前密钥写入、索引还没更新）。轮换闸门的**唯一**判据是「真解密能不能只用当前密钥解开」，索引只能做参考——把索引滞后当阻塞会让 retire 永远过不去；反过来只信索引则可能误放行。两者不一致时按「告警但放行」处理，并在脚本输出里单独列出来。
+24. **worker 是「一个任务一个事务」**：`_execute_model_task` 里 `append_task_event` 只 `add+flush`，**不 commit**；`/tasks/{id}/stream` 是另一个 DB 会话轮询事件表，所以只有 `_claim()` 提交过的 `TASK_CREATED/TASK_STARTED` 看得见，其余过程事件全压在 worker 事务里，**直到任务收尾 commit 才一次性出现**。这就是"执行中页面不动、结束后才刷出全部步骤"的根因。过程事件（工具调用/返回、模型推理开始）必须走 `execution_loop._progress_event()` 逐条提交；改动执行链路时别再直接调 `append_task_event` 指望它自己可见。
+25. **别在任务收尾后同步做记忆摘要**：`_finish_chat_task` 先 `commit()`（回复消息 + SUCCESS 状态），再做 `_maybe_summarize`（一次完整模型调用）。顺序不能反——反了就等于让用户等一次"总结"模型调用才看到答案。
+26. **前端打字机是"假的慢"**：原来固定 2 字/16ms（125 字/秒），1500 字回答播 12 秒。结论打字机必须按长度自适应（整段约 1.1s，超长直接整段上屏），否则任务早跑完了，用户还在等动画。
+27. **`/chat/stream` 与 worker 会推理同一轮**：流式分流已经在请求内跑完一轮并拿到 `tool_calls`，worker 再从头推理就是同一轮模型调用付两次、等两次。结论随任务落库为「种子」（`TaskCheckpoint.status="SEEDED"`，worker 认领即取走删除），直接执行工具、从第 2 轮继续；种子必须校验工具名仍在映射里，否则退化为原路径。
+28. **沙箱只允许写工作区「根目录」**：`console\`、`app\`、`tests\`、`docs\` 这些子目录开着继承却缺沙箱包 SID，`pwsh` 写文件必被拒（`Set-Content/Add-Content` 报 `UnauthorizedAccess`），但**文件编辑工具（Edit/Write）可以写**。要跑会写子目录的命令（`pytest`、`vite build`、批量脚本改 CSS）就用「完全权限」跑一条，别在受限沙箱里反复重试。
+29. **`@ant-design/x` 的 `Bubble` 在 `loading` 时不渲染 `header`/`footer`**（源码：`if (loading) return loadingRender()`）。任何挂在这两个槽位上的业务块（执行链路、操作行、时间）在"还没有正文"时都会整体消失——本轮"执行中只看到执行中、结束才刷出全部步骤"就是这么来的。挂槽位的块要么别用 loading 占位，要么把 loading 收紧到"确实只有等待"。
+30. **`@ant-design/x` 的 `Think` 收起依赖 `CSSMotion`，但它没给 `leavedClassName`（`ant-think-content-hidden`）写样式**：`destroyOnHidden={false}` 时内容收起后会原地复活（表现：点开能展开、再点收不起来）。用默认的卸载语义，或自己补 `display:none`。
+31. **`Bubble` 的 body 是 flex item，默认按内容收缩**：`width:100%` 的子块（执行块、表格、代码块）会被压成窄柱，需要 `.chat-bubble-body { flex: 1 1 auto; min-width: 0 }`。
+32. **UI 改动必须用浏览器实测**：`tsc --noEmit` + `vite build` 只能证明"能编译"，本轮两个 bug 都是编译全绿但交互坏。仓库已有浏览器可验证预览：`console/preview/main.tsx` + `console/vite.preview.config.ts`（渲染生产组件），配无头 Edge 截图核对（`msedge.exe` 在 `C:\Program Files (x86)\Microsoft\Edge\Application\`）。注意：REA 截图工具会把 base64 直接塞进上下文，取图要先写入临时目录再 `read_image`，否则几 MB 垃圾进上下文。
+
 
 ## 6. 环境与命令
 
@@ -232,3 +243,92 @@ tests/integration/test_a2a_live_peers.py          （F 组：A2A 真联调，默
 - A2A 没有「技能名 → 版本」解析（插件 DB 边界只允许 identity/discovery 查询），跨实例调用必须显式传 `skill_version_id`（出站会改写成 `route=local` 由对端执行）；只给 `skill` 名时只能 `route=remote` 让对端自行路由，两个本实例之间没有这条路径。
 - 审计导出多副本安全（行级租约，见 v1.3 §5.9），但租约依赖各副本时钟同源，且 PENDING 任务只在提交副本执行；热区清理只删对象与分片，任务行保留。
 - 归档加密可选（AES-256-GCM），开启必须配 `AUDIT_ARCHIVE_SECRET_REF`，明文密钥不得进配置。
+
+---
+
+## 10. 阶段13 进行中：控制台 UI 与使用流程优化（**接手必读**）
+
+### 10.1 一句话现状
+
+已完成 **5 批**且已验证：①设计令牌层（对齐 DeepSeek Harness）②后端删除"无模型静默降级 Mock"③会话页执行链路内联化 + 输出结构排版 ④会话页整体迁到 `@ant-design/x`（+ CSS 清理 694 行）⑤执行过程实时可见 + 端到端延迟优化。
+**代码未提交 git**（工作区改动待用户本人提交，勿代提交）。方案全文：`docs/阶段13_控制台UI与使用流程优化方案_v1.1.md`（§9 有逐批实施记录）。
+
+### 10.2 已确认的 6 项决策（**不要再问，直接按此执行**）
+
+| # | 决策 |
+|---|---|
+| 1 | UI 用 `antd 6` + `@ant-design/x`（依赖已装、此前 0 引用） |
+| 2 | **删除全局模型兜底**：新系统没有模型必须先配一次才能用 |
+| 3 | UI 视觉对齐 **DeepSeek Harness 桌面版**（令牌已提取，见 `console/src/theme/tokens.ts`） |
+| 4 | 发布语义保持现状；普通用户创建发布的智能体**仅自己可见**（后端已天然支持，零改动） |
+| 5 | 未绑定模型**仍可发布**，用**弹窗提醒**，不硬阻断 |
+| 6 | 管理员创建的资源保持全员可见（"平台资源"语义） |
+
+### 10.3 已完成（5 批）
+
+| 批次 | 交付 | 关键文件 |
+|---|---|---|
+| ①设计令牌层 | DSH 三层令牌（palette→semantic→geometry）+ antd `ThemeConfig` + `ConfigProvider`/`darkAlgorithm`；`index.css` 核心变量切到 DSH 色板；消除双主色（`#3455db` vs `#007aff`）与双字体；修 `.btn-secondary` 悬停白底白字 Bug；登录页硬编码渐变改为令牌驱动 | `console/src/theme/{tokens,antdTheme,ThemeProvider}`、`main.tsx`、`AppTopbar.tsx`、`index.css` |
+| ②后端删模型兜底 | 未配置模型时 `default_gateway=None`（不再装 `MockModelGateway`）；新增 `resolve_chat_model_name()` 唯一解析入口（快照→显式全局模型→否则 `AI_MODEL_NOT_CONFIGURED` 409）；`model_name` 默认 `''`；Mock 只在 `tests/conftest.py` 注入 | `app/builtin_plugins/plugins.py`、`app/services/chat_application.py`、`app/api/routes/chat.py`、`app/builtin_plugins/model_gateway.py`、`app/config.py`、`tests/conftest.py`、新增 `tests/unit/test_chat_model_resolution.py` |
+| ③会话页链路与排版 | 执行链路改 DSH 式折叠行（运行中自动展开/终态自动收起/用户点过后不接管/新任务恢复接管）；历史任务 `HistoricalRun` **消息内联展开 + 事件懒加载**（替代右侧滑窗入口）；步骤改 6px 点 + 右对齐时间；工具参数折叠进「参数」；`.chat-md` 全套排版（标题三档/行高 1.75/发丝线表格/引用竖线/代码块）；修掉 `.chat-run-block.running/.done/.error` 与 `run/wait/ok/fail` 类名从未匹配的旧问题 | `console/src/pages/chatRun.tsx`、`console/src/pages/Chat.tsx`、`console/src/index.css` |
+| ④会话页迁 @ant-design/x | 消息→`Bubble`（助手无气泡/用户浅灰、header 放历史链路、footer 放操作）、输入→`Sender`（IME 保护/loading 换停止键/prefix 附件/header 待发附件+进度）、会话列表→`Conversations`（creation 新建 + menu 记忆摘要/重命名/归档）、示例提问→`Prompts`、待发附件→`Attachments`、执行折叠→`Think`、智能体选择→antd `Select`、重命名→弹窗；可复用脚本 `console/scripts/prune-chat-css.mjs` 按「源码已无整词引用」删规则，`index.css` 7098→6532 行 | `console/src/pages/Chat.tsx`（重写呈现层，逻辑原样）、`chatRun.tsx`、`index.css`、`console/scripts/prune-chat-css.mjs` |
+| ⑤执行过程实时可见 + 延迟优化 | ①根因修复：worker 单事务导致过程事件只在收尾可见 → `_progress_event()` 逐条提交 + 新增「模型推理中」事件 + SSE 轮询 1.0s→0.3s；首字节等待提示「正在理解你的需求… Ns」；执行行「N 步 · Ns」实时计时 ②性能：流式决策轮结论作「种子」让 worker 跳过重复推理；MCP 会话按端点+身份+凭证指纹复用（省每次工具调用的 initialize）；结论打字机按长度自适应（约 1.1s，>4000 字直出） ③回归修复×2：Bubble `loading` 吞掉 header 导致执行中看不到步骤（`loading={turnWaiting && !activeRun}`）；`Think` 的 `ant-think-content-hidden` 无样式导致收起后内容复活（保持默认 `destroyOnHidden`）；`.chat-bubble-body{flex:1}` 让执行块在气泡内满宽 | `app/services/execution_loop.py`、`app/kernel/task/checkpoints.py`、`app/services/{stream_service,chat_application}.py`、`app/kernel/task/runtime.py`、`app/services/task_stream.py`、`app/kernel/skill_gateway.py`、`console/src/pages/{Chat.tsx,chatRun.tsx,embed/ChatEmbed.tsx}`、`console/src/index.css`、新增 `tests/unit/test_chat_seed_and_progress.py`、新增浏览器预览 `console/{preview/main.tsx,vite.preview.config.ts}` |
+
+**验证口径**：后端 `620 passed / 24 skipped / 退出码 0`（原基线 608，+8 ①③ 期新用例 +4 ⑤ 期新用例；含 SSE 实时可见回归 1 条）；前端 `tsc --noEmit` + `vite build` 通过（Chat chunk 534.79 kB / gzip 172.15 kB，含 antd X），并用无头 Edge 跑 `console/preview/` 预览实测执行块展开/收起与实时追加；`ruff` 仅剩 2 条**既有** `sandbox_driver/container.py` ASYNC240（与本轮改动无关）。
+
+### 10.4 未完成（按建议顺序，接手从这里继续）
+
+| 序 | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| ~~1~~ | ~~会话页组件替换为 `@ant-design/x`~~ ✅ 已完成（§10.3 ④） | — | 交互不回归；Chat 段 CSS 删 694 行；`/embed/chat` 同步可用（共用 `chatRun.tsx`） |
+| ~~1b~~ | ~~执行过程实时可见 + 端到端延迟优化~~ ✅ 已完成（§10.3 ⑤） | — | 执行中步骤 0.3s 内上屏；决策轮不再重复推理；MCP 会话复用；打字机约 1.1s |
+| 2 | **开通向导**：后端编排接口（幂等，单事务建 Secret+ModelResource+「我的助手」Agent(已发布)+默认会话）+ 前端单屏表单（厂商预设 / API Key / 模型 id / 助手名） | 新增 `app/api/routes/` 接口 + `console/src/pages/Onboarding.tsx` | 新用户登录 → 1 屏 → 落在 /chat 可直接对话；`/system` 的 `model.configured` 驱动是否进入向导 |
+| 3 | 发布预检**弹窗措辞**优化（决策 5）+ 会话侧 `AI_MODEL_NOT_CONFIGURED` **引导卡片** | `console/src/pages/Agents.tsx` L707-712 / L1701-1723；`Chat.tsx` 错误处理 | 未绑模型可发布但提示"绑定模型前无法开始对话"并给「去绑定」直达；对话报错时渲染引导而非白屏 |
+| 4 | 导航分组 L1（工作台 / 能力扩展 / 平台设置）+ 决策4文案纠偏（把"联系管理员为你发布"改成"你也可以自己创建，仅自己可见"） | `console/src/components/AppTopbar.tsx`、`Chat.tsx` L1409/L1587 附近 | 普通用户只看到「会话/智能体」两个入口 |
+| 5 | 29 处 Modal + 19 处 ConfirmDialog + 10 处手写 table 统一到 antd | 各页 | 焦点管理/空态/分页统一 |
+| 6 | P2：余下页面迁移、暗色逐页清理、死代码（`.chat-setup-checklist` 等）清理、**antd 按需引入**（Chat chunk 已 534 kB / gzip 172 kB） | — | 主 chunk 回落 |
+
+### 10.5 验证命令（照抄）
+
+```powershell
+# 后端全量（需完全权限，见 10.6）
+.venv\Scripts\python.exe -m pytest tests -q -p no:cacheprovider   # 期望 620 passed / 24 skipped，退出码 0
+
+# lint（--no-cache 规避沙箱对 .ruff_cache 的写入拒绝）
+.venv\Scripts\python.exe -m ruff check --no-cache app tests
+
+# 前端（需完全权限）
+cd console; npm run build     # tsc --noEmit && vite build
+```
+
+### 10.6 环境坑（新会话最容易卡在这里）
+
+1. **工作区 ACL 缺失**：`pwsh` 会直接报 `SetNamedSecurityInfoW failed (Win32 5): grantWrite(...)`。已用 `diagnose-windows-sandbox-acl` 修好**根目录**与 `data\`（回滚脚本在 `D:\project\dsh-acl-recovery\`）。
+2. **沙箱对子目录写入仍会拒**（沙箱进程用包 SID，不是用户 SID）：`pwsh` 只能写**工作区根目录**，`app\ / console\ / console\src\ / tests\ / docs\` 全部 `UnauthorizedAccess`（文件编辑工具不受影响，能写）。对策：需要写子目录的命令（`pytest`、`vite build`、批量改 CSS 的脚本）用**完全权限**跑一次；ruff 加 `--no-cache`。`console` 与 `console\src` 已补 `WRITE_OWNER`（回滚脚本在 `D:\project\dsh-acl-recovery\`），但实测仍拒——包 SID 的继承在子目录上是断的，别再反复跑 ACL 修复脚本。
+3. **沙箱禁止命名管道** → `vite build` / `vite preview` 必然 `spawn EPERM`（esbuild 起子进程）。必须完全权限。只想看 `dist` 静态效果时，用 Node 起一个**不 spawn 子进程**的静态服务器即可绕过。
+4. **`docs\`、`data\` 的 Move-Item / 删除在沙箱内被拒** → 用文件编辑工具改内容，别用 shell 移动。
+5. 沙箱内跑 pytest 还需：`$env:ZTORQUE_TEST_DATABASE_URL="sqlite:///<TEMP>/z_torque_test.db"` + `--basetemp=<新目录>`，否则报 `attempt to write a readonly database` / `PermissionError pytest-of-*`。完全权限下不需要这些。
+6. **静态预览陷阱**：`.chat-msg-content` 带 `white-space: pre-wrap`，手写预览 HTML 的源码换行/缩进会被当内容渲染成大空隙。预览时给该容器加 `style="white-space: normal"`（真实 ReactMarkdown 渲染无此问题）。
+7. **`.env` 含真实 API Key**（已确认 `.gitignore` 生效、未进 git）。**任何输出、日志、文档都不得回显**；如曾外泄建议轮换。
+8. **UI 交互验证走浏览器预览**（改会话页/组件后必做）：
+   `cd console; npx vite build --config vite.preview.config.ts`（产物 `console/.preview-dist`，用完删掉）→ 用**不 spawn 子进程**的静态服务器起在 loopback → REA `capture_browser_scenario` 指定 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` 无头跑点击序列 → 从结果里把 `data_base64` 落成临时 png 再 `read_image`（别让 base64 进上下文）。预览页 `console/preview/main.tsx` 直接渲染生产组件。
+
+### 10.7 不可回退的约定（改代码前先看）
+
+- **令牌单一来源**：`console/src/theme/tokens.ts` → `antdTheme.ts` → `ThemeProvider.tsx`。`index.css` 的 `:root` 变量只是**遗留页面的桥**；不要新增 `--xxx-tag-*` 之类页前缀色变量，新样式一律走语义令牌。
+- **双主色 / 双字体已消除**（`--skill-accent`、`--skill-font` 现指向全局令牌），不要恢复。
+- **不得恢复 `"mock"` 字面量兜底**。模型解析唯一入口是 `resolve_chat_model_name()`；`MockModelGateway` 只允许在 `tests/conftest.py` 注入，`plugins.py` 生产装配不得创建。
+- **`chatRun.tsx` 被 `Chat.tsx` 与 `pages/embed/ChatEmbed.tsx` 共用**，改结构必须两端都验。
+- **RunBlock 折叠语义**：运行中/等待审批自动展开、终态自动收起、用户手动点过后不再自动接管、新任务到来恢复接管、折叠态仍显示错误原因。
+- **执行链路入口在消息内联**；右侧 `chat-task-panel` 只保留"任务历史 / 子任务详情"角色。
+- **执行中的过程事件必须逐条提交**（`execution_loop._progress_event()`），否则 worker 单事务会把它们压到收尾才可见（§5.24）。新增"某阶段开始了"的可见性需求时，同样用 `_progress_event` 加事件，不要只加日志。
+- **「决策轮种子」语义**：`TaskCheckpoint.status="SEEDED"` 只承载 `/chat/stream` 已完成的决策轮结论，worker 认领即取走删除；它不是审批 checkpoint（不带 confirmation / pending_call）。`task_id` 唯一约束意味着种子不能长期驻留，改动这段必须保持"先删后用 + 取不到就退化"的语义。
+- **结论打字机必须是"过渡"而不是"播放"**：整段 ≤约 1.1s，超长直出（§5.26）。不要再改回固定字/固定间隔。
+- **会话页呈现层已组件化**：气泡/输入框/会话列表/示例提问/折叠行分别对应 `Bubble`/`Sender`/`Conversations`/`Prompts`/`Think`，业务状态仍在 `Chat.tsx`；改样式优先用 `classNames` 语义槽 + 令牌，不要回去写 `.chat-msg-*` 这种整块自绘结构。
+
+### 10.8 参考：DSH 设计令牌的提取方法（如需继续对齐）
+
+DSH 桌面版界面资源在 `D:\开发\DSH-app\desktop\dsh\resources\app.asar`（单文件归档）。用 Node 直读 asar 头即可按路径取文件（无需 npx 安装）：
+
+- 头结构：`UInt32LE@0=4`、`UInt32LE@4=headerPickleSize`、`UInt32LE@12=jsonLen`、JSON@16；文件数据起点 = `8 + headerPickleSize`，条目 `offset` 相对该起点。
+- 关键资源：`@deepseek-ai/dsh-client-ui-theme/lib/client.js`（三层令牌全量）、`dsh-client-ui-primitives/lib/{Button,Pill,DisclosureRow,StateDot}.module.css`（控件几何与折叠行实现）、`dsh-client-ui-conversation/lib/client.js`（对话渲染，716KB 已压缩）。

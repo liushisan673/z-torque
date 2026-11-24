@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.kernel.task.states import TERMINAL_STATES
 from app.models import Task, TaskEvent
 
-_POLL_INTERVAL_SECONDS = 1.0
+_POLL_INTERVAL_SECONDS = 0.3
 # 单次连接最长挂起时长：到时发 task.done 断开，前端可用 Last-Event-ID 重连续传
 _MAX_STREAM_SECONDS = 300.0
 

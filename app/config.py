@@ -102,13 +102,27 @@ class Settings(BaseSettings):
 
     context_recent_rounds: int = 5
     context_max_tokens: int = 12000
+    # 字符→token 估算系数（单机 exe 不引入 tokenizer）；越小越保守。
+    context_chars_per_token: float = 2.0
+    # toolResult 单条硬上限（保留消息与 id，仅截断正文，不破坏成对不变量）。
+    context_tool_result_max_chars: int = 20000
     memory_working_cache_size: int = 256
     memory_short_summary_message_threshold: int = 20
     memory_short_idle_minutes: int = 10
     memory_short_enabled: bool = True
     memory_long_enabled: bool = False
+    # §2.2 写入约束：单条 value 硬上限 + 淘汰上限（防止长期记忆只增不减）
+    memory_long_max_value_chars: int = 20000
+    memory_long_max_records: int = 5000
     file_max_extracted_text: int = 200000
     file_parse_timeout: float = 30.0
+    # §2.1 本地知识库：chunk 上限 + 总入库字节上限（超限标 truncated 并审计，不静默）
+    knowledge_chunk_max_chars: int = 2000
+    knowledge_max_chunks_per_file: int = 4000
+    knowledge_max_total_bytes: int = 50 * 1024 * 1024
+    knowledge_top_k: int = 5
+    # 消息级全文检索默认关（隐私成本），只做短记忆摘要级检索
+    knowledge_message_search_enabled: bool = False
     log_level: str = 'INFO'
     default_parent_agent_id: str | None = None
     admin_initial_username: str = 'admin'
@@ -126,7 +140,9 @@ class Settings(BaseSettings):
     mcp_allowed_hosts: list[str] = Field(default_factory=list)
     model_base_url: str | None = None
     model_api_key: SecretStr | None = None
-    model_name: str = 'mock'
+    # 全局默认模型名。空字符串 = 未配置（阶段13 决策：未配置时对话显式报
+    # AI_MODEL_NOT_CONFIGURED，不再静默降级为 MOCK 假回复）。
+    model_name: str = ''
     # model.selector 白名单：空 = 不限制；非空时 AgentVersion 快照绑定须命中，否则回退默认模型
     model_allowed_names: list[str] = Field(default_factory=list)
     # 全局兜底模型参数（AgentVersion 快照绑定的 temperature/max_tokens 优先，无绑定或快照未设置时生效）
@@ -149,7 +165,10 @@ class Settings(BaseSettings):
     md_skills_dir: Path = Path('./md-skills')
     md_skill_watch_enabled: bool = True
     md_skill_scan_interval: float = 15.0
-    md_skill_script_enabled: bool = False
+    # 单一系统（.exe 单机标准）：脚本能力默认开启；Windows 走「可信声明 + 用户确认 + 路径收口」
+    md_skill_script_enabled: bool = True
+    # Windows 有限解禁总开关：关闭时即便技能声明可信也拒绝；exe 打包默认开启
+    md_skill_windows_process_enabled: bool = True
     md_skill_script_timeout: float = 10.0
     md_skill_script_max_output: int = 65536
     md_skill_script_max_concurrency: int = 2
@@ -192,7 +211,7 @@ class Settings(BaseSettings):
     audit_export_max_concurrency: int = 1
     audit_export_chunk_rows: int = 1_000
     audit_export_retry_limit: int = 3
-    audit_export_formats: list[str] = Field(default_factory=lambda: ['jsonl'])
+    audit_export_formats: list[str] = Field(default_factory=lambda: ['jsonl', 'csv'])
     # 递归防护：导出默认排除 AUDIT_* 自身事件；关闭时导出审计 detail.recursive=true
     audit_export_exclude_own_actions: bool = True
     # standard / strict；strict 下主体 id 走 HMAC，密钥只在本进程内使用
@@ -217,7 +236,7 @@ class Settings(BaseSettings):
     audit_archive_schedule_hours: float = 24.0
 
     # ---- v1.3 M3 A2A（§6.4）----
-    a2a_enabled: bool = False
+    a2a_enabled: bool = True
     a2a_local_discovery: bool = True
     # JSON 数组字符串：[{"id":..,"base_url":..,"auth_secret_name":..}]（base_url 必须 https，回环可 http）
     a2a_remote_peers: str = '[]'

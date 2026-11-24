@@ -9,6 +9,7 @@ from sqlalchemy import delete
 
 from app.builtin_plugins.model_gateway import ModelRoutingGateway
 from app.db.session import SessionLocal
+from app.kernel.model_gateway import ModelGatewayError
 from app.kernel.model_gateway.contracts import ModelMessage, ModelRequest
 from app.models import ModelEndpoint, ModelProvider, ModelResource, Tenant, User
 from app.security.passwords import hash_password
@@ -89,3 +90,12 @@ def test_unknown_model_falls_back_to_global_gateway(routing_env):
     routed, model = gateway._route(_request(routing_env["tenant"], model="unmanaged-model"))
     assert routed is default
     assert model == "fallback-model"
+
+
+def test_no_global_gateway_raises_instead_of_mock(routing_env):
+    """决策（阶段13）：未配置模型时必须显式报错，绝不静默降级为 Mock 返回假回复。"""
+    gateway = ModelRoutingGateway(session_factory=SessionLocal, default_gateway=None)
+    with pytest.raises(ModelGatewayError) as excinfo:
+        gateway._route(_request(routing_env["tenant"], model="unmanaged-model"))
+    assert excinfo.value.code == "AI_MODEL_NOT_AVAILABLE"
+    assert gateway.default_model == ""

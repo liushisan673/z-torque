@@ -13,7 +13,11 @@ from app.kernel.ports.model_selector import snapshot_model_params
 from app.kernel.security_context import SecurityContext
 from app.models import Agent, AgentVersion, Conversation, Message
 from app.schemas.chat import ChatRequest, ChatResponse
-from app.services.chat_application import ensure_conversation_title, handle_chat
+from app.services.chat_application import (
+    ensure_conversation_title,
+    handle_chat,
+    resolve_chat_model_name,
+)
 from app.services.context_builder import build_agent_system_prompt, build_context
 from app.services.model_limits import effective_max_tokens
 from app.services.stream_service import stream_chat as stream_chat_events
@@ -71,13 +75,17 @@ async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: s
     settings = get_settings()
     snapshot_cfg = agent_version.config_snapshot if agent_version is not None else None
     temperature, max_tokens = snapshot_model_params(snapshot_cfg, default_temperature=settings.model_temperature, default_max_tokens=settings.model_max_tokens)
-    model_name = str((snapshot_cfg or {}).get("model") or "").strip() or getattr(gateway, "default_model", "mock")
+    # 模型解析：快照绑定 → 部署方显式配置的全局模型 → 都没有则显式报错（不再回退 mock）
+    model_name = resolve_chat_model_name(
+        snapshot_model=(snapshot_cfg or {}).get("model"),
+        gateway=gateway,
+    )
     max_tokens = effective_max_tokens(db, tenant_id=ctx.tenant_id, model_identifier=model_name, snapshot_max_tokens=(snapshot_cfg or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
     model_request = ModelRequest(
         trace_id=request.state.trace_id,
         conversation_id=conversation.id,
         tenant_id=ctx.tenant_id,
-        messages=build_context(db, conversation, system_prompt=build_agent_system_prompt(db, agent_version)),
+        messages=build_context(db, conversation, system_prompt=build_agent_system_prompt(db, agent_version), model=model_name, trace_id=request.state.trace_id),
         model=model_name,
         temperature=temperature,
         max_tokens=max_tokens,

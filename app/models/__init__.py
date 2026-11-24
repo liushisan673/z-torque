@@ -4,12 +4,16 @@ from app.models.audit import AuditLog
 from app.models.auth_session import AuthSession
 from app.models.confirmation import Confirmation
 from app.models.connector import Connector, ConnectorTool
+from app.models.context_summary import ContextSummary
 from app.models.conversation import Conversation
 from app.models.file import File
 from app.models.identity import Permission, Role, Tenant, User, role_permission, user_role
+from app.models.knowledge import KnowledgeChunk, KnowledgeDoc
 from app.models.memory import ShortTermMemory
+from app.models.memory_long import LongMemory, LongMemoryVersion
 from app.models.message import Message, message_file
 from app.models.model_resource import ModelEndpoint, ModelProvider, ModelResource
+from app.models.patch_artifact import PatchArtifact
 from app.models.task import Outbox, Task, TaskCheckpoint, TaskEvent
 from app.models.tool_skill import (
     Skill,
@@ -34,10 +38,15 @@ __all__ = [
     "Confirmation",
     "Connector",
     "ConnectorTool",
+    "ContextSummary",
     "Conversation",
     "File",
     "InboundWebhook",
     "InboundWebhookEvent",
+    "KnowledgeChunk",
+    "KnowledgeDoc",
+    "LongMemory",
+    "LongMemoryVersion",
     "Message",
     # 关联表本身不对外使用，但必须在包级 import 一次才会注册进 Base.metadata
     "message_file",
@@ -45,6 +54,7 @@ __all__ = [
     "ModelProvider",
     "ModelResource",
     "Outbox",
+    "PatchArtifact",
     "Permission",
     "Role",
     "ShortTermMemory",

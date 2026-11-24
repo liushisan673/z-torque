@@ -1,5 +1,11 @@
 import asyncio
+import hashlib
+import json
 import logging
+import os
+import time
+from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -7,8 +13,9 @@ from jsonschema import ValidationError, validate
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
+from app.core.ids import utc_now
 from app.core.redaction import redact_mapping
-from app.kernel.audit.service import AuditExecutionInterceptor, record_audit_detached
+from app.kernel.audit.service import AuditExecutionInterceptor, record_audit, record_audit_detached
 from app.kernel.authz import PermissionChecker
 from app.kernel.md_skill import MdSkillManifest
 from app.kernel.md_skill_runtime import MdSkillRuntime
@@ -17,14 +24,24 @@ from app.kernel.ports.approval_provider import ApprovalProvider
 from app.kernel.ports.authz_provider import AuthzProvider
 from app.kernel.ports.connector import McpConnector, McpProtocolError, McpTransportError
 from app.kernel.ports.interceptor import ExecutionInterceptor
-from app.kernel.ports.sandbox_driver import SandboxDriver
+from app.kernel.ports.sandbox_driver import (
+    PATCH_COMMITTED,
+    PATCH_PARTIAL,
+    SANDBOX_MODE_FULL,
+    SANDBOX_MODE_RESTRICTED,
+    PatchSpec,
+    SandboxDriver,
+    SandboxScope,
+)
 from app.kernel.ports.secret_provider import SecretProvider
 from app.kernel.ports.skill_executor import ExecutionResult, ToolExecutor
 from app.kernel.registry.active import try_port
+from app.kernel.sandbox_policy import evaluate_sandbox_policy
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_confirmation import BuiltinApprovalProvider, pause_task_for_confirmation
 from app.models import (
     Connector,
+    PatchArtifact,
     Skill,
     SkillExecutionLog,
     SkillVersion,
@@ -149,6 +166,12 @@ class NegotiatedMcpExecutor:
 
 
 class SkillGateway:
+    # MCP 会话复用：每次工具调用都重新 initialize 会额外付 1~2 个 RTT（远端 MCP 常 200~500ms/次），
+    # 一轮里连续调 3~4 个工具就是一两秒。MCP 会话本就是长连接语义，这里按「端点 + 身份 + 凭证」
+    # 维度缓存已协商连接，空闲超时后关闭。缓存键含 tenant/用户身份头，绝不跨身份复用。
+    MCP_SESSION_IDLE_SECONDS = 90.0
+    MCP_SESSION_MAX_IDLE = 32
+
     def __init__(self, permission_checker: AuthzProvider | None = None, *, http_connector_factory: Any = None, stdio_registry: Any = None, approval_provider: ApprovalProvider | None = None, sandbox_driver: SandboxDriver | None = None, interceptor: ExecutionInterceptor | None = None, plugin_guard: PluginGuardRegistry | None = None, secret_provider: SecretProvider | None = None) -> None:
         # authz.provider Port 解析结果由装配根经插件注入（P1-3）；默认回退保留内置 RBAC
         # 检查器，供无装配的直构场景（测试/脚本）使用，语义与插件包装实现一致
@@ -167,12 +190,31 @@ class SkillGateway:
         # 密钥解密经 secret.provider Port（契约 §2 红线3：内核不得直连具体存储）；
         # 未注入时回退内置 Fernet 存储，供直构场景（测试/脚本）使用
         self._secrets = secret_provider
+        self._sandbox_driver = sandbox_driver
         from app.config import get_settings
         settings = get_settings()
-        self._md_runtime = MdSkillRuntime(settings.md_skills_dir, enabled=settings.md_skill_script_enabled, timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output, sandbox_driver=sandbox_driver)
+        # 显式 Scope 模板：由装配配置冻结，执行期不得从 ContextVar/环境隐式取值
+        self._scope_base = SandboxScope(
+            tuple(settings.resolved_sandbox_roots),
+            isolation=str(getattr(settings, "sandbox_isolation_mode", "process")),
+        )
+        self._md_runtime = MdSkillRuntime(
+            settings.md_skills_dir, enabled=settings.md_skill_script_enabled,
+            timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output,
+            sandbox_driver=sandbox_driver,
+            windows_process_enabled=settings.md_skill_windows_process_enabled,
+            allowed_roots=settings.resolved_sandbox_roots,
+        )
+        # 已协商的 MCP 会话：key → (connector, 最近使用时间 monotonic)
+        self._mcp_sessions: dict[str, tuple[McpConnector, float]] = {}
+        self._mcp_loop_id: int | None = None
 
     def register(self, executor: ToolExecutor) -> None:
         self._executors[executor.tool_type] = executor
+
+    def registered_tool_types(self) -> list[str]:
+        """供 capabilities 只读上报当前装配的执行器类型（含真实注册结果）。"""
+        return sorted(self._executors)
 
     @staticmethod
     def _audit_permission_denied(*, ctx: SecurityContext, resource_type: str, resource_id: UUID | None) -> None:
@@ -208,6 +250,127 @@ class SkillGateway:
             detail={"error_code": code},
             trace_id=ctx.trace_id,
         )
+
+    @staticmethod
+    def _audit_sandbox_denial(*, ctx: SecurityContext, skill_version_id: UUID | None, reason: str, detail: dict[str, Any] | None = None) -> None:
+        """policy gate / 审批后二次校验的拒绝留痕（独立事务，deny-wins 必须可审计）。"""
+        record_audit_detached(
+            tenant_id=ctx.tenant_id,
+            actor_user_id=ctx.user_id,
+            action="SANDBOX_DENIED",
+            resource_type="MD_SKILL_SCRIPT",
+            resource_id=skill_version_id,
+            summary=reason,
+            detail={"error_code": "AI_SANDBOX_DENIED", **(detail or {})},
+            trace_id=ctx.trace_id,
+        )
+
+    def _scope_for_manifest(self, manifest: MdSkillManifest) -> SandboxScope:
+        """按 manifest 声明推导不可变 scope：声明 sandbox.full 才扩大到白名单根。"""
+        permissions = list(manifest.required_permissions or [])
+        mode = SANDBOX_MODE_FULL if "sandbox.full" in permissions else SANDBOX_MODE_RESTRICTED
+        roots = self._scope_base.allowed_roots if mode == SANDBOX_MODE_FULL else (str(self._md_runtime.root),)
+        return SandboxScope(roots, mode=mode, isolation=self._scope_base.isolation)
+
+    def _gate_sandbox(
+        self,
+        *,
+        ctx: SecurityContext,
+        skill: SkillVersion,
+        manifest: MdSkillManifest,
+        scope: SandboxScope,
+        agent_id: str | None,
+    ) -> ExecutionResult | None:
+        """执行点前的 policy gate；返回非 None 即拒绝，调用方必须立即收敛。"""
+        permissions = list(manifest.required_permissions or [])
+        decision = evaluate_sandbox_policy(
+            tool=manifest.name, scope=scope, agent_id=agent_id,
+            # SkillVersion.required_permissions 已由 has_all 校验通过；这里把同一份
+            # manifest 声明交 gate 消费，保证声明与执行边界不脱节
+            manifest_permissions=permissions, granted_permissions=permissions,
+            target_paths=[str(self._md_runtime.root / manifest.relative_path)],
+        )
+        if decision.allowed:
+            return None
+        self._audit_sandbox_denial(
+            ctx=ctx, skill_version_id=skill.id, reason=decision.reason,
+            detail={"code": decision.code, "tool": manifest.name, "agent_id": agent_id, "scope": scope.to_dict()},
+        )
+        return ExecutionResult(status="FAILED", error_code=decision.code or "AI_SANDBOX_DENIED", error_message=decision.reason)
+
+    @staticmethod
+    def _check_approved_scope(checkpoint: TaskCheckpoint, expected: SandboxScope) -> None:
+        """审批后执行点二次校验：checkpoint 中的 scope 必须与当前推导结果逐字段一致。"""
+        raw = (checkpoint.pending_call or {}).get("sandbox_scope")
+        if raw is None or SandboxScope.from_dict(raw) != expected:
+            raise ApiError("AI_SANDBOX_DENIED", "sandbox scope changed after approval", 403)
+
+    async def apply_patch(
+        self,
+        db: Session,
+        ctx: SecurityContext,
+        *,
+        patches: list[dict[str, Any] | PatchSpec],
+        base_dir: str | Path,
+        task_id: UUID | None = None,
+    ) -> dict[str, Any]:
+        """事务式补丁的真实入口：gate → driver.apply_patch → artifact + metadata-only 审计。
+
+        diff 正文只进 `zr_patch_artifact`（带 TTL）；审计仅记 artifact_id/hash/path/size。
+        """
+        specs = [item if isinstance(item, PatchSpec) else PatchSpec.from_dict(item) for item in patches]
+        if not specs:
+            raise ApiError("AI_PATCH_INVALID", "patches must not be empty", 422)
+        scope = SandboxScope(self._scope_base.allowed_roots, mode=SANDBOX_MODE_RESTRICTED, isolation=self._scope_base.isolation)
+        decision = evaluate_sandbox_policy(
+            tool="patch", scope=scope, agent_id=str(task_id) if task_id else None,
+            manifest_permissions=[], granted_permissions=[],
+            target_paths=[item.path for item in specs],
+        )
+        if not decision.allowed:
+            record_audit_detached(
+                tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="SANDBOX_DENIED",
+                resource_type="PATCH", resource_id=task_id, summary=decision.reason,
+                detail={"error_code": decision.code, "path": specs[0].path}, trace_id=ctx.trace_id,
+            )
+            raise ApiError(decision.code or "AI_SANDBOX_DENIED", decision.reason, 403)
+        if self._sandbox_driver is None:
+            raise ApiError("AI_CAPABILITY_UNAVAILABLE", "no sandbox.driver implementation is resolved", 503)
+        try:
+            report = await self._sandbox_driver.apply_patch(scope, patches=specs, base_dir=Path(base_dir))
+        except ApiError as exc:
+            record_audit_detached(
+                tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="PATCH_CONFLICT",
+                resource_type="PATCH", resource_id=task_id, summary=exc.message,
+                detail={"error_code": exc.code, "path": specs[0].path}, trace_id=ctx.trace_id,
+            )
+            raise
+        if report.status != PATCH_COMMITTED:
+            action = "PATCH_PARTIAL" if report.status == PATCH_PARTIAL else "PATCH_ROLLBACK"
+            record_audit(db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action=action,
+                         resource_type="PATCH", resource_id=task_id, summary=report.message or "patch rolled back",
+                         detail={"status": report.status, "path": specs[0].path}, trace_id=ctx.trace_id)
+            db.flush()
+            code = "AI_PATCH_PARTIAL" if report.status == PATCH_PARTIAL else "AI_PATCH_FAILED"
+            raise ApiError(code, report.message or "patch failed", 500)
+        expires_at = utc_now() + timedelta(hours=24)
+        committed: list[dict[str, Any]] = []
+        for item in report.files:
+            artifact = PatchArtifact(
+                tenant_id=ctx.tenant_id, task_id=task_id, path=item.path,
+                before_text=item.before_text, after_text=item.after_text,
+                content_hash=item.after_hash, expires_at=expires_at,
+            )
+            db.add(artifact)
+            db.flush()
+            record_audit(
+                db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="PATCH_COMMIT",
+                resource_type="PATCH_ARTIFACT", resource_id=artifact.id, summary="patch committed",
+                detail={"artifact_id": str(artifact.id), "hash": item.after_hash, "path": item.path, "size": len(item.after_text.encode("utf-8"))},
+                trace_id=ctx.trace_id,
+            )
+            committed.append({"path": item.path, "hash": item.after_hash, "artifact_id": str(artifact.id)})
+        return {"status": report.status, "files": committed}
 
     def _decrypt_secret(self, ciphertext: str) -> str:
         """经注入的 secret.provider 解密；未注入时回退内置存储（直构场景）。"""
@@ -250,11 +413,76 @@ class SkillGateway:
             except Exception:  # noqa: BLE001
                 logger.warning("failed to close MCP connector after probe", exc_info=True)
 
+    @staticmethod
+    def _mcp_session_key(*, transport: str, target: str, timeout_seconds: float, auth_token: str | None, identity: dict[str, str] | None, extra: dict[str, Any] | None = None) -> str:
+        """缓存键：传输 + 端点/服务器名 + 超时 + 凭证指纹 + 身份透传头。
+
+        凭证只进指纹（sha256 前 16 位），缓存键里不出现明文 token；身份头参与键，
+        保证不同租户/用户不会拿到彼此的 MCP 会话。
+        """
+        digest = hashlib.sha256((auth_token or "").encode("utf-8")).hexdigest()[:16]
+        return json.dumps(
+            {
+                "transport": transport,
+                "target": target,
+                "timeout": round(float(timeout_seconds), 3),
+                "auth": digest,
+                "identity": sorted((identity or {}).items()),
+                "extra": extra or {},
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+        )
+
+    async def _evict_mcp_session(self, key: str) -> None:
+        connector = self._mcp_sessions.pop(key, None)
+        if connector is None:
+            return
+        try:
+            # 关闭有上限：stdio 传输的 close 会等子进程退出（最长 timeout），
+            # 不能让它把下一次工具调用的首字节时间拖长。
+            await asyncio.wait_for(connector[0].close(), timeout=5.0)
+        except Exception:  # noqa: BLE001 - 关闭失败不得影响本次执行结果
+            logger.warning("failed to close MCP connector", exc_info=True)
+
+    async def _acquire_mcp_session(self, key: str, factory: Any) -> tuple[McpConnector, bool]:
+        """取（或新建）一个 MCP 会话；返回 (connector, 是否已协商)。
+
+        命中即跳过 initialize（省 1~2 个 RTT）。空闲过期的会话在取用时顺带关闭；
+        超过上限时按最近使用时间淘汰最旧的一条，避免句柄无界增长。
+        """
+        loop_id = id(asyncio.get_running_loop())
+        if self._mcp_loop_id not in (None, loop_id):
+            # 事件循环已更换（测试里 asyncio.run 逐用例起循环）：旧连接绑定的是旧循环，不能复用
+            self._mcp_sessions.clear()
+        self._mcp_loop_id = loop_id
+        now = time.monotonic()
+        stale = [k for k, (_, used) in self._mcp_sessions.items() if now - used > self.MCP_SESSION_IDLE_SECONDS]
+        for stale_key in stale:
+            await self._evict_mcp_session(stale_key)
+        hit = self._mcp_sessions.get(key)
+        if hit is not None:
+            self._mcp_sessions[key] = (hit[0], now)
+            return hit[0], True
+        connector = factory()
+        self._mcp_sessions[key] = (connector, now)
+        if len(self._mcp_sessions) > self.MCP_SESSION_MAX_IDLE:
+            oldest = min(self._mcp_sessions.items(), key=lambda item: item[1][1])[0]
+            if oldest != key:
+                await self._evict_mcp_session(oldest)
+        return connector, False
+
+    async def aclose_mcp_sessions(self) -> None:
+        """关闭全部缓存的 MCP 会话（进程退出 / 测试清理用）。"""
+        for key in list(self._mcp_sessions):
+            await self._evict_mcp_session(key)
+
     async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float, *, secret_ref: str | None = None, identity: dict[str, str] | None = None) -> ExecutionResult:
         from app.config import get_settings
 
         transport = str(config.get("transport", "http")).lower()
         connector: McpConnector
+        session_key: str
         if transport == "http":
             endpoint = config.get("endpoint")
             if not isinstance(endpoint, str):
@@ -273,33 +501,51 @@ class SkillGateway:
             allow_private = bool(config.get("allow_private_network") or target_policy.get("allow_private_network"))
             # 出站代理（连接器级三态）：缺省走全局，""=直连，URL=指定代理
             proxy = config.get("proxy") if "proxy" in config else None
-            connector = self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token, extra_headers=self._identity_headers(identity), allow_private_network=allow_private, proxy=proxy if isinstance(proxy, str) else None)
+            headers = self._identity_headers(identity)
+            session_key = self._mcp_session_key(
+                transport=transport,
+                target=endpoint,
+                timeout_seconds=timeout_seconds,
+                auth_token=auth_token,
+                identity=headers,
+                extra={"allow_private": allow_private, "proxy": proxy if isinstance(proxy, str) else None, "max_bytes": settings.mcp_max_response_bytes},
+            )
+            connector, negotiated = await self._acquire_mcp_session(
+                session_key,
+                lambda: self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token, extra_headers=headers, allow_private_network=allow_private, proxy=proxy if isinstance(proxy, str) else None),
+            )
         elif transport == "stdio":
             registry = self.stdio_registry
             server_name = config.get("server_name")
             if registry is None or not isinstance(server_name, str):
                 return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message="MCP stdio server is not registered")
-            connector = registry.connector(server_name, timeout_seconds=timeout_seconds)
+            session_key = self._mcp_session_key(transport=transport, target=server_name, timeout_seconds=timeout_seconds, auth_token=None, identity=identity)
+            connector, negotiated = await self._acquire_mcp_session(session_key, lambda: registry.connector(server_name, timeout_seconds=timeout_seconds))
         else:
             return ExecutionResult(status="FAILED", error_code="AI_REQUEST_INVALID", error_message="unsupported MCP transport")
         executor = NegotiatedMcpExecutor(connector)
+        executor.negotiated = negotiated
         try:
-            connected = await executor.connect()
-            if connected.status != "SUCCEEDED":
-                return connected
-            return await asyncio.wait_for(executor.execute_async(config, arguments), timeout=timeout_seconds)
+            if not negotiated:
+                connected = await executor.connect()
+                if connected.status != "SUCCEEDED":
+                    await self._evict_mcp_session(session_key)
+                    return connected
+            result = await asyncio.wait_for(executor.execute_async(config, arguments), timeout=timeout_seconds)
+            if result.status != "SUCCEEDED":
+                # 会话可能已被对端关闭（重启 / 会话过期）：丢弃缓存，下次重新协商
+                await self._evict_mcp_session(session_key)
+            return result
         except TimeoutError:
+            await self._evict_mcp_session(session_key)
             return ExecutionResult(status="FAILED", error_code="AI_SKILL_TIMEOUT", error_message=_TOOL_TIMEOUT_MESSAGE)
         except (McpTransportError, McpProtocolError) as exc:
             logger.warning("MCP tool execution failed: %s", exc)
+            await self._evict_mcp_session(session_key)
             return ExecutionResult(status="FAILED", error_code="AI_MCP_TOOL_CALL_FAILED", error_message=str(exc) or "MCP tool execution failed")
         except (OSError, ValueError, RuntimeError):
+            await self._evict_mcp_session(session_key)
             return ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="MCP tool execution failed")
-        finally:
-            try:
-                await connector.close()
-            except Exception:  # noqa: BLE001 - 关闭失败不得覆盖执行结果
-                logger.warning("failed to close MCP connector", exc_info=True)
 
     async def _execute_with_retry(self, executor: ToolExecutor, config: dict[str, Any], arguments: dict[str, Any], *, timeout_seconds: float, max_retries: int, backoff_seconds: float, guard_key: str | None = None) -> ExecutionResult:
         if guard_key is not None:
@@ -485,6 +731,7 @@ class SkillGateway:
             raise TypeError(f"unexpected execution arguments: {', '.join(kwargs)}")
         if self._cancelled(cancellation_event):
             return ExecutionResult(status="CANCELLED", error_code="AI_TASK_NOT_CANCELABLE", error_message="task cancellation requested")
+        checkpoint: TaskCheckpoint | None = None
         if resume_checkpoint_id is not None:
             checkpoint = db.get(TaskCheckpoint, resume_checkpoint_id)
             if checkpoint is None or checkpoint.task_id != task_id or checkpoint.status not in {"APPROVED", "RESUMED"}:
@@ -514,9 +761,53 @@ class SkillGateway:
                 allow_scripts=skill.config_snapshot["allow_scripts"], required_permissions=skill.config_snapshot["required_permissions"],
                 instructions=skill.instructions or "", script_files=skill.config_snapshot["script_files"],
                 file_fingerprint=skill.config_snapshot["file_fingerprint"], relative_path=skill.config_snapshot["relative_path"],
+                windows_trusted=bool(skill.config_snapshot.get("windows_trusted", False)),
             )
+            # §2.3：显式 scope → policy gate（deny-wins）。声明扩大权限必须先过闸门
+            scope = self._scope_for_manifest(manifest)
+            gated = self._gate_sandbox(ctx=ctx, skill=skill, manifest=manifest, scope=scope, agent_id=str(task_id) if task_id else None)
+            if gated is not None:
+                self._guard_record("MD_SCRIPT", gated)
+                self._log(db, tenant_id, user_id, skill, None, task_id, gated, trace_id=ctx.trace_id)
+                return gated
+            if checkpoint is not None:
+                # 审批恢复：先校验 checkpoint 中冻结的 scope，防止审批后声明/参数被改
+                try:
+                    self._check_approved_scope(checkpoint, scope)
+                except ApiError as exc:
+                    self._audit_sandbox_denial(ctx=ctx, skill_version_id=skill.id, reason=exc.message, detail={"scope": scope.to_dict(), "checkpoint": str(checkpoint.id)})
+                    denied = ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)
+                    self._guard_record("MD_SCRIPT", denied)
+                    self._log(db, tenant_id, user_id, skill, None, task_id, denied, trace_id=ctx.trace_id)
+                    return denied
+            # Windows 有限解禁：每次 tool 调用都需人工确认（可信声明之外的一道闸门）。
+            # 只在实际由该技能执行脚本时挂起；已有审批 checkpoint（恢复执行）或 A2A
+            # 无 task 上下文时不在此重复挂起（A2A 自身走独立鉴权链路）。
+            if os.name == "nt" and task_id and user_id and not resume_checkpoint_id:
+                pending_call = {"skill_version_id": str(skill.id), "arguments": arguments, "implementation": "md_script", "sandbox_scope": scope.to_dict()}
+                confirmation = pause_task_for_confirmation(
+                    db,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    task_id=task_id,
+                    reason="Windows 脚本执行需人工确认（技能 windows_trusted）",
+                    snapshot={"skill_version_id": str(skill.id), "implementation": "md_script", "windows_trusted": manifest.windows_trusted},
+                    execution_context={},
+                    completed_steps=[],
+                    pending_steps=["md_script"],
+                    pending_call=pending_call,
+                    idempotency_key=f"win-script:{skill.id}:{hashlib.sha256(json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()}",
+                    skill_version_id=skill.id,
+                    approval_provider=self._approvals,
+                )
+                result = ExecutionResult(status="WAITING_HUMAN", requires_confirmation=True, data={"confirmation_id": str(confirmation.id)})
+                self._log(db, tenant_id, user_id, skill, None, task_id, result, trace_id=ctx.trace_id)
+                return result
             try:
-                data = await self._md_runtime.execute(manifest, arguments)
+                # 执行点二次校验：审批通过后到真正 spawn 之间再次确认 scope 未被篡改
+                if checkpoint is not None:
+                    self._check_approved_scope(checkpoint, scope)
+                data = await self._md_runtime.execute(manifest, arguments, scope=scope)
                 result = ExecutionResult(status="SUCCEEDED", data=data)
             except ApiError as exc:
                 result = ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)

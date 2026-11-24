@@ -13,6 +13,7 @@ from app.kernel.security_context import SecurityContext
 from app.models import Conversation, Message
 from app.services.chat_application import _maybe_summarize, create_chat_task
 from app.services.context_builder import assistant_reasoning_parts
+from app.services.execution_loop import serialize_seed
 
 logger = logging.getLogger("z_torque.chat_stream")
 
@@ -95,7 +96,9 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
                 )
 
             if final_response.tool_calls:
-                # 分流：模型要求调用工具 → 创建会话任务并入队（Outbox TASK_READY），执行由 worker 完成
+                # 分流：模型要求调用工具 → 创建会话任务并入队（Outbox TASK_READY），执行由 worker 完成。
+                # 本轮推理结论随任务一起落库（种子），worker 直接执行工具、从第 2 轮继续推理：
+                # 否则同一份消息 + 同一组工具会被完整推理两遍，用户要多等一整轮模型延迟。
                 audit_model_call(
                     "MODEL_CALL_COMPLETED",
                     "model call completed (tool calls)",
@@ -106,7 +109,8 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
                         "task_created": True,
                     },
                 )
-                task = create_chat_task(db, ctx=ctx, conversation=conversation, user_message=user_message, idempotency_key=idempotency_key or str(user_message_id), trace_id=trace_id)
+                seed = serialize_seed(messages=list(request.messages), response=final_response)
+                task = create_chat_task(db, ctx=ctx, conversation=conversation, user_message=user_message, idempotency_key=idempotency_key or str(user_message_id), trace_id=trace_id, seed=seed)
                 conversation.last_message_at = datetime.now(timezone.utc)
                 db.commit()
                 yield ev("message.task_created", {"task_id": str(task.id), "conversation_id": str(conversation.id), "status": "QUEUED"})

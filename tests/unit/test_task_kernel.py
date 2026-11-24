@@ -96,18 +96,20 @@ def test_terminal_state_is_immutable():
 
 
 @pytest.mark.asyncio
-async def test_duplicate_execution_is_claimed_once():
+async def test_duplicate_execution_is_claimed_once_and_fails_explicitly():
     tenant_id, user_id = setup_user()
     with SessionLocal.begin() as db:
         task = create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="execute", request_summary="run")
         transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
         task_id = task.id
     with SessionLocal() as db:
-        execute_simulated(db, task_id)
+        await execute_simulated(db, task_id)
     with SessionLocal() as db:
-        execute_simulated(db, task_id)
+        await execute_simulated(db, task_id)
         task = db.get(Task, task_id)
-        assert task.status == TaskStatus.SUCCESS
+        # 假成功已移除：无真实 executor 时显式失败，且重复执行不会二次认领。
+        assert task.status == TaskStatus.FAILED
+        assert task.error_code == "AI_EXECUTOR_UNAVAILABLE"
         assert task.attempt_count == 1
         assert db.query(TaskEvent).filter_by(task_id=task_id).count() == 4
 
@@ -121,14 +123,15 @@ def test_parent_depth_constraint():
             create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="grandchild", request_summary="grandchild", parent_task_id=child.id)
 
 
-def test_expired_deadline_is_timeout():
+@pytest.mark.asyncio
+async def test_expired_deadline_is_timeout():
     tenant_id, user_id = setup_user()
     with SessionLocal.begin() as db:
         task = create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="expired", request_summary="run", deadline_at=datetime.now(timezone.utc) - timedelta(seconds=1))
         transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
         task_id = task.id
     with SessionLocal() as db:
-        execute_simulated(db, task_id)
+        await execute_simulated(db, task_id)
     with SessionLocal() as db:
         assert db.get(Task, task_id).status == TaskStatus.TIMEOUT
 

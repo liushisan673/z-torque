@@ -38,7 +38,20 @@ from app.plugin_sdk.contract import (
 from app.plugin_sdk.db import Base, TenantModel, TimestampMixin
 from app.plugin_sdk.errors import ApiError, AssemblyError
 from app.plugin_sdk.observability import emit_event
-from app.plugin_sdk.ports import SandboxDriver
+from app.plugin_sdk.ports import (
+    PATCH_COMMITTED,
+    PATCH_PARTIAL,
+    PATCH_ROLLED_BACK,
+    SANDBOX_ISOLATION_CONTAINER,
+    SANDBOX_ISOLATION_PROCESS,
+    SANDBOX_MODE_FULL,
+    SANDBOX_MODE_RESTRICTED,
+    PatchFileResult,
+    PatchReport,
+    PatchSpec,
+    SandboxDriver,
+    SandboxScope,
+)
 
 __all__ = [
     "AUDIT_READ_PERMISSION",
@@ -56,7 +69,18 @@ __all__ = [
     "AuditRecord",
     "Base",
     "BuiltinPlugin",
+    "PATCH_COMMITTED",
+    "PATCH_PARTIAL",
+    "PATCH_ROLLED_BACK",
+    "SANDBOX_ISOLATION_CONTAINER",
+    "SANDBOX_ISOLATION_PROCESS",
+    "SANDBOX_MODE_FULL",
+    "SANDBOX_MODE_RESTRICTED",
+    "PatchFileResult",
+    "PatchReport",
+    "PatchSpec",
     "SandboxDriver",
+    "SandboxScope",
     "emit_event",
     "ModuleSpec",
     "PluginManifest",

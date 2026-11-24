@@ -100,4 +100,6 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             mappings[alias] = ToolMapping(alias, child_ver_id, None, schema, child_agent_version_id=child_ver_id)
             desc = f"委派给子智能体「{child_agent.name}」独立处理任务：{(child_agent.description or '').strip()}".rstrip("：")[:512]
             tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
+    # §2.4 稳定前缀：工具目录按 name 排序，保证同一会话内 prompt 只追加不改写。
+    tools.sort(key=lambda item: item["function"]["name"])
     return mappings, tools

@@ -9,9 +9,29 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import ModelContentPart, ModelMessage
 from app.kernel.registry.active import call_optional, try_port
-from app.models import AgentVersion, Conversation, File, Message, ShortTermMemory, Skill
+from app.models import (
+    AgentVersion,
+    ContextSummary,
+    Conversation,
+    File,
+    KnowledgeChunk,
+    KnowledgeDoc,
+    Message,
+    ShortTermMemory,
+    Skill,
+)
+from app.services.context_governance import (
+    context_tokens,
+    extractive_summary,
+    heal_context,
+    history_hash,
+    sanitize_untrusted,
+    split_accepted_delta,
+    stable_prefix,
+)
 from app.services.media_ingest import (
     MEDIA_KIND_AUDIO,
     MEDIA_KIND_IMAGE,
@@ -86,6 +106,10 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
             instructions.append(orchestration)
     if instructions:
         system_prompt = (system_prompt + "\n\n" if system_prompt else "") + "\n\n".join(instructions)
+    # §2.1 强制引用：使用本地检索片段/文件附件回答时，必须标注可回查坐标。
+    # 校验侧见 services/citation_guard.py；不在提示词里靠"请不要编造"软约束。
+    citation_rule = "[引用约束] 使用检索片段或文件附件回答时，每个事实必须标注 [chunk:<chunk_id>] 或 [source:<path>#page=<n>/sheet=<s>#row=<r>#col=<c>]；未标注引用将被系统判定为未通过校验。"
+    system_prompt = (system_prompt + "\n\n" if system_prompt else "") + citation_rule
     return system_prompt
 
 
@@ -107,15 +131,92 @@ def _long_memory_key(conversation: Conversation) -> str:
     return f"conversation:{conversation.id}:summary"
 
 
-def _context_fingerprint(conversation: Conversation, messages: list[Message], memory: ShortTermMemory | None, system_prompt: str | None, limit: int, attachment_ids: list | None, supports_vision: bool) -> str:
-    """工作记忆版本号：任一输入变化（新消息/摘要更新/提示词或附件变化）都会失效。"""
+def _context_fingerprint(conversation: Conversation, messages: list[Message], memory: ShortTermMemory | None, system_prompt: str | None, limit: int, attachment_ids: list | None, supports_vision: bool, provider: str | None, model: str | None, compaction_seq: int) -> str:
+    """工作记忆版本号：任一输入变化（新消息/摘要更新/提示词或附件/provider/model/压缩序号变化）都会失效。
+
+    cache key 含 provider/model/compaction_seq（路线图 v2.0 §2.4-7），避免跨模型复用错位前缀。
+    """
     last_message_id = messages[0].id if messages else "-"
     memory_version = memory.updated_at.isoformat() if memory is not None and memory.updated_at else "-"
-    return f"{conversation.id}|{last_message_id}|{len(messages)}|{memory_version}|{limit}|{system_prompt or ''}|{attachment_ids or ''}|{supports_vision}"
+    return f"{conversation.id}|{last_message_id}|{len(messages)}|{memory_version}|{limit}|{system_prompt or ''}|{attachment_ids or ''}|{supports_vision}|{provider or ''}|{model or ''}|{compaction_seq}"
 
 
 def _context_chars(context: list[ModelMessage]) -> int:
     return sum(len(item.content or "") for item in context)
+
+
+def _enforce_hard_cap(context: list[ModelMessage], max_chars: int) -> list[ModelMessage]:
+    """max_chars 硬上限二次保护：保留全部 system 前缀 + 尽量多的最新消息。
+
+    仅在压缩后仍超限时触发；按时间倒序保留最新消息，避免把当前轮增量裁掉。
+    """
+    if _context_chars(context) <= max_chars:
+        return context
+    systems = [item for item in context if item.role == "system"]
+    others = [item for item in context if item.role != "system"]
+    used = _context_chars(systems)
+    kept: list[ModelMessage] = []
+    for item in reversed(others):
+        size = len(item.content or "")
+        if used + size > max_chars:
+            continue
+        kept.append(item)
+        used += size
+    kept.reverse()
+    return systems + kept
+
+
+def _compact_if_needed(
+    db: Session,
+    conversation: Conversation,
+    context: list[ModelMessage],
+    *,
+    max_tokens: int,
+    chars_per_token: float,
+    max_chars: int,
+    compaction_seq: int,
+) -> tuple[list[ModelMessage], int]:
+    """超预算时只压缩「模型已接受的历史前缀 H」，保留未发送增量 delta。
+
+    成功：写 zr_context_summary 新版本，返回 [summary] + delta；
+    失败：保留原历史 + audit `CONTEXT_COMPACTION_FAILED`，绝不写坏 summary 覆盖原历史。
+    """
+    budget_chars = min(max_chars, int(max_tokens * chars_per_token))
+    if context_tokens(context, chars_per_token) <= max_tokens and _context_chars(context) <= budget_chars:
+        return context, compaction_seq
+    accepted, delta = split_accepted_delta(context)
+    if not accepted:
+        return context, compaction_seq
+    try:
+        summary_text = extractive_summary(accepted)
+        next_seq = compaction_seq + 1
+        db.add(ContextSummary(
+            tenant_id=conversation.tenant_id,
+            conversation_id=conversation.id,
+            compaction_seq=next_seq,
+            summary=summary_text,
+            accepted_history_hash=history_hash(accepted),
+            status="ACTIVE",
+        ))
+        db.flush()
+        summary_message = ModelMessage(
+            "system",
+            f"Conversation summary (accepted history, compaction seq={next_seq}):\n{summary_text}",
+        )
+        return [summary_message, *delta], next_seq
+    except Exception as exc:
+        record_audit(
+            db,
+            tenant_id=conversation.tenant_id,
+            action="CONTEXT_COMPACTION_FAILED",
+            resource_type="CONVERSATION",
+            resource_id=conversation.id,
+            actor_user_id=conversation.owner_user_id,
+            summary="context compaction failed; original history preserved",
+            detail={"error": str(exc), "compaction_seq": compaction_seq},
+        )
+        logger.warning("context compaction failed for conversation %s: %s", conversation.id, exc, exc_info=True)
+        return context, compaction_seq
 
 
 def _has_media_parts(messages: list[Message]) -> bool:
@@ -233,19 +334,51 @@ def _media_content(
     return image_parts, hints, docs
 
 
+def _knowledge_excerpt(db: Session, item: File, query: str, *, max_chars: int = 4000) -> str:
+    """只注入带坐标的检索片段，不再把整段 extracted_text 塞进 prompt（§2.1 第 9 条）。"""
+    doc = db.scalar(select(KnowledgeDoc).where(KnowledgeDoc.file_id == item.id, KnowledgeDoc.status == "ACTIVE"))
+    if doc is None:
+        return f"Attachment {item.original_name}: [no searchable index; full text not injected]"
+    rows = db.scalars(select(KnowledgeChunk).where(KnowledgeChunk.doc_id == doc.id).order_by(KnowledgeChunk.seq).limit(200)).all()
+    terms = [term for term in query.split() if len(term) >= 2]
+    ranked = sorted(rows, key=lambda row: (-sum(1 for term in terms if term in row.text), row.seq))[:5]
+    lines: list[str] = []
+    for row in ranked:
+        if row.page_no is not None:
+            coord = f"page={row.page_no}"
+        elif row.sheet is not None and row.row_no is not None:
+            coord = f"sheet={row.sheet}#row={row.row_no}#col={row.col_no}"
+        else:
+            coord = f"line={row.line_start}-{row.line_end}"
+        lines.append(f"[chunk:{row.id}] ({coord}) {row.text[:500]}")
+    return "\n".join(lines)[:max_chars] or f"Attachment {item.original_name}: [no matching chunk]"
+
+
 def build_context(
     db: Session,
     conversation: Conversation,
     *,
     system_prompt: str | None = None,
-    limit: int = 5,
+    limit: int | None = None,
     max_chars: int = 48000,
     attachment_ids: list | None = None,
     supports_vision: bool = False,
     supports_audio: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
+    trace_id: str | None = None,
 ) -> list[ModelMessage]:
     settings = get_settings()
-    messages = db.scalars(select(Message).where(Message.tenant_id == conversation.tenant_id, Message.conversation_id == conversation.id).order_by(Message.created_at.desc(), Message.id.desc()).limit(limit)).all()
+    rounds = settings.context_recent_rounds if limit is None else limit
+    # 多取一倍窗口，使超预算时 H/delta 压缩有历史可压（不静默丢弃整条）。
+    load_limit = max(rounds * 2, 20)
+    summary_row = db.scalar(
+        select(ContextSummary)
+        .where(ContextSummary.tenant_id == conversation.tenant_id, ContextSummary.conversation_id == conversation.id, ContextSummary.status == "ACTIVE")
+        .order_by(ContextSummary.compaction_seq.desc())
+    )
+    compaction_seq = summary_row.compaction_seq if summary_row is not None else 0
+    messages = db.scalars(select(Message).where(Message.tenant_id == conversation.tenant_id, Message.conversation_id == conversation.id).order_by(Message.created_at.desc(), Message.id.desc()).limit(load_limit)).all()
     memory = db.scalar(select(ShortTermMemory).where(ShortTermMemory.tenant_id == conversation.tenant_id, ShortTermMemory.user_id == conversation.owner_user_id, ShortTermMemory.agent_id == conversation.agent_id, ShortTermMemory.conversation_id == conversation.id, ShortTermMemory.status == "ACTIVE").order_by(ShortTermMemory.updated_at.desc()))
     has_media = _has_media_parts(messages)
     # 工作记忆（memory.working Port）：缓存组装结果，跨轮次命中可省去逐条反查与附件读取（P2-14）。
@@ -254,27 +387,41 @@ def build_context(
     working = None if (settings.memory_long_enabled or has_media) else try_port("memory.working")
     fingerprint: str | None = None
     if working is not None:
-        fingerprint = _context_fingerprint(conversation, messages, memory, system_prompt, limit, attachment_ids, supports_vision)
+        fingerprint = _context_fingerprint(conversation, messages, memory, system_prompt, load_limit, attachment_ids, supports_vision, provider, model, compaction_seq)
         cached = working.get(conversation.tenant_id, conversation.owner_user_id, conversation.id)
         if cached and cached.get("fingerprint") == fingerprint and isinstance(cached.get("messages"), list):
             return [ModelMessage(**item) for item in cached["messages"]]
     context = [ModelMessage('system', system_prompt)] if system_prompt else []
+    # 上一次成功压缩的 accepted-history 摘要：作为稳定前缀的一部分注入，
+    # 与短记忆摘要并存但语义不同（前者覆盖已裁剪的历史，后者是会话级增量摘要）。
+    if summary_row is not None:
+        context.append(ModelMessage('system', f"Accepted-history summary (compaction seq={compaction_seq}):\n{summary_row.summary}"))
     if memory:
-        context.append(ModelMessage('system', f"Conversation summary (untrusted context):\n{memory.summary}"))
-    # 长期记忆（memory.long Port）：仅在 memory_long_enabled 时召回，且不重复注入当前摘要
+        context.append(ModelMessage('system', f"Conversation summary (untrusted context):\n{sanitize_untrusted(memory.summary)}"))
+    # 长期记忆（memory.long Port）：§2.2 三级作用域分流。
+    # CONVERSATION 摘要 / USER 稳定画像 / AGENT 指令；全部按不可信来源做结构性清洗。
     if settings.memory_long_enabled:
-        long_summary = call_optional(
+        bundle = call_optional(
             db,
             audit_tenant_id=conversation.tenant_id,
             port_name="memory.long",
-            method="recall",
+            method="recall_bundle",
             actor_user_id=conversation.owner_user_id,
             tenant_id=conversation.tenant_id,
             user_id=conversation.owner_user_id,
-            key=_long_memory_key(conversation),
-        )
-        if long_summary and (memory is None or long_summary != memory.summary):
-            context.append(ModelMessage('system', f"Conversation summary from long-term memory (untrusted context):\n{long_summary}"))
+            agent_id=conversation.agent_id,
+            conversation_id=conversation.id,
+            pass_db=True,
+            trace_id=trace_id,
+        ) or {}
+        scope_labels = {"CONVERSATION": "会话记忆", "AGENT": "智能体指令", "USER": "用户画像"}
+        for scope in ("AGENT", "USER", "CONVERSATION"):
+            lines = [value for key, value in bundle.items() if key.startswith(f"{scope}:") and value]
+            if not lines:
+                continue
+            if scope == "CONVERSATION" and memory is not None and lines == [memory.summary]:
+                continue
+            context.append(ModelMessage("system", f"Long-term memory / {scope_labels[scope]} (untrusted context):\n" + sanitize_untrusted("\n".join(lines))))
     files = _load_files(db, conversation, _media_file_ids(messages))
     store = try_port("object.store")
     # 图片只注入当前用户消息；messages 已按时间倒序，取最近 1 + N 条用户消息
@@ -301,9 +448,8 @@ def build_context(
                 else:
                     continue
                 meta = {key: value for key, value in part.items() if key != "type" and value not in (None, "")}
-                meta_text = label + ":\n" + json.dumps(meta, ensure_ascii=False)
-                if _context_chars(context) + len(meta_text) <= max_chars:
-                    context.append(ModelMessage("system", meta_text))
+                meta_text = sanitize_untrusted(label + ":\n" + json.dumps(meta, ensure_ascii=False))
+                context.append(ModelMessage("system", meta_text))
         role = 'user' if message.sender_type in ('USER', 'EXTERNAL') else 'assistant'
         image_parts, hints, docs = _media_content(
             message,
@@ -319,22 +465,33 @@ def build_context(
         if hints:
             content = "\n".join([part for part in [content, *hints] if part])
         candidate = ModelMessage(role, content, content_parts=image_parts or None, reasoning_content=_reasoning_of(message))
-        if _context_chars(context) + len(content) <= max_chars:
-            context.append(candidate)
+        context.append(candidate)
+    last_user_text = next((message.content or "" for message in reversed(context) if message.role == "user"), "")
     attachment_id_set = {UUID(str(value)) for value in (attachment_ids or [])}
     if attachment_ids:
         files_by_id = _load_files(db, conversation, list(attachment_id_set))
         for item in files_by_id.values():
             if item.status != "PARSED":
                 continue
-            text = f"Attachment {item.original_name} (untrusted data):\n{item.extracted_text or ''}"
-            if _context_chars(context) + len(text) <= max_chars:
-                context.append(ModelMessage('user', text))
-    for file_id, text in doc_texts:
+            excerpt = _knowledge_excerpt(db, item, last_user_text)
+            context.append(ModelMessage('user', sanitize_untrusted(f"Attachment {item.original_name} (retrieved chunks, untrusted data):\n{excerpt}")))
+    for file_id, _text in doc_texts:
         if file_id in attachment_id_set:
             continue
-        if _context_chars(context) + len(text) <= max_chars:
-            context.append(ModelMessage('user', text))
+        item = db.get(File, file_id)
+        excerpt = _knowledge_excerpt(db, item, last_user_text) if item is not None else "[file index unavailable]"
+        context.append(ModelMessage('user', sanitize_untrusted(excerpt)))
+    # §2.4 收口：自愈管线（写死顺序）+ 稳定前缀 + 超预算 H/delta 压缩。
+    context = stable_prefix(heal_context(context, tool_result_max_chars=settings.context_tool_result_max_chars))
+    context, compaction_seq = _compact_if_needed(
+        db, conversation, context,
+        max_tokens=settings.context_max_tokens,
+        chars_per_token=settings.context_chars_per_token,
+        max_chars=max_chars,
+        compaction_seq=compaction_seq,
+    )
+    # max_chars 作为硬上限二次保护：压缩后仍超限才按最新优先裁剪。
+    context = _enforce_hard_cap(context, max_chars)
     if working is not None and fingerprint is not None:
         working.put(conversation.tenant_id, conversation.owner_user_id, conversation.id, {"fingerprint": fingerprint, "messages": [asdict(item) for item in context]})
     return context

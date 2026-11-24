@@ -1,4 +1,8 @@
-"""内置工具执行器插件（HTTP / DB_QUERY / MOCK / MCP 占位 / MD_SCRIPT）。
+"""内置工具执行器插件（HTTP / DB_QUERY / MCP 占位 / MD_SCRIPT）。
+
+MOCK 执行器已从生产移除；测试替身见 tests/support/fakes.py。
+测试约定：无条件成功的执行器只能由测试 DI 局部 register，禁止回挂生产装配
+（app/builtin_plugins/plugins.py）。
 
 自 app/kernel/builtin_executors.py 与 app/kernel/skill_gateway.py 迁移，逻辑不变；
 执行器契约见 app/kernel/ports/skill_executor.py。
@@ -34,13 +38,6 @@ _PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "http
 def _global_proxy_configured() -> bool:
     """全局出站代理是否已配置（PROXY_URL 会被写入进程环境，故统一看环境变量）。"""
     return any(os.environ.get(key) for key in _PROXY_ENV_KEYS)
-
-
-class MockExecutor:
-    tool_type = "MOCK"
-
-    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
-        return ExecutionResult(status="SUCCEEDED", data={"echo": arguments, "config": config})
 
 
 class McpExecutor:
@@ -272,7 +269,13 @@ class MdSkillScriptExecutor:
     def __init__(self) -> None:
         from app.config import get_settings
         settings = get_settings()
-        self.runtime = MdSkillRuntime(settings.md_skills_dir, enabled=settings.md_skill_script_enabled, timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output)
+        windows_enabled = bool(getattr(settings, "md_skill_windows_process_enabled", False))
+        self.runtime = MdSkillRuntime(
+            settings.md_skills_dir, enabled=settings.md_skill_script_enabled,
+            timeout_seconds=settings.md_skill_script_timeout, max_output_bytes=settings.md_skill_script_max_output,
+            windows_process_enabled=windows_enabled,
+            allowed_roots=getattr(settings, "resolved_sandbox_roots", None),
+        )
 
     def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
         return ExecutionResult(status="FAILED", error_code="AI_CAPABILITY_UNAVAILABLE", error_message="MD-Skill scripts require the controlled async runtime")

@@ -92,7 +92,7 @@ class AuditExportArchivePlugin:
                 "audit_export_formats": {
                     "type": "array",
                     "items": {"type": "string", "enum": ["jsonl", "csv"]},
-                    "default": ["jsonl"],
+                    "default": ["jsonl", "csv"],
                     "description": "允许的导出格式",
                 },
                 "audit_export_exclude_own_actions": {

@@ -53,10 +53,13 @@ def call_optional(
     method: str,
     actor_user_id: Any = None,
     trace_id: str | None = None,
+    pass_db: bool = False,
     **kwargs: Any,
 ) -> Any | None:
     """调用可选 Port；能力不可用时落审计并降级返回 None（阶段00 §3 可选缺失语义）。
 
+    `pass_db=True` 时把调用方会话作为 `db=` 注入 Port 方法（§2.2 作用域化记忆
+    等需要在同一事务内读写的窄扩展方法）；不改变其它调用点的签名。
     其余 ApiError 原样抛出，避免把真实故障吞掉。
     """
     registry = _registry
@@ -64,6 +67,8 @@ def call_optional(
         return None
     try:
         port = registry.get(port_name)
+        if pass_db:
+            kwargs["db"] = db
         return getattr(port, method)(**kwargs)
     except ApiError as exc:
         if exc.code != "AI_CAPABILITY_UNAVAILABLE":

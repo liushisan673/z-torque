@@ -197,6 +197,30 @@ def test_plugins_import_only_public_sdk_surface():
     assert not stale, f"KNOWN_OFFENDERS 已过期，请同步删除已修项：\n{detail}"
 
 
+# ---- §2.3：显式 Scope + SkillGateway 唯一执行入口 + PatchTransaction ----
+def test_skill_gateway_is_the_only_sandbox_execution_entry():
+    runtime = _read(APP / "kernel" / "md_skill_runtime.py")
+    assert "_sandbox.execute(" in runtime, "脚本执行必须走 SandboxDriver.execute(scope, ...)"
+    assert "_sandbox.run(" not in runtime, "禁止绕过 execute 直调实现入口 run"
+    assert "scope" in runtime, "scope 必须显式贯穿到执行点"
+    offenders: list[str] = []
+    for layer in ("kernel", "services", "api", "ws", "security"):
+        for path in _py_files(APP / layer):
+            text = _read(path)
+            if "create_subprocess_exec(" in text or "subprocess.Popen(" in text or ".run(script_path=" in text:
+                offenders.append(str(path.relative_to(APP.parent)))
+    assert offenders == [], f"进程/spawn 只在沙箱插件内允许: {offenders}"
+
+
+def test_sandbox_patch_mechanics_are_present():
+    patch_text = _read(APP / "builtin_plugins" / "sandbox_driver" / "patch.py")
+    for required in ("O_NOFOLLOW", "is_symlink", "_locked_file", "expected_hash", "old_text", "PATCH_PARTIAL"):
+        assert required in patch_text, f"补丁缺少事务机制: {required}"
+    container_text = _read(APP / "builtin_plugins" / "sandbox_driver" / "container.py")
+    assert "asyncio.to_thread" in container_text, "容器清理的文件 IO 必须离开事件循环线程"
+    assert "_bounded_to_thread" in container_text, "必须有有界线程包装以确认线程退出"
+
+
 def test_a2a_peer_whitelist_and_https_enforced():
     peers = _read(A2A_PLUGIN / "peers.py")
     config = _read(A2A_PLUGIN / "config.py")

@@ -34,6 +34,9 @@ class MdSkillManifest:
     script_files: list[str]
     file_fingerprint: str
     relative_path: str
+    # Windows 有限解禁的可信声明（§2.3）：默认 False，技能需在 SKILL.md frontmatter
+    # 显式写 windows_trusted: true 才允许在 Windows 上跑 process 脚本
+    windows_trusted: bool = False
 
 
 def _safe_path(root: Path, path: Path) -> Path:
@@ -107,6 +110,9 @@ def parse_skill(root: str | Path, skill_dir: str | Path) -> MdSkillManifest:
         raise ApiError("AI_SKILL_INVALID_MANIFEST", "implementation or version is invalid", 422)
     if not isinstance(meta["allow_scripts"], bool) or not isinstance(meta["required_permissions"], list) or not all(isinstance(x, str) for x in meta["required_permissions"]):
         raise ApiError("AI_SKILL_INVALID_MANIFEST", "script or permission fields are invalid", 422)
+    windows_trusted = meta.get("windows_trusted", False)
+    if not isinstance(windows_trusted, bool):
+        raise ApiError("AI_SKILL_INVALID_MANIFEST", "windows_trusted must be a boolean", 422)
     if implementation == "md_script" and not meta["allow_scripts"]:
         raise ApiError("AI_SKILL_INVALID_MANIFEST", "script implementation requires allow_scripts", 422)
     for schema_key in ("input_schema", "output_schema"):
@@ -140,7 +146,7 @@ def parse_skill(root: str | Path, skill_dir: str | Path) -> MdSkillManifest:
         digest.update(name.encode())
         digest.update(b"\0")
         digest.update(content)
-    return MdSkillManifest(meta["name"], meta["description"], implementation, meta["version"], meta["input_schema"], meta["output_schema"], meta["allow_scripts"], meta["required_permissions"], instructions, scripts, digest.hexdigest(), directory.relative_to(root_path).as_posix())
+    return MdSkillManifest(meta["name"], meta["description"], implementation, meta["version"], meta["input_schema"], meta["output_schema"], meta["allow_scripts"], meta["required_permissions"], instructions, scripts, digest.hexdigest(), directory.relative_to(root_path).as_posix(), windows_trusted=windows_trusted)
 
 
 def validate_input(manifest: MdSkillManifest, value: dict[str, Any]) -> None:
@@ -151,4 +157,4 @@ def validate_input(manifest: MdSkillManifest, value: dict[str, Any]) -> None:
 
 
 def snapshot(manifest: MdSkillManifest) -> dict[str, Any]:
-    return {"name": manifest.name, "description": manifest.description, "implementation": manifest.implementation, "declared_version": manifest.declared_version, "input_schema": manifest.input_schema, "output_schema": manifest.output_schema, "allow_scripts": manifest.allow_scripts, "required_permissions": manifest.required_permissions, "instructions": manifest.instructions, "script_files": manifest.script_files, "file_fingerprint": manifest.file_fingerprint, "relative_path": manifest.relative_path}
+    return {"name": manifest.name, "description": manifest.description, "implementation": manifest.implementation, "declared_version": manifest.declared_version, "input_schema": manifest.input_schema, "output_schema": manifest.output_schema, "allow_scripts": manifest.allow_scripts, "required_permissions": manifest.required_permissions, "instructions": manifest.instructions, "script_files": manifest.script_files, "file_fingerprint": manifest.file_fingerprint, "relative_path": manifest.relative_path, "windows_trusted": manifest.windows_trusted}

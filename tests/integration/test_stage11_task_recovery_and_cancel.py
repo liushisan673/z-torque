@@ -114,7 +114,8 @@ async def test_outbox_dispatch_task_ready_is_effectively_idempotent():
             assert task.status in {TaskStatus.PENDING, TaskStatus.QUEUED}
 
 
-def test_execute_simulated_honors_cancel_requested_before_side_effects():
+@pytest.mark.asyncio
+async def test_execute_simulated_honors_cancel_requested_before_side_effects():
     tenant_id, user_id, agent_id, version_id = _bootstrap()
     with SessionLocal.begin() as db:
         task = create_task(
@@ -130,13 +131,13 @@ def test_execute_simulated_honors_cancel_requested_before_side_effects():
         task_id = task.id
 
     with SessionLocal() as db:
-        execute_simulated(db, task_id)
+        await execute_simulated(db, task_id)
 
     with SessionLocal() as db:
         task = db.get(Task, task_id)
         assert task is not None
         assert task.status == TaskStatus.CANCELLED
-        # Ensure we did not write a SUCCESS result.
+        # Ensure we did not write a fabricated SUCCESS result.
         assert task.result is None or task.result.get("status") != "completed"
 
 
@@ -167,7 +168,8 @@ def test_runtime_recover_requeues_running_and_writes_recovered_outbox():
         assert db.query(Outbox).filter_by(aggregate_id=task_id, event_type="TASK_READY").count() == 2
 
 
-def test_timeout_loop_behavior_can_be_simulated_by_setting_deadline_and_executing():
+@pytest.mark.asyncio
+async def test_timeout_loop_behavior_can_be_simulated_by_setting_deadline_and_executing():
     tenant_id, user_id, agent_id, version_id = _bootstrap()
     with SessionLocal.begin() as db:
         task = create_task(
@@ -183,7 +185,7 @@ def test_timeout_loop_behavior_can_be_simulated_by_setting_deadline_and_executin
         task_id = task.id
 
     with SessionLocal() as db:
-        execute_simulated(db, task_id)
+        await execute_simulated(db, task_id)
 
     with SessionLocal() as db:
         task = db.get(Task, task_id)

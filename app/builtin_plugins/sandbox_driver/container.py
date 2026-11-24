@@ -30,9 +30,11 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
+from app.builtin_plugins.sandbox_driver.patch import FilePatchMixin
 from app.builtin_plugins.sandbox_driver.process import (
     _communicate_capped,
     _terminate_process_tree,
+    _wait_exit,
     enforce_cwd_policy,
 )
 from app.core.errors import ApiError
@@ -45,12 +47,14 @@ from app.plugin_sdk.observability import emit_event
 _CONTAINER_RESOURCE_EXIT_CODES = (137,)
 
 
-class ContainerSandboxDriver(SandboxDriver):
+class ContainerSandboxDriver(FilePatchMixin, SandboxDriver):
     """sandbox.driver 的容器实现：docker run --network none + 只读根 fs + 资源上限。
 
     与 `ProcessSandboxDriver` 共享 cwd 白名单策略与错误码语义；`docker_binary` 可注入
     （单元测试用假 CLI），`emit` 可注入观测上报函数（缺省走 plugin_sdk 惰性转发）。
     """
+
+    isolation = "container"
 
     def __init__(
         self,
@@ -161,14 +165,33 @@ def _new_cidfile() -> Path:
     return Path(tempfile.gettempdir()) / f"zt-sandbox-{uuid.uuid4().hex}.cid"
 
 
-async def _kill_container(docker_binary: str, cid_file: Path) -> None:
-    """按 cidfile 里的容器 id 强杀容器（best-effort，清理路径不得抛出）。"""
+async def _bounded_to_thread(func: Callable[..., Any], *args: Any, timeout: float = 2.0, **kwargs: Any) -> Any:
+    """限时线程池 IO；超时后等包装任务收敛，确认线程已退出，不留幽灵副作用。"""
+    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
     try:
-        container_id = cid_file.read_text(encoding="utf-8").strip()
-    except OSError:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.TimeoutError:
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=timeout)
+        except asyncio.TimeoutError:  # pragma: no cover - 短 IO 不应到此，超时则告警不静默
+            emit_event("sandbox.thread_exit_unconfirmed", {"operation": getattr(func, "__name__", "io")})
+        raise
+
+
+async def _kill_container(docker_binary: str, cid_file: Path) -> None:
+    """按 cidfile 里的容器 id 强杀容器（best-effort，清理路径不得抛出）。
+
+    所有同步文件 IO 走有界线程池；docker kill 自身超时后也确认进程退场，
+    避免 `wait_for` 取消后 CLI 仍在后台产生副作用。
+    """
+    try:
+        container_id = (await _bounded_to_thread(cid_file.read_text, encoding="utf-8")).strip()
+    except (OSError, asyncio.TimeoutError):
         return
     if not container_id:
         return
+    killer: asyncio.subprocess.Process | None = None
     try:
         killer = await asyncio.create_subprocess_exec(
             docker_binary,
@@ -180,9 +203,14 @@ async def _kill_container(docker_binary: str, cid_file: Path) -> None:
         )
         await asyncio.wait_for(killer.wait(), timeout=10)
     except (OSError, asyncio.TimeoutError):  # pragma: no cover - 清理路径尽力而为
-        pass
+        if killer is not None:
+            await _terminate_process_tree(killer)
+            await _wait_exit(killer, timeout=2.0)
     finally:
-        cid_file.unlink(missing_ok=True)
+        try:
+            await _bounded_to_thread(cid_file.unlink, missing_ok=True)
+        except (OSError, asyncio.TimeoutError):
+            pass
 
 
 async def run_containerized_process(
@@ -258,7 +286,10 @@ async def run_containerized_process(
             terminate=_terminate,
         )
     finally:
-        cid_file.unlink(missing_ok=True)
+        try:
+            await _bounded_to_thread(cid_file.unlink, missing_ok=True)
+        except (OSError, asyncio.TimeoutError):
+            pass
     duration_ms = int((time.monotonic() - started) * 1000)
     if timed_out:
         _emit_container_meta(outcome="timeout", script_path=script, duration_ms=duration_ms, exit_code=None, stdout_bytes=len(stdout), stderr_bytes=len(stderr), timed_out=True, emit=emit)

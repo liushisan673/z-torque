@@ -20,29 +20,44 @@ from jsonschema import ValidationError, validate
 
 from app.core.errors import ApiError
 from app.kernel.md_skill import MdSkillManifest, validate_input
-from app.kernel.ports.sandbox_driver import SandboxDriver
+from app.kernel.ports.sandbox_driver import SandboxDriver, SandboxScope
 
 
 class MdSkillRuntime:
     """Run only registered scripts; capability stays unavailable without isolation."""
 
-    def __init__(self, root: str | Path, *, enabled: bool = False, timeout_seconds: float = 10, max_output_bytes: int = 65536, sandbox_driver: SandboxDriver | None = None) -> None:
+    def __init__(self, root: str | Path, *, enabled: bool = False, timeout_seconds: float = 10, max_output_bytes: int = 65536, sandbox_driver: SandboxDriver | None = None, windows_process_enabled: bool = False, allowed_roots: list[str] | None = None) -> None:
         self.root = Path(root).resolve()
         self.enabled = enabled
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
         # sandbox.driver Port 由装配根经插件注入；缺省不构造任何实现（见模块 docstring）
         self._sandbox = sandbox_driver
+        # Windows 有限解禁（§2.3）：总开关 + 路径白名单强制收口
+        self.windows_process_enabled = windows_process_enabled
+        self.allowed_roots = [Path(item).expanduser().resolve() for item in (allowed_roots if allowed_roots is not None else [str(self.root)])]
 
-    async def execute(self, manifest: MdSkillManifest, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def execute(self, manifest: MdSkillManifest, arguments: dict[str, Any], *, scope: SandboxScope | None = None) -> dict[str, Any]:
+        """执行脚本：scope 由 SkillGateway 显式传入（不依赖 ContextVar/环境继承）。
+
+        直构场景未传时以驱动声明的边界为准，仍是显式对象透传，不是隐式回退。
+        """
         validate_input(manifest, arguments)
         if manifest.implementation != "md_script" or not manifest.allow_scripts:
             raise ApiError("AI_SKILL_SCRIPT_DISABLED", "script execution is not enabled for this skill", 503)
         if not self.enabled:
             raise ApiError("AI_CAPABILITY_UNAVAILABLE", "MD-Skill script runtime is disabled", 503)
-        # Windows has no reliable process-level network/filesystem sandbox here.
         if os.name == "nt":
-            raise ApiError("AI_CAPABILITY_UNAVAILABLE", "MD-Skill script isolation is unavailable on this platform", 503)
+            # Windows 有限解禁（§2.3 / 2026-11-24 决策）：不是无条件放行，三重闸门缺一不可：
+            #   1) 总开关 md_skill_windows_process_enabled；
+            #   2) 技能 frontmatter 显式 windows_trusted=true（工具声明可信）；
+            #   3) 路径白名单强制收口：脚本根目录必须落在 allowed_roots 内。
+            # 用户确认由 SkillGateway 在调用本运行时前挂 checkpoint（execute_async 的
+            # requires_confirmation），本层只负责平台闸门与路径边界。
+            if not self.windows_process_enabled:
+                raise ApiError("AI_CAPABILITY_UNAVAILABLE", "Windows process execution is disabled", 503)
+            if not manifest.windows_trusted:
+                raise ApiError("AI_SKILL_WINDOWS_UNTRUSTED", "skill did not declare windows_trusted", 403)
         if self._sandbox is None:
             # 能力缺失必须显式暴露：未装 sandbox_driver 插件时不允许执行脚本
             raise ApiError("AI_CAPABILITY_UNAVAILABLE", "no sandbox.driver implementation is resolved", 503)
@@ -52,7 +67,16 @@ class MdSkillRuntime:
         skill_root = (self.root / manifest.relative_path).resolve()
         if skill_root not in script.parents or script.suffix != ".py" or not script.is_file():
             raise ApiError("AI_SKILL_PATH_INVALID", "script path is invalid", 422)
-        result = await self._sandbox.run(script_path=script, arguments=arguments, cwd=skill_root, timeout_seconds=self.timeout_seconds, max_output_bytes=self.max_output_bytes)
+        # 路径白名单强制收口：所有平台统一校验，Windows 上任一越界直接拒绝（不静默降级）
+        in_allowlist = any(root == skill_root or root in skill_root.parents for root in self.allowed_roots)
+        if not in_allowlist:
+            raise ApiError("AI_SANDBOX_DENIED", "skill root is outside allowed sandbox roots", 403)
+        # 唯一执行入口：显式 scope 贯穿，驱动侧再做一次边界与隔离形态复校验
+        effective_scope = scope or self._sandbox.declared_scope()
+        result = await self._sandbox.execute(
+            effective_scope, script_path=script, arguments=arguments, cwd=skill_root,
+            timeout_seconds=self.timeout_seconds, max_output_bytes=self.max_output_bytes,
+        )
         try:
             validate(result, manifest.output_schema)
         except ValidationError as exc:

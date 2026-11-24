@@ -149,8 +149,10 @@ def _audit(tenant_id, action) -> list[AuditLog]:
 
 
 @pytest.mark.asyncio
-async def test_disabled_gateway_is_503(enterprise_app, seeded):
-    """默认 A2A_ENABLED=false：未开启必须先 503，而不是先报鉴权错误。"""
+async def test_disabled_gateway_is_503(enterprise_app, seeded, monkeypatch):
+    """显式关闭 A2A（单一系统默认开启）：关闭后先 503，而不是先报鉴权错误。"""
+    instance = enterprise_app.objects["a2a_gateway"]
+    monkeypatch.setattr(instance, "_config", replace(instance._config, enabled=False))
     async with await _client() as client:
         response = await client.post("/api/z-torque/a2a/invoke", json=_envelope())
 

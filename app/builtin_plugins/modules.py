@@ -77,6 +77,9 @@ MODULE_REGISTRY: dict[str, ModuleSpec] = {
 # Profile → 模块清单（声明式装配；展开顺序即 contribute 顺序，
 # 依赖约束：secret_provider 先于 model_provider；authz/approval/sandbox/interceptor
 # 先于 skill_executors；mcp_connector 后于 skill_executors）
+# 单一系统（2026-11-24 决策）：取消社区版/企业版能力差距，两个 Profile 名都展开为
+# 同一套全量内置插件。保留两个名字仅为兼容既有配置，不再有「某能力只在企业档」的语义。
+# 显式保留 skill_executors / model_provider / mcp_connector（契约 §2.3）。
 PROFILE_COMMUNITY: tuple[str, ...] = (
     "governance",
     "entry_channels",
@@ -85,14 +88,14 @@ PROFILE_COMMUNITY: tuple[str, ...] = (
     "model_access",
     "memory",
     "storage",
+    "knowledge",
     "execution",
     "connectivity",
+    "audit_export_archive",
+    "a2a",
 )
 
-# 企业版 Profile：社区集合 + 审计导出归档（governance 域追加插件）+ a2a 模块。
-# 显式保留 skill_executors / model_provider / mcp_connector（契约 §2.3），禁止写成
-# 「社区集合之外仅两项」这类隐式覆盖。
-PROFILE_ENTERPRISE: tuple[str, ...] = (*PROFILE_COMMUNITY, "audit_export_archive", "a2a")
+PROFILE_ENTERPRISE: tuple[str, ...] = PROFILE_COMMUNITY
 
 PROFILE_REGISTRY: dict[str, tuple[str, ...]] = {
     "community": PROFILE_COMMUNITY,

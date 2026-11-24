@@ -12,7 +12,6 @@ from sqlalchemy import create_engine
 from app.assembly import assemble
 from app.builtin_plugins.manifest import PluginSdk
 from app.builtin_plugins.model_gateway import (
-    MockModelGateway,
     ModelRoutingGateway,
     OpenAICompatibleGateway,
 )
@@ -67,7 +66,13 @@ def test_model_provider_plain_key_backward_compatible():
     assert default.api_key == "sk-plain"
 
 
-def test_model_provider_without_key_falls_back_to_mock():
+def test_model_provider_without_key_has_no_mock_fallback():
+    """决策（阶段13）：未配置模型时不再降级为 MockModelGateway。
+
+    原实现让全新部署"看起来能对话"却只返回 [MOCK] 假回复，掩盖了"必须先配模型"。
+    现在 default_gateway 为 None，对话会显式报 AI_MODEL_NOT_CONFIGURED。
+    Mock 仅由测试注入（tests/conftest.py），生产装配不再创建。
+    """
     registry = PortRegistry(_specs("secret.provider", "model.provider"))
     settings = SimpleNamespace(model_base_url=None, model_api_key=None, model_name="mock", model_allowed_names=[])
     _contribute_model_provider(settings, registry)
@@ -75,7 +80,9 @@ def test_model_provider_without_key_falls_back_to_mock():
     gateway = registry.get("model.provider")
     assert isinstance(gateway, GuardedModelGateway)
     assert isinstance(gateway._inner, ModelRoutingGateway)
-    assert isinstance(gateway._inner._default_gateway, MockModelGateway)
+    assert gateway._inner._default_gateway is None
+    # 无全局模型时也不应对外声称有默认模型（否则又会变成隐式兜底）
+    assert gateway._inner.default_model == ""
 
 
 def test_model_provider_requires_secret_provider_fail_fast():

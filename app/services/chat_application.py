@@ -13,6 +13,7 @@ from app.kernel.ports.model_selector import snapshot_model_params
 from app.kernel.registry.active import try_port
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
+from app.kernel.task.checkpoints import create_seed_checkpoint
 from app.kernel.task.service import create_task
 from app.models import Agent, AgentVersion, Conversation, File, Message, Task
 from app.models.message import message_file
@@ -30,10 +31,39 @@ from app.services.tool_mapping_builder import build_tool_mappings
 logger = logging.getLogger("z_torque.chat")
 
 
-def create_chat_task(db: Session, *, ctx: SecurityContext, conversation: Conversation, user_message: Message, idempotency_key: str, trace_id: str | None) -> Task:
-    """会话任务创建（POST /chat 任务链路与流式分流共用）：绑定会话当前发布版本。"""
+def resolve_chat_model_name(*, snapshot_model: str | None, gateway: ModelGateway | None) -> str:
+    """解析本次对话使用的模型名（删除 mock 兜底后的唯一入口）。
+
+    优先级：
+      1. AgentVersion 快照里冻结的模型绑定（发布后不可热改）；
+      2. 网关声明的默认模型 —— 仅当部署方显式配置了全局模型时才存在；
+      3. 两者皆无 → 抛 ``AI_MODEL_NOT_CONFIGURED``。
+
+    为什么不再回退 "mock"：原实现会在未配置模型时静默使用 MockModelGateway，
+    让全新部署"看起来能对话"却只返回假回复，掩盖了"必须先配模型"这一前提。
+    现在把缺失模型变成显式错误，前端据此渲染「去配置模型」引导卡片。
+    """
+    name = str(snapshot_model or "").strip()
+    if name:
+        return name
+    fallback = str(getattr(gateway, "default_model", "") or "").strip()
+    if fallback:
+        return fallback
+    raise ApiError(
+        "AI_MODEL_NOT_CONFIGURED",
+        "no model configured: bind a model to the agent, or configure one under 模型管理",
+        409,
+    )
+
+
+def create_chat_task(db: Session, *, ctx: SecurityContext, conversation: Conversation, user_message: Message, idempotency_key: str, trace_id: str | None, seed: dict | None = None) -> Task:
+    """会话任务创建（POST /chat 任务链路与流式分流共用）：绑定会话当前发布版本。
+
+    seed：流式分流时已经拿到的那一轮模型结论（tool_calls）。写入后 worker 认领任务即跳过
+    重复的决策轮推理——同一次请求不再为同一轮模型调用等两遍（阶段13 性能优化）。
+    """
     agent_version = _published_agent_version(db, conversation.agent_id)
-    return create_task(
+    task = create_task(
         db,
         ctx=ctx,
         agent_id=conversation.agent_id,
@@ -44,6 +74,9 @@ def create_chat_task(db: Session, *, ctx: SecurityContext, conversation: Convers
         trigger_message_id=user_message.id,
         trace_id=trace_id,
     )
+    if seed:
+        create_seed_checkpoint(db, task_id=task.id, tenant_id=task.tenant_id, idempotency_key=f"{idempotency_key}:seed", seed=seed)
+    return task
 
 
 CONVERSATION_TITLE_MAX_LEN = 30
@@ -125,8 +158,11 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             settings = get_settings()
             # 调用参数：版本快照键优先（快照语义），未设置回退模型档案 max_output_tokens，再退全局兜底
             temperature, max_tokens = snapshot_model_params(agent_version.config_snapshot, default_temperature=settings.model_temperature, default_max_tokens=settings.model_max_tokens)
-            # 无工具直答同样使用智能体版本绑定的模型，而不是全局默认模型
-            model_name = str((agent_version.config_snapshot or {}).get("model") or "").strip() or getattr(model_gateway, "default_model", "mock")
+            # 无工具直答同样使用智能体版本绑定的模型；未绑定且无全局模型时显式报错
+            model_name = resolve_chat_model_name(
+                snapshot_model=(agent_version.config_snapshot or {}).get("model"),
+                gateway=model_gateway,
+            )
             max_tokens = effective_max_tokens(db, tenant_id=tenant_id, model_identifier=model_name, snapshot_max_tokens=(agent_version.config_snapshot or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
             capabilities = model_capabilities(db, tenant_id=tenant_id, model_identifier=model_name)
             request = ModelRequest(
@@ -141,6 +177,8 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
                     attachment_ids=attachment_ids,
                     supports_vision=capabilities.supports_vision,
                     supports_audio=capabilities.supports_audio,
+                    model=model_name,
+                    trace_id=trace_id,
                 ),
                 tools=[], timeout_seconds=settings.model_timeout_seconds,
             )

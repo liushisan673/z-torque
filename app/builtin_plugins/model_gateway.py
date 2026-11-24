@@ -1,13 +1,13 @@
 """模型网关能力实现（model.provider Port，G2b 迁入）。
 
-OpenAICompatibleGateway / MockModelGateway 属能力实现（能力实现归插件），
+OpenAICompatibleGateway / ModelRoutingGateway 属能力实现（能力实现归插件），
 本模块按插件→内核方向引用契约（app/kernel/model_gateway/contracts.py：协议与 DTO）。
 内核侧 `SkillGateway` / `task/runtime` 等不变量载体仍依赖 contracts 中的
 ModelGateway 协议，不感知本模块（装配期经 model.provider Port 注入）。
 
 OpenAICompatibleGateway：OpenAI 兼容 /chat/completions（非流式 + SSE 流式 + 流式聚合 tool_calls），
-错误统一映射 ModelGatewayError（超时/限流/鉴权/上游/响应非法）；
-MockModelGateway：未配置外部模型时的确定性显式降级（capabilities 可见，勿用于生产）。
+错误统一映射 ModelGatewayError（超时/限流/鉴权/上游/响应非法）。
+MockModelGateway 已移至 tests/support/fakes.py（TEST-ONLY），生产装配不得回挂。
 """
 
 import hashlib
@@ -348,18 +348,6 @@ class OpenAICompatibleGateway(ModelGateway):
         usage_data = body.get('usage') or {}
         usage = ModelUsage(usage_data.get('prompt_tokens', 0), usage_data.get('completion_tokens', 0), usage_data.get('total_tokens', 0))
         return ModelResponse(message.get('content'), calls, choice.get('finish_reason'), body.get('id'), usage, message.get('reasoning_content'))
-
-
-class MockModelGateway(ModelGateway):
-    """Deterministic provider used when no external model is configured."""
-
-    async def generate(self, request: ModelRequest) -> ModelResponse:
-        content = request.messages[-1].content if request.messages else ""
-        return ModelResponse(content=f"[MOCK] {content}", finish_reason="stop", usage=ModelUsage())
-
-    async def stream(self, request: ModelRequest) -> AsyncIterator[str]:
-        response = await self.generate(request)
-        yield response.content or ""
 
 
 class ModelRoutingGateway(ModelGateway):

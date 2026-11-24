@@ -11,8 +11,117 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from typing import Any, Iterator
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.core.errors import ApiError
+from app.kernel.model_gateway.contracts import ModelGateway, ModelRequest, ModelResponse, ModelUsage
+from app.kernel.ports.skill_executor import ExecutionResult
+from app.kernel.security_context import SecurityContext
+from app.kernel.task.service import create_task
+from app.models import Agent, Conversation, Message
+from app.services.chat_service import ChatResult
+
+
+class MockExecutor:
+    """TEST-ONLY 无条件成功执行器。
+
+    测试约定：只允许在测试局部构造的 SkillGateway 上 `register(MockExecutor())`；
+    禁止回挂 `app/builtin_plugins/plugins.py` 或任何生产装配路径。
+    生产 capabilities 必须不暴露该 tool_type（见 test_no_fake_success.py）。
+    """
+
+    tool_type = "MOCK"
+
+    def execute(self, config: dict[str, Any], arguments: dict[str, Any], _timeout_seconds: float) -> ExecutionResult:
+        return ExecutionResult(status="SUCCEEDED", data={"echo": arguments, "config": config})
+
+
+class MockModelGateway(ModelGateway):
+    """TEST-ONLY 确定性模型网关替身。
+
+    测试约定：只允许由 `tests/conftest.py` 显式注入 `app.state.model_gateway`；
+    禁止回挂生产装配（`app/builtin_plugins/plugins.py`）或生产插件模块。
+    生产 capabilities 的模型实现不得出现 mock。
+    """
+
+    default_model = "mock"
+
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        content = request.messages[-1].content if request.messages else ""
+        return ModelResponse(content=f"[MOCK] {content}", finish_reason="stop", usage=ModelUsage())
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[str]:
+        response = await self.generate(request)
+        yield response.content or ""
+
+
+def handle_mock_chat(
+    db: Session,
+    *,
+    ctx: SecurityContext,
+    conversation_id: UUID,
+    content: str,
+    requires_task: bool = False,
+    idempotency_key: str | None = None,
+    trace_id: str | None = None,
+) -> ChatResult:
+    """TEST-ONLY 假聊天路径。
+
+    测试约定：只允许测试直接调用；禁止回挂 `app/services/chat_service.py`
+    或任何生产入口。生产 service 不得包含 `[MOCK]` 假回复。
+    """
+    tenant_id = ctx.tenant_id
+    user_id = ctx.user_id
+    trace_id = trace_id or ctx.trace_id
+    conversation = db.scalar(
+        select(Conversation).where(
+            Conversation.id == conversation_id,
+            Conversation.tenant_id == tenant_id,
+            Conversation.owner_user_id == user_id,
+            Conversation.status == "ACTIVE",
+        )
+    )
+    if conversation is None:
+        raise ApiError("AI_RESOURCE_NOT_FOUND", "conversation not found", 404)
+    user_message = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="USER", content=content, status="PROCESSING")
+    db.add(user_message)
+    db.flush()
+    conversation.last_message_at = datetime.now(timezone.utc)
+    if requires_task:
+        if not idempotency_key:
+            raise ApiError("AI_PARAM_INVALID", "idempotency key is required for task chat", 400)
+        task = create_task(
+            db, ctx=ctx,
+            agent_id=conversation.agent_id,
+            agent_version_id=_published_version_id(db, conversation.agent_id),
+            idempotency_key=idempotency_key,
+            request_summary=content,
+            conversation_id=conversation.id,
+            trigger_message_id=user_message.id,
+            trace_id=trace_id,
+        )
+        user_message.status = "COMPLETED"
+        return ChatResult(user_message=user_message, assistant_message=None, task_id=task.id, mocked=True)
+    assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", content="[MOCK] " + content, status="COMPLETED")
+    user_message.status = "COMPLETED"
+    db.add(assistant)
+    db.flush()
+    conversation.last_message_at = datetime.now(timezone.utc)
+    return ChatResult(user_message=user_message, assistant_message=assistant, mocked=True)
+
+
+def _published_version_id(db: Session, agent_id: UUID) -> UUID:
+    agent = db.scalar(select(Agent).where(Agent.id == agent_id))
+    if agent is None or agent.current_published_version_id is None:
+        raise ApiError("AI_AGENT_VERSION_NOT_PUBLISHED", "agent has no published version", 409)
+    return agent.current_published_version_id
 
 
 class FakeRegistry:

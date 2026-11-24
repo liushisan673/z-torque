@@ -24,10 +24,10 @@ from app.builtin_plugins.executors import (
     HttpExecutor,
     McpExecutor,
     MdSkillScriptExecutor,
-    MockExecutor,
 )
 from app.builtin_plugins.identity_provider import IdentityProviderPlugin
 from app.builtin_plugins.interceptor import InterceptorPlugin
+from app.builtin_plugins.knowledge import KnowledgePlugin
 from app.builtin_plugins.lock_provider import LockProviderPlugin
 from app.builtin_plugins.long_memory import LongMemoryPlugin
 from app.builtin_plugins.manifest import (
@@ -38,7 +38,6 @@ from app.builtin_plugins.manifest import (
 )
 from app.builtin_plugins.mcp import StdioServerRegistry, make_http_connector
 from app.builtin_plugins.model_gateway import (
-    MockModelGateway,
     ModelRoutingGateway,
     OpenAICompatibleGateway,
 )
@@ -74,7 +73,7 @@ def _resolve_api_key(secret_provider, raw_key: SecretStr | str | None) -> str | 
 class ModelProviderPlugin:
     manifest = PluginManifest(
         name="model_provider",
-        description="模型路由网关：按模型管理配置选择 Provider/Endpoint；未配置时显式降级为 Mock",
+        description="模型路由网关：按模型管理配置选择 Provider/Endpoint；全局模型仅作部署方显式兜底，未配置时显式报错（不再降级 Mock）",
         provides=("model.provider",),
         requires=("secret.provider",),
         permissions=(ENGINE_PERMISSION,),
@@ -103,9 +102,17 @@ class ModelProviderPlugin:
             )
             label = f"model_routing(global={settings.model_name})"
         else:
-            default_gateway = MockModelGateway()
-            label = "model_routing(global=mock)"
-            logger.warning("global model is NOT configured; MockModelGateway is the routing fallback (显式降级，勿用于生产)")
+            # 决策（阶段13）：未配置模型时**不再降级为 MockModelGateway**。
+            # 原实现让全新部署“看起来能对话”，实际返回假回复，掩盖了「必须先配模型」这一事实。
+            # 现在 default_gateway 为 None，任何对话都会在 ModelRoutingGateway._route 处
+            # 抛 AI_MODEL_NOT_AVAILABLE / 在入口处抛 AI_MODEL_NOT_CONFIGURED，由前端引导去配置。
+            # Mock 仅由测试通过依赖注入提供（见 tests/conftest.py），生产装配不再创建。
+            default_gateway = None
+            label = "model_routing(no_global_model)"
+            logger.warning(
+                "global model is NOT configured; chat/task will fail with AI_MODEL_NOT_CONFIGURED "
+                "until a model is configured in 模型管理 (Mock fallback removed by design)"
+            )
 
         router = ModelRoutingGateway(
             session_factory=lambda: sdk.session(),
@@ -122,7 +129,7 @@ class ModelProviderPlugin:
 class SkillExecutorPlugin:
     manifest = PluginManifest(
         name="skill_executors",
-        description="SkillGateway 与内置工具执行器（MOCK/HTTP/DB_QUERY/DB_SQL/MD_SCRIPT/MCP 占位）",
+        description="SkillGateway 与内置工具执行器（HTTP/DB_QUERY/DB_SQL/MD_SCRIPT/MCP 占位；MOCK 仅测试 DI）",
         provides=("skill.executor",),
         requires=("authz.provider",),
         permissions=("skill.execute", "tool.execute", "db.query"),
@@ -145,7 +152,6 @@ class SkillExecutorPlugin:
             secret_provider=sdk.shared("secret.provider"),
         )
         engine: Engine = sdk.engine
-        gateway.register(MockExecutor())
         gateway.register(HttpExecutor())
         gateway.register(DbQueryExecutor(engine))
         gateway.register(ConnectorDbExecutor())
@@ -196,7 +202,7 @@ class QueueDriverPlugin:
         sdk.register_port("queue.driver", InMemoryQueueDriver, label="builtin_inmemory_queue")
 
 
-BUILTIN_PLUGINS: tuple[type, ...] = (PolicySourcePlugin, ObservabilitySinkPlugin, InterceptorPlugin, NotifyChannelPlugin, ApprovalProviderPlugin, IdentityProviderPlugin, AuthzProviderPlugin, SecretProviderPlugin, SandboxDriverPlugin, ObjectStorePlugin, WorkingMemoryPlugin, ShortMemoryPlugin, LongMemoryPlugin, ModelProviderPlugin, RuleBasedModelSelectorPlugin, SkillExecutorPlugin, McpConnectorPlugin, QueueDriverPlugin, LockProviderPlugin, AuditExportArchivePlugin, A2AGatewayPlugin)
+BUILTIN_PLUGINS: tuple[type, ...] = (PolicySourcePlugin, ObservabilitySinkPlugin, InterceptorPlugin, NotifyChannelPlugin, ApprovalProviderPlugin, IdentityProviderPlugin, AuthzProviderPlugin, SecretProviderPlugin, SandboxDriverPlugin, ObjectStorePlugin, WorkingMemoryPlugin, ShortMemoryPlugin, LongMemoryPlugin, KnowledgePlugin, ModelProviderPlugin, RuleBasedModelSelectorPlugin, SkillExecutorPlugin, McpConnectorPlugin, QueueDriverPlugin, LockProviderPlugin, AuditExportArchivePlugin, A2AGatewayPlugin)
 
 _KNOWN_PORTS = set(PORT_SPEC_BY_NAME)
 for _plugin_cls in BUILTIN_PLUGINS:
