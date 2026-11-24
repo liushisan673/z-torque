@@ -52,7 +52,7 @@ def test_builtin_system_agent_exposes_dispatch_tool():
         mappings, tools = build_tool_mappings(db, system_version, tenant_id, user_id=uuid4())
         dispatch = [mapping for mapping in mappings.values() if mapping.dispatch_candidate_ids is not None]
         assert len(dispatch) == 1
-        assert dispatch[0].dispatch_candidate_ids == (target_version.id,)
+        assert dispatch[0].dispatch_candidate_ids == (target_version.id,)\n        assert dispatch[0].skill_version_id is None
         assert len([tool for tool in tools if tool["function"]["name"] == dispatch[0].model_name]) == 1
         assert len([m for m in mappings.values() if m.dispatch_candidate_ids is not None]) == 1
         assert dispatch[0].input_schema["required"] == ["agent_version_id", "task"]
