@@ -4,6 +4,7 @@
 保证两条链路暴露给模型的工具集合完全一致。
 """
 import hashlib
+import json
 from uuid import UUID
 
 from sqlalchemy import select
@@ -162,15 +163,13 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
         else:
             candidate_query = candidate_query.where(Agent.source_type == "OFFICIAL")
         candidates = db.scalars(candidate_query).all()
+        route_options: list[dict[str, str]] = []
+        candidate_ids: list[UUID] = []
         for target in candidates:
             target_agent = db.get(Agent, target.agent_id)
             if target_agent is None:
                 continue
-            alias = f"call_agent_{hashlib.md5(str(target.id).encode('utf-8')).hexdigest()[:12]}"
-            if alias in mappings:
-                continue
             # 路由描述除 Agent 自身介绍外，补充其当前版本绑定且当前用户可见的 Skill 能力。
-            # 这样 Supervisor 可以根据实际能力选择，而不是只凭 Agent 名称猜测。
             capability_labels: list[str] = []
             capability_links = db.query(AgentVersionSkill).filter(
                 AgentVersionSkill.tenant_id == tenant_id,
@@ -193,14 +192,52 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
                 if label not in capability_labels:
                     capability_labels.append(label)
             capability_text = "；".join(capability_labels[:8])
-            task_description = f"交给「{target_agent.name}」完整处理的任务描述，必须包含目标、约束、相关上下文和输出要求。该 Agent 能力：{capability_text or '以 Agent 描述为准'}"
-            schema = {"type": "object", "properties": {"task": {"type": "string", "description": task_description[:1200]}}, "required": ["task"]}
-            mappings[alias] = ToolMapping(alias, target.id, None, schema, dispatch_agent_version_id=target.id)
-            desc_parts = [f"调用智能体「{target_agent.name}」处理任务", (target_agent.description or "").strip()]
-            if capability_text:
-                desc_parts.append(f"已绑定技能：{capability_text}")
-            desc = "；".join(part for part in desc_parts if part)[:1200]
-            tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
+            candidate_ids.append(target.id)
+            route_options.append({
+                "id": str(target.id),
+                "name": target_agent.name,
+                "description": (target_agent.description or "").strip()[:300],
+                "skills": capability_text[:600],
+            })
+        # 不把 N 个 Agent 暴露成 N 个独立执行工具。模型只看到一个结构化路由入口，
+        # 并且 agent_version_id 使用服务端候选 ID 枚举约束，执行侧还会再次校验成员资格。
+        if route_options:
+            route_description = "从下列当前用户可访问的专业 Agent 中选择最匹配的一位。"
+            route_description += "候选能力：" + json.dumps(route_options, ensure_ascii=False)[:7000]
+            schema = {
+                "type": "object",
+                "properties": {
+                    "agent_version_id": {
+                        "type": "string",
+                        "enum": [item["id"] for item in route_options],
+                        "description": "必须选择候选列表中的一个 AgentVersion ID",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "交给所选 Agent 的完整任务，包含目标、约束、必要上下文和期望输出",
+                    },
+                },
+                "required": ["agent_version_id", "task"],
+                "additionalProperties": False,
+            }
+            alias = "route_specialist"
+            if alias in mappings:
+                alias = "route_agent_specialist"
+            mappings[alias] = ToolMapping(
+                alias,
+                agent_version.id,
+                None,
+                schema,
+                dispatch_candidate_ids=tuple(candidate_ids),
+            )
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": alias,
+                    "description": route_description[:8000],
+                    "parameters": schema,
+                },
+            })
     # §2.4 稳定前缀：工具目录按 name 排序，保证同一会话内 prompt 只追加不改写。
     tools.sort(key=lambda item: item["function"]["name"])
     return mappings, tools
