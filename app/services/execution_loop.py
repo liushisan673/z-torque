@@ -464,7 +464,7 @@ class AgentExecutionLoop:
         except ApiError as exc:
             return _error(f"child agent execution failed: {exc.message}", exc.code)
         if not content or not content.strip():
-            return _error("child agent returned an empty response", "AI_AGENT_EMPTY_RESPONSE")
+            return _error("child agent returned an empty response", "AI_A2A_CHILD_FAILED")
         return {
             "status": "SUCCEEDED",
             "agent_version_id": str(child_agent_version_id),
