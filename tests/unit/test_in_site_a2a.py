@@ -135,6 +135,7 @@ def test_dispatch_candidates_respect_agent_visibility():
         db.flush()
         private_agent.current_published_version_id = private_version.id
         system.current_published_version_id = system_version.id
+        db.flush()
 
         owner_mappings, _ = build_tool_mappings(db, system_version, tenant.id, user_id=owner.id)
         other_mappings, _ = build_tool_mappings(db, system_version, tenant.id, user_id=other.id)
