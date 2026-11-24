@@ -82,6 +82,63 @@ def test_dispatch_candidates_only_include_current_published_version():
         assert dispatch == [target_version.id]
 
 
+def test_dispatch_candidates_respect_agent_visibility():
+    """站内 A2A 不得向当前用户暴露其他用户的私有 Agent。"""
+    with SessionLocal.begin() as db:
+        tenant = Tenant(name=f"a2a-visibility-{uuid4()}")
+        db.add(tenant)
+        db.flush()
+        owner = User(tenant_id=tenant.id, username=f"owner-{uuid4()}", password_hash="x")
+        other = User(tenant_id=tenant.id, username=f"other-{uuid4()}", password_hash="x")
+        db.add_all([owner, other])
+        db.flush()
+
+        private_agent = Agent(
+            tenant_id=tenant.id,
+            owner_user_id=owner.id,
+            name="Private Agent",
+            description="private capability",
+            source_type="USER",
+            status="ACTIVE",
+        )
+        system = Agent(
+            tenant_id=tenant.id,
+            owner_user_id=None,
+            name="System",
+            description="router",
+            source_type="OFFICIAL",
+            status="ACTIVE",
+            is_default_parent=True,
+        )
+        db.add_all([private_agent, system])
+        db.flush()
+        private_version = AgentVersion(
+            tenant_id=tenant.id,
+            agent_id=private_agent.id,
+            version_number=1,
+            status="PUBLISHED",
+            config_schema_version="1",
+            config_snapshot={},
+        )
+        system_version = AgentVersion(
+            tenant_id=tenant.id,
+            agent_id=system.id,
+            version_number=1,
+            status="PUBLISHED",
+            config_schema_version="1",
+            config_snapshot={},
+        )
+        db.add_all([private_version, system_version])
+        db.flush()
+        private_agent.current_published_version_id = private_version.id
+        system.current_published_version_id = system_version.id
+
+        owner_mappings, _ = build_tool_mappings(db, system_version, tenant.id, user_id=owner.id)
+        other_mappings, _ = build_tool_mappings(db, system_version, tenant.id, user_id=other.id)
+        assert any(m.dispatch_agent_version_id == private_version.id for m in owner_mappings.values())
+        assert not any(m.dispatch_agent_version_id == private_version.id for m in other_mappings.values())
+
+
 def test_user_default_agent_does_not_get_dispatch_tool():
     """用户个人默认智能体不获得跨智能体调度能力，只有系统自带智能体可以。"""
     with SessionLocal.begin() as db:
