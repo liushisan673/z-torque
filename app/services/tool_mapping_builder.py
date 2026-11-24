@@ -227,7 +227,7 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
                 suffix += 1
             mappings[alias] = ToolMapping(
                 alias,
-                agent_version.id,
+                None,
                 None,
                 schema,
                 dispatch_candidate_ids=tuple(candidate_ids),
