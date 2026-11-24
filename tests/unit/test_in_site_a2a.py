@@ -50,16 +50,16 @@ def test_builtin_system_agent_exposes_dispatch_tool():
     with SessionLocal.begin() as db:
         tenant_id, system_version, target_version = _agents(db, system_parent=True)
         mappings, tools = build_tool_mappings(db, system_version, tenant_id, user_id=uuid4())
-        dispatch = [mapping for mapping in mappings.values() if mapping.dispatch_agent_version_id is not None]
+        dispatch = [mapping for mapping in mappings.values() if mapping.dispatch_candidate_ids is not None]
         assert len(dispatch) == 1
-        assert dispatch[0].dispatch_agent_version_id == target_version.id
+        assert dispatch[0].dispatch_candidate_ids == (target_version.id,)
         assert any(tool["function"]["name"] == dispatch[0].model_name for tool in tools)
-        assert dispatch[0].input_schema["required"] == ["task"]
+        assert dispatch[0].input_schema["required"] == ["agent_version_id", "task"]
 
     with SessionLocal.begin() as db:
         tenant_id, system_version, _ = _agents(db, system_parent=False)
         mappings, _ = build_tool_mappings(db, system_version, tenant_id)
-        assert [m for m in mappings.values() if m.dispatch_agent_version_id is not None] == []
+        assert [m for m in mappings.values() if m.dispatch_candidate_ids is not None] == []
 
 
 def test_dispatch_candidates_only_include_current_published_version():
@@ -78,7 +78,7 @@ def test_dispatch_candidates_only_include_current_published_version():
         db.flush()
         # current_published_version_id 仍指向 target_version，historical 不应暴露。
         mappings, _ = build_tool_mappings(db, system_version, tenant_id, user_id=uuid4())
-        dispatch = [m.dispatch_agent_version_id for m in mappings.values() if m.dispatch_agent_version_id]
+        dispatch = [candidate_id for m in mappings.values() for candidate_id in (m.dispatch_candidate_ids or ())]
         assert dispatch == [target_version.id]
 
 
@@ -135,8 +135,8 @@ def test_dispatch_candidates_respect_agent_visibility():
 
         owner_mappings, _ = build_tool_mappings(db, system_version, tenant.id, user_id=owner.id)
         other_mappings, _ = build_tool_mappings(db, system_version, tenant.id, user_id=other.id)
-        assert any(m.dispatch_agent_version_id == private_version.id for m in owner_mappings.values())
-        assert not any(m.dispatch_agent_version_id == private_version.id for m in other_mappings.values())
+        assert any(private_version.id in (m.dispatch_candidate_ids or ()) for m in owner_mappings.values())
+        assert not any(private_version.id in (m.dispatch_candidate_ids or ()) for m in other_mappings.values())
 
 
 def test_user_default_agent_does_not_get_dispatch_tool():
