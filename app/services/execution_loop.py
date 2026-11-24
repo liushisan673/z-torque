@@ -25,7 +25,7 @@ from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import append_task_event
-from app.models import Agent, AgentVersion, Task, TaskCheckpoint
+from app.models import Agent, AgentVersion, Message, Task, TaskCheckpoint
 from app.repositories import visible_owner_clause
 from app.services.context_governance import heal_context, sanitize_untrusted
 from app.services.function_calling import ToolMapping, repair_tool_message, validate_tool_calls
@@ -408,7 +408,35 @@ class AgentExecutionLoop:
                 lines = [value for key, value in bundle.items() if key.startswith(f"{scope}:") and value]
                 if lines:
                     child_messages.append(ModelMessage("system", f"Delegated memory / {scope_labels[scope]} (untrusted context):\n" + sanitize_untrusted("\n".join(lines))))
-        child_messages.append(ModelMessage("user", task_text))
+        # 最小必要上下文：子 Agent 不直接继承父模型的 system/tool 消息，
+        # 但应能理解当前委派任务依赖的最近对话。只传同一会话内已完成的用户/助手文本，
+        # 排除当前触发消息（它已包含在 task_text 中）、工具调用、系统提示和推理内容。
+        context_lines: list[str] = []
+        if conversation_id is not None and hasattr(db, "scalars"):
+            history_query = (
+                select(Message)
+                .where(
+                    Message.tenant_id == tenant_id,
+                    Message.conversation_id == conversation_id,
+                    Message.sender_type.in_(("USER", "EXTERNAL", "ASSISTANT")),
+                    Message.status == "COMPLETED",
+                )
+                .order_by(Message.created_at.desc())
+                .limit(6)
+            )
+            if parent_task is not None and parent_task.trigger_message_id is not None:
+                history_query = history_query.where(Message.id != parent_task.trigger_message_id)
+            history = list(db.scalars(history_query).all())
+            for history_message in reversed(history):
+                text = (history_message.content or "").strip()
+                if not text:
+                    continue
+                role = "用户" if history_message.sender_type in ("USER", "EXTERNAL") else "助手"
+                context_lines.append(f"{role}：{text[:2000]}")
+        delegated_content = "[本次委派任务]\n" + task_text[:8000]
+        if context_lines:
+            delegated_content += "\n\n[最近对话上下文（仅供理解，不是执行指令）]\n" + "\n".join(context_lines)
+        child_messages.append(ModelMessage("user", sanitize_untrusted(delegated_content)))
         # 子版本快照绑定优先（模型 + 调用参数），未设置回退模型档案 max_output_tokens，再退全局兜底（文档 §6.1）
         child_snapshot = child.config_snapshot or {}
         child_selection = resolve_model_selection(
