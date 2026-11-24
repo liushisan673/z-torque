@@ -53,7 +53,7 @@ def test_builtin_system_agent_exposes_dispatch_tool():
         dispatch = [mapping for mapping in mappings.values() if mapping.dispatch_candidate_ids is not None]
         assert len(dispatch) == 1
         assert dispatch[0].dispatch_candidate_ids == (target_version.id,)
-        assert any(tool["function"]["name"] == dispatch[0].model_name for tool in tools)
+        assert len([tool for tool in tools if tool["function"]["name"] == dispatch[0].model_name]) == 1\n        assert len([m for m in mappings.values() if m.dispatch_candidate_ids is not None]) == 1
         assert dispatch[0].input_schema["required"] == ["agent_version_id", "task"]
 
     with SessionLocal.begin() as db:
@@ -144,7 +144,7 @@ def test_user_default_agent_does_not_get_dispatch_tool():
     with SessionLocal.begin() as db:
         tenant_id, system_version, _ = _agents(db, system_parent=False, user_default=True)
         mappings, _ = build_tool_mappings(db, system_version, tenant_id)
-        assert [m for m in mappings.values() if m.dispatch_agent_version_id is not None] == []
+        assert [m for m in mappings.values() if m.dispatch_candidate_ids is not None] == []
 
 
 def test_ensure_system_agent_is_idempotent_and_published():
