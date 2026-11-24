@@ -169,9 +169,37 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             alias = f"call_agent_{hashlib.md5(str(target.id).encode('utf-8')).hexdigest()[:12]}"
             if alias in mappings:
                 continue
-            schema = {"type": "object", "properties": {"task": {"type": "string", "description": f"交给「{target_agent.name}」完整处理的任务描述，必须包含完成任务所需的目标、约束、相关上下文和输出要求"}}, "required": ["task"]}
+            # 路由描述除 Agent 自身介绍外，补充其当前版本绑定且当前用户可见的 Skill 能力。
+            # 这样 Supervisor 可以根据实际能力选择，而不是只凭 Agent 名称猜测。
+            capability_labels: list[str] = []
+            capability_links = db.query(AgentVersionSkill).filter(
+                AgentVersionSkill.tenant_id == tenant_id,
+                AgentVersionSkill.agent_version_id == target.id,
+            ).all()
+            for capability_link in capability_links:
+                capability_version = db.get(SkillVersion, capability_link.skill_version_id)
+                capability_skill = db.get(Skill, capability_version.skill_id) if capability_version else None
+                if (
+                    capability_version is None
+                    or capability_version.status != "PUBLISHED"
+                    or capability_skill is None
+                    or capability_skill.status != "ACTIVE"
+                    or (visible_skill_ids is not None and capability_skill.id not in visible_skill_ids)
+                ):
+                    continue
+                label = capability_skill.name
+                if capability_skill.description:
+                    label += f"：{capability_skill.description.strip()[:100]}"
+                if label not in capability_labels:
+                    capability_labels.append(label)
+            capability_text = "；".join(capability_labels[:8])
+            task_description = f"交给「{target_agent.name}」完整处理的任务描述，必须包含目标、约束、相关上下文和输出要求。该 Agent 能力：{capability_text or '以 Agent 描述为准'}"
+            schema = {"type": "object", "properties": {"task": {"type": "string", "description": task_description[:1200]}}, "required": ["task"]}
             mappings[alias] = ToolMapping(alias, target.id, None, schema, dispatch_agent_version_id=target.id)
-            desc = f"调用智能体「{target_agent.name}」处理任务：{(target_agent.description or '').strip()}".rstrip("：")[:512]
+            desc_parts = [f"调用智能体「{target_agent.name}」处理任务", (target_agent.description or "").strip()]
+            if capability_text:
+                desc_parts.append(f"已绑定技能：{capability_text}")
+            desc = "；".join(part for part in desc_parts if part)[:1200]
             tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
     # §2.4 稳定前缀：工具目录按 name 排序，保证同一会话内 prompt 只追加不改写。
     tools.sort(key=lambda item: item["function"]["name"])
