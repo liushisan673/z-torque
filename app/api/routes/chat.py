@@ -16,13 +16,13 @@ from app.kernel.security_context import SecurityContext
 from app.kernel.task.service import create_task
 from app.models import Agent, AgentVersion, Conversation, Message
 from app.schemas.chat import ChatRequest, ChatResponse
+from app.services import knowledge_service
 from app.services.chat_application import (
     ensure_conversation_title,
     handle_chat,
     resolve_agent_mentions,
     resolve_chat_model_name,
 )
-from app.services import knowledge_service
 from app.services.context_builder import build_agent_system_prompt, build_context
 from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens
