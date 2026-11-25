@@ -1849,7 +1849,7 @@ export function ChatPage() {
 
               {waitingConfirm && (
                 <div className="chat-confirm-box">
-                  <p>当前任务已暂停并释放执行位。批准后将从检查点继续；等待期间，其他任务可以正常运行。</p>
+                  <p>当前任务已暂停并释放执行位。批准后将从检查点继续；等待期间，你可以切换到其他会话继续处理任务，返回本会话后再完成审批。</p>
                   <div className="chat-confirm-actions">
                     <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>确认</button>
                     <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
