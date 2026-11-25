@@ -1516,7 +1516,7 @@ export function ChatPage() {
               <span className="chat-header-title">{currentConversation?.title ?? "新会话"}</span>
               {currentAgent && <span className="chat-agent-chip">{currentAgent.name}</span>}
               {/* 执行中实时指示（对齐 chat.html 的 live-pill） */}
-              {runLive && <span className="chat-live-pill"><span className="dot" />执行中</span>}
+              {runLive && <span className="chat-live-pill" role="status" aria-live="polite"><span className="dot" />{waitingConfirm ? "等待人工确认" : "执行中"}</span>}
             </div>
             <div className="chat-header-actions">
               <FileCompareDrawer conversationId={conversationId} />
@@ -1546,7 +1546,7 @@ export function ChatPage() {
             ) : messages.length === 0 && streamingText === null && !activeRun && runAnswer === null ? (
               <div className="chat-welcome">
                 <h2>开始对话</h2>
-                <p>选择智能体后输入问题。需要执行技能时将自动创建任务，并在对话中实时展示执行过程。</p>
+                <p>直接提问会作为普通对话回复；只有需要调用工具、技能或明确执行任务时，系统才会创建 Task，并展示执行过程与审批状态。</p>
                 {/* 无可用智能体：这是产品的第一道门，必须给出原因与出路 */}
                 {!agentId ? (
                   <GuideCallout
