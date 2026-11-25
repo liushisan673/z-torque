@@ -121,6 +121,6 @@ def test_assembly_resolves_all_21_ports():
     resolved = [name for name, item in status.items() if item["state"] == PortState.RESOLVED]
     unavailable = [name for name, item in status.items() if item["state"] == PortState.UNAVAILABLE]
     assert len(status) == 21
-    # 20 个有内置实现；knowledge.provider 已由本地 FTS5 插件落地，vector.store 仍显式 UNAVAILABLE
-    assert set(unavailable) == {"vector.store"}
-    assert len(resolved) == 20
+    # 21 个 Port 均有内置实现；knowledge.provider 提供 FTS5，vector.store 提供本地持久化精确余弦检索
+    assert set(unavailable) == set()
+    assert len(resolved) == 21

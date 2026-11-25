@@ -15,6 +15,7 @@ import { useToast } from "../components/Toast";
 
 const FILES_API = "/api/z-torque/files";
 const KNOWLEDGE_API = "/api/z-torque/knowledge";
+const KNOWLEDGE_BASES_API = KNOWLEDGE_API + "/bases";
 const ALLOWED_EXTENSIONS = [".pdf", ".txt", ".md", ".csv", ".xlsx"];
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 
@@ -26,9 +27,12 @@ interface KnowledgeFile {
   status: "UPLOADED" | "PARSED" | "PARSE_FAILED" | string;
   created_at: string;
 }
+interface KnowledgeBase { id: string; name: string; description?: string | null; status: string; }
+interface KnowledgeBaseDocument { file_id: string; file_name: string; indexed: boolean; }
 interface KnowledgeStatus {
-  search: "READY" | "DEGRADED" | "UNAVAILABLE" | string;
+  search: "READY" | "AVAILABLE" | "DEGRADED" | "UNAVAILABLE" | string;
   fts5: boolean;
+  embedding?: { enabled: boolean; provider?: string | null; model?: string | null; semantic_search: boolean; hybrid_search: boolean };
   citation_enforcement: boolean;
 }
 interface KnowledgeChunk {
@@ -72,6 +76,12 @@ export function KnowledgePage() {
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  const [selectedBaseId, setSelectedBaseId] = useState("");
+  const [baseDocuments, setBaseDocuments] = useState<KnowledgeBaseDocument[]>([]);
+  const [createBaseOpen, setCreateBaseOpen] = useState(false);
+  const [newBaseName, setNewBaseName] = useState("");
+  const [savingBase, setSavingBase] = useState(false);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -90,12 +100,15 @@ export function KnowledgePage() {
     if (quiet) setRefreshing(true);
     else setLoading(true);
     try {
-      const [fileRows, knowledgeStatus] = await Promise.all([
+      const [fileRows, knowledgeStatus, baseRows] = await Promise.all([
         request<KnowledgeFile[]>(FILES_API),
         request<KnowledgeStatus>(`${KNOWLEDGE_API}/status`),
+        request<KnowledgeBase[]>(KNOWLEDGE_BASES_API),
       ]);
       setFiles(fileRows);
       setStatus(knowledgeStatus);
+      setKnowledgeBases(baseRows);
+      setSelectedBaseId((current) => current && baseRows.some((item) => item.id === current) ? current : (baseRows[0]?.id ?? ""));
     } catch (err) {
       toast("error", errorText(err, "加载知识库状态失败"));
     } finally {
@@ -105,9 +118,64 @@ export function KnowledgePage() {
   }, [toast]);
   useEffect(() => { void load(); }, [load]);
 
+  const loadBaseDocuments = useCallback(async (baseId: string) => {
+    if (!baseId) { setBaseDocuments([]); return; }
+    try {
+      const rows = await request<KnowledgeBaseDocument[]>(KNOWLEDGE_BASES_API + "/" + baseId + "/documents");
+      setBaseDocuments(rows);
+    } catch (err) { toast("error", errorText(err, "加载知识库文档失败")); }
+  }, [toast]);
+  useEffect(() => { void loadBaseDocuments(selectedBaseId); }, [selectedBaseId, loadBaseDocuments]);
+
+  async function createKnowledgeBase() {
+    const name = newBaseName.trim();
+    if (!name) { toast("info", "请输入知识库名称"); return; }
+    setSavingBase(true);
+    try {
+      const created = await request<KnowledgeBase>(KNOWLEDGE_BASES_API, { method: "POST", body: { name } });
+      setKnowledgeBases((current) => [created, ...current]);
+      setSelectedBaseId(created.id);
+      setNewBaseName("");
+      setCreateBaseOpen(false);
+      toast("success", "知识库已创建");
+    } catch (err) { toast("error", errorText(err, "创建知识库失败")); }
+    finally { setSavingBase(false); }
+  }
+
+  async function deleteKnowledgeBase() {
+    if (!selectedBaseId) return;
+    try {
+      await request(KNOWLEDGE_BASES_API + "/" + selectedBaseId, { method: "DELETE" });
+      const remaining = knowledgeBases.filter((item) => item.id !== selectedBaseId);
+      setKnowledgeBases(remaining);
+      setSelectedBaseId(remaining[0]?.id ?? "");
+      setBaseDocuments([]);
+      toast("success", "知识库已删除，原始文件仍保留");
+    } catch (err) { toast("error", errorText(err, "删除知识库失败")); }
+  }
+
+  async function attachFile(file: KnowledgeFile) {
+    if (!selectedBaseId) return;
+    try {
+      await request(KNOWLEDGE_BASES_API + "/" + selectedBaseId + "/documents", { method: "POST", body: { file_id: file.id } });
+      await loadBaseDocuments(selectedBaseId);
+      toast("success", "资料已加入当前知识库");
+    } catch (err) { toast("error", errorText(err, "加入知识库失败")); }
+  }
+
+  async function detachFile(file: KnowledgeFile) {
+    if (!selectedBaseId) return;
+    try {
+      await request(KNOWLEDGE_BASES_API + "/" + selectedBaseId + "/documents/" + file.id, { method: "DELETE" });
+      setBaseDocuments((current) => current.filter((item) => item.file_id !== file.id));
+      toast("success", "资料已从当前知识库移除");
+    } catch (err) { toast("error", errorText(err, "移除资料失败")); }
+  }
+
   async function handleUpload(fileList?: FileList | null) {
     const selected = Array.from(fileList ?? []);
     if (selected.length === 0) return;
+    if (!selectedBaseId) { toast("info", "请先创建或选择一个知识库，再添加资料"); return; }
     const accepted: File[] = [];
     const rejected: string[] = [];
     for (const file of selected) {
@@ -127,9 +195,10 @@ export function KnowledgePage() {
     for (let index = 0; index < accepted.length; index += 1) {
       const file = accepted[index];
       try {
-        await uploadFile<KnowledgeFile>(FILES_API, file, {
+        const uploaded = await uploadFile<KnowledgeFile>(FILES_API, file, {
           onProgress: (percent) => setUploadProgress(Math.round(((index + percent / 100) / accepted.length) * 100)),
         });
+        await request(KNOWLEDGE_BASES_API + "/" + selectedBaseId + "/documents", { method: "POST", body: { file_id: uploaded.id } });
         succeeded += 1;
       } catch (err) {
         toast("error", file.name + "：" + errorText(err, "上传失败"));
@@ -168,7 +237,7 @@ export function KnowledgePage() {
     setSearching(true);
     setResults(null);
     try {
-      const response = await request<SearchResult>(`${KNOWLEDGE_API}/search`, { method: "POST", body: { query: text, top_k: 8 } });
+      const response = await request<SearchResult>(`${KNOWLEDGE_API}/search`, { method: "POST", body: { query: text, top_k: 8, knowledge_base_id: selectedBaseId || undefined } });
       setResults(response.chunks ?? []);
       if (response.state !== "AVAILABLE" && response.state !== "READY") toast("info", "检索服务当前处于降级状态，结果可能不完整");
     } catch (err) {
@@ -199,9 +268,12 @@ export function KnowledgePage() {
     { title: "状态", dataIndex: "status", width: 112, render: (value: string) => { const item = fileStatus(value); return <Tag color={item.color}>{item.label}</Tag>; } },
     { title: "添加时间", dataIndex: "created_at", width: 180, render: formatTime },
     {
-      title: "操作", key: "actions", width: 142,
+      title: "操作", key: "actions", width: 190,
       render: (_: unknown, file) => (
         <Space size={4}>
+          {file.status === "PARSED" && (baseDocuments.some((item) => item.file_id === file.id)
+            ? <Tooltip title="从当前知识库移除"><Button type="text" size="small" icon={<DatabaseOutlined />} onClick={() => void detachFile(file)} /></Tooltip>
+            : <Tooltip title="加入当前知识库"><Button type="text" size="small" icon={<DatabaseOutlined />} disabled={!selectedBaseId} onClick={() => void attachFile(file)} /></Tooltip>)}
           <Tooltip title="预览解析文本"><Button type="text" size="small" icon={<EyeOutlined />} disabled={file.status !== "PARSED"} onClick={() => void openPreview(file)} /></Tooltip>
           <Tooltip title="下载原文件"><Button type="text" size="small" icon={<DownloadOutlined />} onClick={() => void downloadFile(`${FILES_API}/${file.id}/raw`, file.name).catch((err) => toast("error", errorText(err, "下载失败")))} /></Tooltip>
           <Popconfirm title="确定删除这份资料？" description="删除后，它将不再参与后续知识检索。" onConfirm={() => void removeFile(file)}>
@@ -224,19 +296,25 @@ export function KnowledgePage() {
           <div className="knowledge-title-row"><Typography.Title level={3}>知识库</Typography.Title>{stateView && <Tag color={stateView.color}>{stateView.label}</Tag>}</div>
           <Typography.Paragraph type="secondary">集中管理本机资料、验证检索效果，并在工作台中检查智能体是否能正确引用资料。</Typography.Paragraph>
         </div>
-        <Space>
+        <Space wrap>
+          <Select value={selectedBaseId || undefined} placeholder="选择知识库" style={{ width: 210 }} onChange={setSelectedBaseId} options={knowledgeBases.map((item) => ({ value: item.id, label: item.name }))} />
+          <Button onClick={() => setCreateBaseOpen(true)}>新建知识库</Button>
+          <Popconfirm title="删除当前知识库？" description="只删除知识库及其关联，原始文件不会删除。" onConfirm={() => void deleteKnowledgeBase()} disabled={!selectedBaseId}>
+            <Button danger disabled={!selectedBaseId}>删除知识库</Button>
+          </Popconfirm>
           <Button icon={<ReloadOutlined />} onClick={() => void load(true)} loading={refreshing}>刷新</Button>
-          <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => inputRef.current?.click()} loading={uploading}>添加资料</Button>
+          <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => inputRef.current?.click()} loading={uploading} disabled={!selectedBaseId}>添加资料</Button>
           <input ref={inputRef} type="file" accept={ALLOWED_EXTENSIONS.join(",")} multiple hidden onChange={(event) => void handleUpload(event.target.files)} />
         </Space>
       </div>
 
-      <section className="knowledge-workflow"><div><b>01</b><strong>添加资料</strong><span>导入本机文件</span></div><i>→</i><div><b>02</b><strong>验证检索</strong><span>用真实问题测试</span></div><i>→</i><div><b>03</b><strong>工作台使用</strong><span>提问并核对引用</span></div><Button type="link" onClick={() => navigate("/chat")}>打开工作台</Button></section>
+      {knowledgeBases.length === 0 && <Alert type="info" showIcon message="先创建一个知识库" description="知识库创建后，可以上传资料并将同一份资料关联到多个智能体。" action={<Button size="small" type="primary" onClick={() => setCreateBaseOpen(true)}>创建知识库</Button>} />}
+      <section className="knowledge-workflow"><div><b>01</b><strong>选择知识库</strong><span>创建并管理知识集合</span></div><i>→</i><div><b>02</b><strong>添加资料</strong><span>上传并解析文件</span></div><i>→</i><div><b>03</b><strong>验证检索</strong><span>用真实问题测试</span></div><i>→</i><div><b>04</b><strong>工作台使用</strong><span>提问并核对引用</span></div><Button type="link" onClick={() => navigate("/chat")}>打开工作台</Button></section>
 
       {stateView && (
         <Alert className="knowledge-state-alert" type={status?.search === "AVAILABLE" || status?.search === "READY" ? "success" : status?.search === "DEGRADED" ? "warning" : "error"} showIcon
           message={<Space><span>本地知识检索</span><Tag color={stateView.color}>{stateView.label}</Tag></Space>}
-          description={stateView.description}
+          description={<Space direction="vertical" size={2}><span>{stateView.description}</span><span>{status?.embedding?.hybrid_search ? `混合检索已启用：${status.embedding.provider} / ${status.embedding.model}` : status?.embedding?.provider === "local" ? "内置中文向量模型未就绪，当前使用全文检索；请确认安装包包含模型资源后重启并重建索引。" : "语义 Embedding 未启用：当前使用全文检索；可在部署配置中启用兼容的 Embeddings 服务后重新索引。"}</span></Space>}
         />
       )}
       {uploading && <Card size="small" className="knowledge-upload-progress"><Space direction="vertical" style={{ width: "100%" }} size={6}><Typography.Text>正在上传资料…</Typography.Text><Progress percent={uploadProgress} size="small" /></Space></Card>}
@@ -285,7 +363,7 @@ export function KnowledgePage() {
 
       <Card className="knowledge-files-card" bordered>
         <div className="knowledge-files-heading">
-          <div><Typography.Title level={5}>我的资料</Typography.Title><Typography.Text type="secondary">上传的文件仅在当前用户授权范围内参与检索。</Typography.Text></div>
+          <div><Typography.Title level={5}>我的资料</Typography.Title><Typography.Text type="secondary">当前知识库包含 {baseDocuments.length} 份资料；文件可以在多个知识库之间复用。</Typography.Text></div>
           <div className="knowledge-files-tools"><Input.Search allowClear value={fileKeyword} onChange={(event) => setFileKeyword(event.target.value)} placeholder="搜索资料名称" /><Select value={fileFilter} onChange={setFileFilter} options={[{ value: "ALL", label: "全部状态" }, { value: "PARSED", label: "已解析" }, { value: "UPLOADED", label: "处理中" }, { value: "PARSE_FAILED", label: "解析失败" }]} /><Tag>{filteredFiles.length} / {files.length} 份</Tag></div>
         </div>
         <Table rowKey="id" columns={columns} dataSource={filteredFiles} loading={loading}
@@ -294,6 +372,10 @@ export function KnowledgePage() {
           scroll={{ x: 720 }}
         />
       </Card>
+
+      <Modal title="新建知识库" open={createBaseOpen} onCancel={() => setCreateBaseOpen(false)} onOk={() => void createKnowledgeBase()} confirmLoading={savingBase} okText="创建" cancelText="取消" destroyOnClose>
+        <Input value={newBaseName} onChange={(event) => setNewBaseName(event.target.value)} maxLength={128} placeholder="例如：产品文档、项目资料、公司制度" onPressEnter={() => void createKnowledgeBase()} />
+      </Modal>
 
       <Modal title={preview?.name ?? "资料预览"} open={!!preview || previewLoading} onCancel={() => setPreview(null)}
         footer={<Button onClick={() => setPreview(null)}>关闭</Button>} width={820} destroyOnClose>

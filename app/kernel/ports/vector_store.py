@@ -19,8 +19,7 @@ class VectorMatch:
 class VectorStore(ABC):
     """vector.store Port 契约：向量检索（契约 §3 信息族）。
 
-    社区版无内置实现（capabilities 显式 UNAVAILABLE，调用抛
-    AI_CAPABILITY_UNAVAILABLE，不崩、不静默）；企业版可接入向量数据库实现。
+    社区版提供本地持久化实现；企业环境可替换为向量数据库实现。
     """
 
     @abstractmethod

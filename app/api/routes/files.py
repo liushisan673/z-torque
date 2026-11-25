@@ -18,7 +18,7 @@ from app.db.session import get_db
 from app.kernel.audit.service import record_audit, record_audit_detached
 from app.kernel.ports.object_store import ObjectStore
 from app.kernel.security_context import SecurityContext
-from app.models import Conversation, File, User
+from app.models import Conversation, File, KnowledgeBaseDocument, User
 from app.models.message import message_file
 from app.services import knowledge_service
 from app.services.bridge_media import export_file_to_bridge
@@ -71,6 +71,8 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         store.delete(str(file_id))
         raise ApiError("AI_FILE_TYPE_UNSUPPORTED", "file content does not match its type", 415)
     item = File(id=file_id, tenant_id=user.tenant_id, owner_user_id=user.id, conversation_id=conversation_id, original_name=Path(upload.filename or "file").name[:255], media_type=upload.content_type or "application/octet-stream", size_bytes=size, sha256=digest, storage_key=str(file_id), status="UPLOADED")
+    db.add(item)
+    db.flush()
     try:
         parsed = parse_file_structured(
             target, suffix, settings.file_max_extracted_text,
@@ -98,7 +100,6 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         logger.warning("file parse failed: id=%s suffix=%s err=%s", file_id, suffix, exc, exc_info=True)
         item.status = "PARSE_FAILED"
         item.parse_error = str(exc)[:500]
-    db.add(item)
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="FILE_UPLOADED", resource_type="FILE", resource_id=item.id, summary="file uploaded", trace_id=request.state.trace_id)
     db.commit()
     db.refresh(item)
@@ -218,6 +219,11 @@ async def remove(file_id: UUID, request: Request, user: User = Depends(get_curre
     except Exception:
         logger.exception("failed to delete object %s for file %s", item.storage_key, item.id)
         raise ApiError("AI_FILE_DELETE_FAILED", "failed to delete stored file", 500) from None
+    # 文件删除时同步解除所有知识库关联；知识库本身保留。
+    db.query(KnowledgeBaseDocument).filter(
+        KnowledgeBaseDocument.tenant_id == user.tenant_id,
+        KnowledgeBaseDocument.file_id == item.id,
+    ).delete(synchronize_session=False)
     item.status = "DELETED"
     item.extracted_text = None
     # 删除级联：doc/chunk/FTS 同步清理，检索不再命中（失败不阻断文件删除，但审计留痕）

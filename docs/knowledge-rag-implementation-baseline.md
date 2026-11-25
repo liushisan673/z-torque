@@ -147,3 +147,44 @@ Embedding 必须通过统一适配接口接入，支持用户配置的兼容服�
 - 不以纯 FTS5、LIKE、随机向量或伪向量冒充完整 RAG；
 - 不允许 Agent 绕过 AIP 直接读取本地文件；
 - 不因 RAG 检索本身把普通聊天改成 Task。
+
+
+## RAG completion implementation notes (2026-11-25)
+
+### Embedding configuration
+
+The community EXE persists documents, chunks, and float32 vectors locally in SQLite.
+Embedding generation is configurable and uses a real model, never synthetic/hash/random vectors.
+
+- Local Ollama: `EMBEDDING_ENABLED=true`, `EMBEDDING_PROVIDER=ollama`,
+  `EMBEDDING_BASE_URL=http://127.0.0.1:11434`, `EMBEDDING_MODEL=nomic-embed-text`.
+  Install Ollama and pull the selected embedding model on the same Windows machine.
+- OpenAI-compatible API: `EMBEDDING_ENABLED=true`, `EMBEDDING_PROVIDER=openai`,
+  `EMBEDDING_BASE_URL=https://provider.example/v1`, `EMBEDDING_MODEL=<model>`,
+  and `EMBEDDING_API_KEY=<secret>`.
+
+The default Windows package bundles the Chinese `BAAI/bge-small-zh-v1.5` model and runs
+it locally through FastEmbed/ONNX Runtime on CPU. No Ollama installation, API key, or
+network connection is required after installation. The build pipeline downloads and warms
+the pinned model, then includes its weights in the onedir package. The model cache is not
+committed to Git.
+
+Ollama and OpenAI-compatible Embeddings APIs remain optional overrides for advanced
+deployments. Chat Completions models are not treated as Embedding models unless the
+provider exposes a compatible Embeddings endpoint. If local model assets are missing or
+corrupt, semantic indexing reports a degraded state and FTS5 remains available; the app
+does not silently download model weights at runtime or fabricate vectors.
+
+### Hybrid retrieval and Agent runtime
+
+Indexing writes chunks, FTS5 rows, and float32 vectors in the same database transaction.
+Vectors are namespaced by tenant and file owner. Semantic hits are checked again against
+the current user's allowed file paths in SQL. Hybrid ranking uses Reciprocal Rank Fusion
+instead of comparing BM25 and cosine scores directly.
+
+Published AgentVersion snapshots store `knowledge_base_ids`. Task, normal chat, and
+streaming chat paths automatically retrieve only from those user-owned knowledge bases.
+Retrieved text is marked untrusted and the model is instructed to cite exact
+`[chunk:<uuid>]` IDs. Missing or invalid citations are supplemented with actual
+retrieved source references. Retrieval audit events store query hashes and chunk IDs,
+not raw queries or document contents.
