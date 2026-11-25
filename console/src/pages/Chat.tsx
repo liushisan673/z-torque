@@ -790,15 +790,10 @@ export function ChatPage() {
             delegation_depth: Number(d.delegation_depth ?? prev?.delegation_depth ?? 0),
             result: (d.result as Record<string, unknown>) ?? prev?.result ?? null,
           } as Task));
-          if (status === "WAITING_HUMAN") {
-            setWaitingConfirm(true);
-            setTaskPanelOpen(true);
-            applyRun((prev) => ({ ...prev, status, waiting: true }));
-          } else if (status === "WAITING_CHILD") {
-            setWaitingConfirm(false);
-            setTaskPanelOpen(true);
-            applyRun((prev) => ({ ...prev, status, waiting: true }));
-          }
+          setWaitingConfirm(status === "WAITING_HUMAN");
+          applyRun((prev) => ({ ...prev, status, waiting: status === "WAITING_HUMAN" || status === "WAITING_CHILD" }));
+          if (status === "WAITING_HUMAN" || status === "WAITING_CHILD") setTaskPanelOpen(true);
+          if (status === "WAITING_CHILD") void refreshChildTasks(taskId);
           return;
         }
         const key = String(msg.id || "");
@@ -852,7 +847,9 @@ export function ChatPage() {
           setWaitingConfirm(false);
           setTaskPanelOpen(true);
           applyRun((prev) => ({ ...prev, waiting: true }));
+          void refreshChildTasks(taskId);
         }
+        if (eventType === "TASK_CHILD_COMPLETED") void refreshChildTasks(taskId);
         if (eventType === "TASK_APPROVAL_GRANTED" || eventType === "TASK_APPROVAL_REJECTED") {
           setWaitingConfirm(false);
           applyRun((prev) => ({ ...prev, waiting: false }));
@@ -861,7 +858,9 @@ export function ChatPage() {
         const toState = String(d.to_state ?? d.status ?? "");
         if (toState) {
           setTask((prev) => (prev ? { ...prev, status: toState } : prev));
-          applyRun((prev) => ({ ...prev, status: toState }));
+          const waiting = toState === "WAITING_HUMAN" || toState === "WAITING_CHILD";
+          if (!waiting) setWaitingConfirm(false);
+          applyRun((prev) => ({ ...prev, status: toState, waiting }));
         }
         if (TERMINAL.has(toState)) {
           setWaitingConfirm(false);
