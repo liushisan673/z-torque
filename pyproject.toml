@@ -14,6 +14,8 @@ dependencies = [
   "cryptography==44.0.0",
   "python-multipart==0.0.20",
   "httpx==0.28.1",
+  "python-dotenv==1.0.1",
+  "PyMySQL==1.1.1",
   "sqlglot==26.8.0",
   # db_executor 在模块级 import pg8000（连接器数据库执行器的 postgres 驱动），
   # 属于运行时硬依赖而非测试依赖，故放在核心依赖里
@@ -36,6 +38,7 @@ include = ["app*"]
 test = ["pytest==8.3.4", "pytest-asyncio==0.25.3", "httpx==0.28.1"]
 # 静态门禁工具单独成组：CI 的 python-static job 用它，运行时不依赖
 lint = ["ruff==0.17.2"]
+desktop = ["pyinstaller>=6.11,<7"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
