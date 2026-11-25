@@ -41,7 +41,11 @@ def _build_engine(url: str):
             "check_same_thread": False,
             "timeout": _SQLITE_BUSY_TIMEOUT_MS / 1000,
         }
-    return create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
+    engine_options = {"future": True, "pool_pre_ping": True, "connect_args": connect_args}
+    if parsed.get_backend_name() == "sqlite" and parsed.database not in (None, ":memory:"):
+        # 桌面单进程限制连接池上限，避免 SQLite 在高并发 API 请求下积累过多空闲连接。
+        engine_options.update({"pool_size": 5, "max_overflow": 5, "pool_timeout": 30})
+    return create_engine(url, **engine_options)
 
 
 engine = _build_engine(_database_url())
