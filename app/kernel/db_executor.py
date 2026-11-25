@@ -18,6 +18,7 @@
 """
 
 import re
+from pathlib import Path
 from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
@@ -25,6 +26,9 @@ from uuid import UUID
 
 import pg8000.dbapi
 from sqlglot import exp, parse
+
+from app.config import get_settings
+from app.runtime_paths import is_frozen
 
 # 本进程内 pg8000 仅由本模块使用：统一 named 参数风格（:name 绑定变量）
 pg8000.dbapi.paramstyle = "named"
@@ -171,7 +175,17 @@ def _conn_params(config: dict[str, Any], password: str | None, timeout_seconds: 
     if driver == "sqlite":
         if not database:
             raise ValueError("SQLite 数据库文件路径未配置")
-        return driver, {"database": database, "timeout": max(1.0, min(float(timeout_seconds), 30.0))}
+        if database != ":memory:" and not database.startswith("file:"):
+            database_path = Path(database).expanduser()
+            # 桌面 exe 的工作目录不稳定：相对外部 SQLite 连接路径锚定到用户数据目录。
+            if is_frozen() and not database_path.is_absolute():
+                database_path = get_settings().data_dir / database_path
+            database_path.parent.mkdir(parents=True, exist_ok=True)
+            database = str(database_path)
+        params = {"database": database, "timeout": max(1.0, min(float(timeout_seconds), 30.0))}
+        if database.startswith("file:"):
+            params["uri"] = True
+        return driver, params
     host = str(config.get("host") or "").strip()
     port = config.get("port")
     if (port is None or str(port) == "") and ":" in host:
@@ -213,7 +227,9 @@ def _open_connection(driver: str, params: dict[str, Any]):
         return pymysql.connect(**params)
     import sqlite3
 
-    return sqlite3.connect(**params)
+    connection = sqlite3.connect(**params)
+    connection.execute("PRAGMA foreign_keys=ON")
+    return connection
 
 
 def _json_safe(value: Any) -> Any:
