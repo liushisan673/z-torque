@@ -212,6 +212,7 @@ class TaskRuntime:
                 trace_id=str(parent.id),
             )
             db.add(Outbox(
+                id=new_uuid7(),
                 tenant_id=parent.tenant_id,
                 aggregate_type="TASK",
                 aggregate_id=parent.id,

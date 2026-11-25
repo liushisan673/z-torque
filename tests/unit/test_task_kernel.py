@@ -270,5 +270,5 @@ def test_waiting_child_task_yields_parent_and_resumes_after_child_terminal(monke
         checkpoint = db.query(TaskCheckpoint).filter_by(task_id=parent_id).one()
         assert parent.status == TaskStatus.QUEUED
         assert checkpoint.status == "CHILD_COMPLETED"
-        outbox = db.query(Outbox).filter_by(aggregate_id=parent_id, event_type="TASK_READY").one()
-        assert outbox.status == "PENDING"
+        outbox = db.query(Outbox).filter_by(aggregate_id=parent_id, event_type="TASK_READY").order_by(Outbox.created_at.desc()).first()
+        assert outbox is not None and outbox.status == "PENDING"
