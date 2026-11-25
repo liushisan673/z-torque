@@ -137,7 +137,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
             db.execute(
                 text(
                     "INSERT INTO zr_knowledge_fts(tenant_id, chunk_id, text) "
-                    "SELECT tenant_id, id, text FROM zr_knowledge_chunk WHERE doc_id = :doc_id"
+                    "SELECT CAST(tenant_id AS VARCHAR(36)), CAST(id AS VARCHAR(36)), text FROM zr_knowledge_chunk WHERE doc_id = :doc_id"
                 ),
                 {"doc_id": str(doc.id)},
             )
@@ -150,7 +150,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
         db.execute(
             text(
                 "DELETE FROM zr_knowledge_fts "
-                "WHERE chunk_id IN (SELECT id FROM zr_knowledge_chunk WHERE doc_id = :doc_id)"
+                "WHERE chunk_id IN (SELECT CAST(id AS VARCHAR(36)) FROM zr_knowledge_chunk WHERE doc_id = :doc_id)"
             ),
             {"doc_id": str(doc.id)},
         )
@@ -205,16 +205,16 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
             return []
         limit = max(1, min(int(top_k), 50))
         params: dict[str, Any] = {"tenant_id": str(tenant_id), "limit": limit}
-        joins = " JOIN zr_knowledge_chunk c ON c.id = zr_knowledge_fts.chunk_id JOIN zr_knowledge_doc d ON d.id = c.doc_id"
+        joins = " JOIN zr_knowledge_chunk c ON CAST(c.id AS VARCHAR(36)) = zr_knowledge_fts.chunk_id JOIN zr_knowledge_doc d ON d.id = c.doc_id"
         clauses = [
             "zr_knowledge_fts.tenant_id = :tenant_id",
-            "d.tenant_id = :tenant_id",
+            "CAST(d.tenant_id AS VARCHAR(36)) = :tenant_id",
             "d.status = 'ACTIVE'",
         ]
         if owner_user_id is not None:
             joins += " JOIN zr_file scoped_file ON scoped_file.id = d.file_id AND scoped_file.tenant_id = d.tenant_id"
             clauses.extend([
-                "scoped_file.owner_user_id = :owner_user_id",
+                "CAST(scoped_file.owner_user_id AS VARCHAR(36)) = :owner_user_id",
                 "scoped_file.status = 'PARSED'",
             ])
             params["owner_user_id"] = str(owner_user_id)
@@ -230,7 +230,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
 
         file_id = options.get("file_id")
         if file_id is not None:
-            clauses.append("d.file_id = :file_id")
+            clauses.append("CAST(d.file_id AS VARCHAR(36)) = :file_id")
             params["file_id"] = str(file_id)
         excluded = [str(item) for item in (options.get("exclude_file_ids") or [])]
         if excluded:
