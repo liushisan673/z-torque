@@ -75,15 +75,15 @@ export function App() {
           <Route path="/embed/chat" element={<ChatEmbedPage />} />
           <Route path="/chat" element={<RequireAccess><ChatPage /></RequireAccess>} />
           <Route path="/knowledge" element={<RequireAccess navTo="/knowledge"><ConsoleShell><KnowledgePage /></ConsoleShell></RequireAccess>} />
-          <Route path="/agents" element={<RequireAccess><ConsoleShell><AgentsPage /></ConsoleShell></RequireAccess>} />
-          <Route path="/skills" element={<RequireAccess><ConsoleShell><SkillsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/agents" element={<RequireAccess navTo="/agents"><ConsoleShell><AgentsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/skills" element={<RequireAccess navTo="/skills"><ConsoleShell><SkillsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/models" element={<RequireAccess navTo="/models"><ConsoleShell><ModelsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/connectors" element={<RequireAccess navTo="/connectors"><ConsoleShell><ConnectorsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/webhooks" element={<RequireAccess navTo="/webhooks"><ConsoleShell><WebhooksPage /></ConsoleShell></RequireAccess>} />
-          <Route path="/audit" element={<RequireAccess><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/audit" element={<RequireAccess navTo="/audit"><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
           <Route path="/users" element={<RequireAccess navTo="/users"><ConsoleShell><UsersPage /></ConsoleShell></RequireAccess>} />
           <Route path="/onboarding" element={<RequireAccess><OnboardingPage /></RequireAccess>} />
-          <Route path="/settings" element={<RequireAccess><ConsoleShell><SettingsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/settings" element={<RequireAccess navTo="/settings"><ConsoleShell><SettingsPage /></ConsoleShell></RequireAccess>} />
           <Route path="*" element={<HomeRedirect />} />
         </Routes>
       </Suspense>
