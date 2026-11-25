@@ -1266,3 +1266,70 @@ async def test_peer_registry_rejects_agent_card_without_jsonrpc_v1_interface():
         await registry.fetch_agent_card(PeerConfig(peer_id="beta", base_url="https://peer.test"))
 
     assert excinfo.value.code == "AI_A2A_PEER_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_gateway_remote_agent_send_message_uses_agent_card_jsonrpc_interface():
+    gateway, _, _ = _gateway()
+    peer = PeerConfig(peer_id="beta", base_url="https://peer.test")
+
+    class StandardPeerAdapter:
+        def __init__(self):
+            self.calls = []
+
+        def resolve(self, peer_id):
+            assert peer_id == "beta"
+            return peer
+
+        async def fetch_agent_card(self, selected_peer):
+            assert selected_peer is peer
+            return {
+                "name": "Remote Research Agent",
+                "supportedInterfaces": [
+                    {"url": "https://peer.test/rpc", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"}
+                ],
+            }
+
+        async def invoke_jsonrpc(self, selected_peer, payload, **kwargs):
+            self.calls.append((selected_peer, payload, kwargs))
+            return {
+                "jsonrpc": "2.0",
+                "id": payload["id"],
+                "result": {"task": {"id": "remote-task-1", "status": {"state": "TASK_STATE_WORKING"}}},
+            }
+
+    adapter = StandardPeerAdapter()
+    gateway.peers = adapter
+    message = {
+        "messageId": "message-1",
+        "role": "ROLE_USER",
+        "parts": [{"text": "Research current market trends"}],
+    }
+
+    result = await gateway.send_message_to_peer("beta", message=message)
+
+    assert result["task"]["id"] == "remote-task-1"
+    _, payload, kwargs = adapter.calls[0]
+    assert payload["jsonrpc"] == "2.0"
+    assert payload["method"] == "SendMessage"
+    assert payload["params"]["message"] == message
+    assert kwargs["endpoint_url"] == "https://peer.test/rpc"
+    assert kwargs["depth"] == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_remote_agent_send_message_enforces_delegation_depth():
+    gateway, _, _ = _gateway(config=_config(max_depth=1))
+
+    class NoNetworkAdapter:
+        def resolve(self, peer_id):
+            raise AssertionError("must reject before peer resolution")
+
+    gateway.peers = NoNetworkAdapter()
+    with pytest.raises(ApiError) as excinfo:
+        await gateway.send_message_to_peer(
+            "beta",
+            message={"parts": [{"text": "task"}]},
+            depth=1,
+        )
+    assert excinfo.value.code == "AI_A2A_DEPTH_EXCEEDED"
