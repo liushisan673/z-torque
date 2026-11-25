@@ -5029,6 +5029,7 @@ body.pane-resizing {
   color: var(--text);
 }
 .connector-health-card .value.ok { color: var(--success); }
+.connector-health-card .value.warn { color: var(--warning, #b7791f); }
 .connector-health-card .value.err { color: var(--danger); }
 
 .connector-test-result {
