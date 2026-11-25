@@ -1,5 +1,6 @@
 import base64
 import json
+import time
 import logging
 from dataclasses import asdict
 from typing import Any
@@ -442,6 +443,7 @@ def _knowledge_excerpt(
     provider = try_port("knowledge.provider")
     if provider is None:
         return f"Attachment {item.original_name}: [knowledge search unavailable]"
+    started = time.perf_counter()
     try:
         chunks = provider.search(
             db=db,
@@ -450,7 +452,20 @@ def _knowledge_excerpt(
             top_k=5,
             filters={"owner_user_id": str(owner_user_id), "file_id": str(item.id)},
         )
+        emit_event("knowledge.retrieval", {
+            "scope": "attachment",
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "query_chars": len(query),
+            "result_count": len(chunks),
+        })
     except Exception:  # noqa: BLE001 - 检索降级不阻断普通对话
+        emit_event("knowledge.retrieval", {
+            "scope": "attachment",
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "query_chars": len(query),
+            "result_count": 0,
+            "outcome": "failed",
+        })
         logger.warning("attachment knowledge retrieval failed file_id=%s", item.id, exc_info=True)
         return f"Attachment {item.original_name}: [knowledge search unavailable]"
     excerpt = _format_knowledge_chunks(list(chunks), max_chars=max_chars)
@@ -471,6 +486,7 @@ def _global_knowledge_context(
     provider = try_port("knowledge.provider")
     if provider is None:
         return ""
+    started = time.perf_counter()
     try:
         chunks = provider.search(
             db=db,
@@ -482,7 +498,20 @@ def _global_knowledge_context(
                 "exclude_file_ids": exclude_file_ids,
             },
         )
+        emit_event("knowledge.retrieval", {
+            "scope": "user_library",
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "query_chars": len(query),
+            "result_count": len(chunks),
+        })
     except Exception:  # noqa: BLE001 - 知识检索失败应降级为无知识上下文，不阻断聊天
+        emit_event("knowledge.retrieval", {
+            "scope": "user_library",
+            "duration_ms": round((time.perf_counter() - started) * 1000),
+            "query_chars": len(query),
+            "result_count": 0,
+            "outcome": "failed",
+        })
         logger.warning("global knowledge retrieval failed conversation_id=%s", conversation.id, exc_info=True)
         return ""
     return _format_knowledge_chunks(list(chunks), max_chars=max_chars)
