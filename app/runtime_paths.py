@@ -17,7 +17,10 @@ def is_frozen() -> bool:
 def default_data_dir() -> Path:
     override = os.getenv("ZT_DATA_DIR")
     if override:
-        return Path(override).expanduser()
+        path = Path(override).expanduser()
+        if is_frozen() and not path.is_absolute():
+            path = Path(sys.executable).resolve().parent / path
+        return path
     if is_frozen():
         base = os.getenv("LOCALAPPDATA")
         if not base:
