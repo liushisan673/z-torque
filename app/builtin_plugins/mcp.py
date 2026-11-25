@@ -230,6 +230,7 @@ class StdioMcpConnector:
             self.executable, *self.arguments, cwd=self.cwd, env=self.allowed_environment,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, limit=self.max_output_bytes + 1,
+            **({"start_new_session": True} if os.name != "nt" else {}),
         )
         stderr_task = asyncio.create_task(self._drain_stderr())
         self._stderr_task = stderr_task
@@ -251,14 +252,38 @@ class StdioMcpConnector:
         if self.process.stdin:
             self.process.stdin.close()
         try:
-            await asyncio.wait_for(self.process.wait(), timeout=self.timeout_seconds)
+            await asyncio.wait_for(self.process.wait(), timeout=min(self.timeout_seconds, 2.0))
         except asyncio.TimeoutError:
-            self.process.terminate()
-            try:
-                await asyncio.wait_for(self.process.wait(), timeout=self.timeout_seconds)
-            except asyncio.TimeoutError:
+            if os.name == "nt":
+                # MCP stdio servers may spawn helper processes; terminate the complete tree on Windows.
+                try:
+                    killer = await asyncio.create_subprocess_exec(
+                        "taskkill", "/PID", str(self.process.pid), "/T", "/F",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(killer.wait(), timeout=3)
+                except (FileNotFoundError, asyncio.TimeoutError, OSError):
+                    if self.process.returncode is None:
+                        self.process.kill()
+            else:
+                import signal
+
+                try:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    await asyncio.wait_for(self.process.wait(), timeout=1)
+                except (ProcessLookupError, PermissionError, OSError, asyncio.TimeoutError):
+                    try:
+                        os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        if self.process.returncode is None:
+                            self.process.kill()
+            if self.process.returncode is None:
                 self.process.kill()
-                await self.process.wait()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                pass
         stderr_task = getattr(self, "_stderr_task", None)
         if stderr_task:
             stderr_task.cancel()
