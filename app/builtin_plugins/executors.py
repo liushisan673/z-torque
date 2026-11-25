@@ -104,24 +104,41 @@ class HttpExecutor:
             # 无法把连接固定到已校验地址时 fail-closed，避免退化为可被 rebinding 绕过的校验
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_TARGET_BLOCKED", error_message="HTTP client cannot pin the validated address")
         try:
+            max_response_bytes = max(1, int(config.get("max_response_bytes", 1_000_000)))
             with client:
                 if method == "POST":
                     # 导入工具约定：requestBody 整体作为 __body__ 参数；其余参数拼 query
                     body = arguments.get("__body__")
                     query_args = {key: value for key, value in arguments.items() if key != "__body__"}
-                    response = client.post(url, json=body, params={**query_params, **query_args}, headers=headers)
+                    request_kwargs = {"json": body, "params": {**query_params, **query_args}, "headers": headers}
                 else:
                     params: dict[str, Any] = {**query_params, **arguments}
-                    response = client.get(url, params=params, headers=headers)
-            body = response.text[: int(config.get("max_response_bytes", 1_000_000))]
-            # body 为响应原文（截断）；能解析为 JSON 时附加 json 字段，
-            # 组合工具步骤间即可引用内层字段（$steps.<key>.output.json.<path>）
-            data: dict[str, Any] = {"status_code": response.status_code, "body": body}
-            try:
-                data["json"] = json.loads(body)
-            except ValueError:
-                data["json"] = None
-            return ExecutionResult(status="SUCCEEDED" if response.is_success else "FAILED", data=data, error_code=None if response.is_success else "AI_HTTP_ERROR")
+                    request_kwargs = {"params": params, "headers": headers}
+                # 流式读取并在达到上限时立即关闭响应；不能先 response.text 再切片，
+                # 否则 100MB 上游响应仍会完整驻留内存。
+                with client.stream(method, url, **request_kwargs) as response:
+                    body_bytes = bytearray()
+                    truncated = False
+                    for chunk in response.iter_bytes():
+                        remaining = max_response_bytes - len(body_bytes)
+                        if len(chunk) > remaining:
+                            body_bytes.extend(chunk[:remaining])
+                            truncated = True
+                            break
+                        body_bytes.extend(chunk)
+                    body = bytes(body_bytes).decode(response.encoding or "utf-8", errors="replace")
+                    # body 为响应原文（可能截断）；组合工具可读取 JSON，但截断 JSON 不伪装成完整对象。
+                    data: dict[str, Any] = {
+                        "status_code": response.status_code,
+                        "body": body,
+                        "truncated": truncated,
+                    }
+                    try:
+                        data["json"] = None if truncated else json.loads(body)
+                    except ValueError:
+                        data["json"] = None
+                    succeeded = response.is_success
+            return ExecutionResult(status="SUCCEEDED" if succeeded else "FAILED", data=data, error_code=None if succeeded else "AI_HTTP_ERROR")
         except (httpx.HTTPError, ValueError) as exc:
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_REQUEST_FAILED", error_message=str(exc))
 
