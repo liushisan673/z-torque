@@ -44,6 +44,8 @@ from app.models import (
     TaskEvent,
     ToolVersion,
 )
+from app.repositories import visible_owner_clause
+from app.security.permissions import list_user_permissions
 from app.services.context_builder import (
     assistant_reasoning_parts,
     build_agent_system_prompt,
@@ -52,8 +54,6 @@ from app.services.context_builder import (
 from app.services.execution_loop import AgentExecutionLoop
 from app.services.model_limits import effective_max_tokens, model_capabilities
 from app.services.tool_mapping_builder import build_tool_mappings
-from app.repositories import visible_owner_clause
-from app.security.permissions import list_user_permissions
 from app.services.usage_service import record_usage_summary
 
 logger = logging.getLogger("z_torque.task_worker")
