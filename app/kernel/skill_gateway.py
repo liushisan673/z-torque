@@ -207,6 +207,7 @@ class SkillGateway:
         )
         # 已协商的 MCP 会话：key → (connector, 最近使用时间 monotonic)
         self._mcp_sessions: dict[str, tuple[McpConnector, float]] = {}
+        self._mcp_session_locks: dict[str, asyncio.Lock] = {}
         self._mcp_loop_id: int | None = None
 
     def register(self, executor: ToolExecutor) -> None:
@@ -486,8 +487,10 @@ class SkillGateway:
         """
         loop_id = id(asyncio.get_running_loop())
         if self._mcp_loop_id not in (None, loop_id):
-            # 事件循环已更换（测试里 asyncio.run 逐用例起循环）：旧连接绑定的是旧循环，不能复用
+            # 事件循环已更换（测试里 asyncio.run 逐用例起循环）：旧连接绑定的是旧循环，不能复用。
+            # 旧 loop 已不可 await close；清理引用，避免新 loop 误复用旧 connector/lock。
             self._mcp_sessions.clear()
+            self._mcp_session_locks.clear()
         self._mcp_loop_id = loop_id
         now = time.monotonic()
         stale = [k for k, (_, used) in self._mcp_sessions.items() if now - used > self.MCP_SESSION_IDLE_SECONDS]
@@ -509,12 +512,14 @@ class SkillGateway:
         """关闭全部缓存的 MCP 会话（进程退出 / 测试清理用）。"""
         for key in list(self._mcp_sessions):
             await self._evict_mcp_session(key)
+        self._mcp_session_locks.clear()
 
     async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float, *, secret_ref: str | None = None, identity: dict[str, str] | None = None) -> ExecutionResult:
         from app.config import get_settings
 
         transport = str(config.get("transport", "http")).lower()
         connector: McpConnector
+        connector_factory: Any
         session_key: str
         if transport == "http":
             endpoint = config.get("endpoint")
@@ -543,9 +548,15 @@ class SkillGateway:
                 identity=headers,
                 extra={"allow_private": allow_private, "proxy": proxy if isinstance(proxy, str) else None, "max_bytes": settings.mcp_max_response_bytes},
             )
-            connector, negotiated = await self._acquire_mcp_session(
-                session_key,
-                lambda: self.http_connector_factory(endpoint, allowed_hosts=allowed_hosts, timeout_seconds=timeout_seconds, max_response_bytes=settings.mcp_max_response_bytes, auth_token=auth_token, extra_headers=headers, allow_private_network=allow_private, proxy=proxy if isinstance(proxy, str) else None),
+            connector_factory = lambda: self.http_connector_factory(
+                endpoint,
+                allowed_hosts=allowed_hosts,
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=settings.mcp_max_response_bytes,
+                auth_token=auth_token,
+                extra_headers=headers,
+                allow_private_network=allow_private,
+                proxy=proxy if isinstance(proxy, str) else None,
             )
         elif transport == "stdio":
             registry = self.stdio_registry
@@ -553,17 +564,22 @@ class SkillGateway:
             if registry is None or not isinstance(server_name, str):
                 return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message="MCP stdio server is not registered")
             session_key = self._mcp_session_key(transport=transport, target=server_name, timeout_seconds=timeout_seconds, auth_token=None, identity=identity)
-            connector, negotiated = await self._acquire_mcp_session(session_key, lambda: registry.connector(server_name, timeout_seconds=timeout_seconds))
+            connector_factory = lambda: registry.connector(server_name, timeout_seconds=timeout_seconds)
         else:
             return ExecutionResult(status="FAILED", error_code="AI_REQUEST_INVALID", error_message="unsupported MCP transport")
-        executor = NegotiatedMcpExecutor(connector)
-        executor.negotiated = negotiated
-        try:
+        # 对同一端点的首次连接/initialize 串行化，避免并发 Task 各自创建连接，
+        # 或第二个 Task 在第一个 initialize 完成前把连接误判为已协商。
+        session_lock = self._mcp_session_locks.setdefault(session_key, asyncio.Lock())
+        async with session_lock:
+            connector, negotiated = await self._acquire_mcp_session(session_key, connector_factory)
+            executor = NegotiatedMcpExecutor(connector)
+            executor.negotiated = negotiated
             if not negotiated:
                 connected = await executor.connect()
                 if connected.status != "SUCCEEDED":
                     await self._evict_mcp_session(session_key)
                     return connected
+        try:
             result = await asyncio.wait_for(executor.execute_async(config, arguments), timeout=timeout_seconds)
             if result.status != "SUCCEEDED":
                 # 会话可能已被对端关闭（重启 / 会话过期）：丢弃缓存，下次重新协商
