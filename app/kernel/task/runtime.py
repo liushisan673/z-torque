@@ -113,7 +113,13 @@ class TaskRuntime:
         self.session_factory = session_factory
         self.dispatcher = OutboxDispatcher(self.queue, lock_provider=lock_provider)
         settings = get_settings()
-        self.worker = Worker(self.queue, self._execute, concurrency=settings.worker_concurrency)
+        # SQLite 只有一个写入者：模型/API/连接器等待期间仍可并发，但不应让 10 个任务同时
+        # 竞争提交 TaskEvent、SkillExecutionLog 和审计记录。PostgreSQL 等服务端数据库
+        # 继续使用通用并发上限；SessionLocal 为 sessionmaker 时可从 bind 精确识别方言。
+        bind = getattr(session_factory, "kw", {}).get("bind")
+        dialect = getattr(getattr(bind, "dialect", None), "name", None)
+        concurrency = settings.sqlite_worker_concurrency if dialect == "sqlite" else settings.worker_concurrency
+        self.worker = Worker(self.queue, self._execute, concurrency=concurrency)
         self.gateway = gateway
         self.model_gateway = model_gateway
         # 单机 lease owner：同进程内区分不同 TaskRuntime 实例；不做跨实例抢占。
