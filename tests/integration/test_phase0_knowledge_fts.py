@@ -214,6 +214,59 @@ async def test_context_does_not_inject_full_extracted_text():
     assert len(rendered) < len(text) // 2, "整段 extracted_text 不应再进入 prompt"
 
 
+def test_cjk_trigram_retrieval_and_global_user_knowledge_context():
+    """中文无空格检索可命中，且 Agent 会话能检索用户未作为附件发送的已上传文档。"""
+    tenant_id, user_a = _bootstrap()
+    with SessionLocal.begin() as db:
+        user_b = User(tenant_id=tenant_id, username=f"u-{uuid4()}", password_hash=hash_password("pass"))
+        db.add(user_b)
+        db.flush()
+        user_b_id = user_b.id
+
+    source_text = "Z-Torque 本地知识库使用 SQLite FTS5 trigram 检索，中文短语无需空格也可以召回相关文档。"
+    async def upload_document():
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            headers = await _login(client, user_a)
+            response = await client.post(
+                "/api/z-torque/files", headers=headers,
+                files={"upload": ("sqlite-knowledge.md", source_text.encode("utf-8"), "text/markdown")},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["data"]["status"] == "PARSED", response.text
+
+    import asyncio
+    asyncio.run(upload_document())
+
+    conversation_ids = {}
+    with SessionLocal.begin() as db:
+        agent = Agent(tenant_id=tenant_id, owner_user_id=None, name="knowledge-supervisor", source_type="OFFICIAL", status="ACTIVE")
+        db.add(agent)
+        db.flush()
+        for user_id in (user_a, user_b_id):
+            conversation = Conversation(tenant_id=tenant_id, owner_user_id=user_id, agent_id=agent.id, title="knowledge retrieval")
+            db.add(conversation)
+            db.flush()
+            db.add(Message(
+                tenant_id=tenant_id, conversation_id=conversation.id, sender_type="USER",
+                content="请解释 SQLite 知识库的中文检索方式", status="COMPLETED",
+            ))
+            conversation_ids[user_id] = conversation.id
+
+    from app.services.context_builder import build_context
+
+    with SessionLocal() as db:
+        conversation_a = db.get(Conversation, conversation_ids[user_a])
+        context_a = build_context(db, conversation_a)
+        conversation_b = db.get(Conversation, conversation_ids[user_b_id])
+        context_b = build_context(db, conversation_b)
+
+    rendered_a = "\\n".join(item.content or "" for item in context_a)
+    rendered_b = "\\n".join(item.content or "" for item in context_b)
+    assert "SQLite FTS5 trigram 检索" in rendered_a
+    assert "[chunk:" in rendered_a
+    assert "SQLite FTS5 trigram 检索" not in rendered_b
+
+
 @pytest.mark.asyncio
 async def test_degraded_state_is_visible_and_audited(monkeypatch):
     _, user_id = _bootstrap()
