@@ -241,7 +241,7 @@ export function ConnectorsPage() {
 
   // 健康检查结果（本会话内保留，按连接 id 记忆）
   const [testResults, setTestResults] = useState<Record<string, ConnectorTestResult>>({});
-  const [testFailure, setTestFailure] = useState<{ message: string; traceId?: string } | null>(null);
+  const [testFailure, setTestFailure] = useState<{ connectorId: string; message: string; traceId?: string } | null>(null);
   const [testing, setTesting] = useState(false);
 
   // MCP 工具发现（/discover 结果，切换连接时重置）
@@ -664,6 +664,7 @@ export function ConnectorsPage() {
         return next;
       });
       setTestFailure({
+        connectorId: c.id,
         message: errorText(err, "检查失败"),
         traceId: err instanceof ApiRequestError ? err.traceId : undefined,
       });
@@ -1197,6 +1198,7 @@ export function ConnectorsPage() {
   }
 
   const lastTest = selected ? testResults[selected.id] ?? null : null;
+  const selectedTestFailure = selected && testFailure?.connectorId === selected.id ? testFailure : null;
   // 已登记工具名集合：用于在发现结果里区分「已注册 / 未注册」，并支撑批量注册
   const registeredNames = new Set(
     tools.map((t) => String(t.external_name ?? t.name ?? "").trim()).filter(Boolean),
@@ -1460,7 +1462,7 @@ export function ConnectorsPage() {
                           <label>最近检查</label>
                           <input
                             type="text"
-                            value={lastTest ? `${fmtTime(lastTest.checked_at)} · 检查正常` : testFailure ? "最近一次检查异常" : "未检查"}
+                            value={lastTest ? `${fmtTime(lastTest.checked_at)} · 检查正常` : selectedTestFailure ? "最近一次检查异常" : "未检查"}
                             disabled
                           />
                         </div>
@@ -1472,8 +1474,8 @@ export function ConnectorsPage() {
                       <div className="connector-health-grid">
                         <div className="connector-health-card">
                           <div className="label">连通性</div>
-                          <div className={`value${lastTest ? " ok" : testFailure ? " err" : ""}`}>
-                            {lastTest ? "正常" : testFailure ? "异常" : "未检查"}
+                          <div className={`value${lastTest ? (lastTest.partial ? " warn" : " ok") : selectedTestFailure ? " err" : ""}`}>
+                            {lastTest ? (lastTest.partial ? "部分可用" : "正常") : selectedTestFailure ? "异常" : "未检查"}
                           </div>
                         </div>
                         <div className="connector-health-card">
@@ -1526,7 +1528,7 @@ export function ConnectorsPage() {
                             </>
                           ) : (
                             <>
-                              <strong>连接就绪</strong>
+                              <strong>{lastTest.partial ? "部分检查完成" : "连接就绪"}</strong>
                               <div className="meta">
                                 {typeLabel} · 状态 {lastTest.status} · 检查耗时 {lastTest.latency_ms} ms · {fmtTime(lastTest.checked_at)}
                               </div>
@@ -1541,11 +1543,11 @@ export function ConnectorsPage() {
                           {lastTest.trace_id && <div className="trace">trace_id: {lastTest.trace_id}</div>}
                         </div>
                       )}
-                      {testFailure && !lastTest && (
+                      {selectedTestFailure && !lastTest && (
                         <div className="connector-test-result fail">
                           <strong>检查失败</strong>
-                          <div className="meta">{testFailure.message}</div>
-                          {testFailure.traceId && <div className="trace">trace_id: {testFailure.traceId}</div>}
+                          <div className="meta">{selectedTestFailure.message}</div>
+                          {selectedTestFailure.traceId && <div className="trace">trace_id: {selectedTestFailure.traceId}</div>}
                         </div>
                       )}
                       {/* DB 连接：表清单勾选 → 保存 allowed_tables，供 SQL 工具注册引用 */}
