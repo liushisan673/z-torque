@@ -555,7 +555,12 @@ class SkillGateway:
                 timeout_seconds=timeout_seconds,
                 auth_token=auth_token,
                 identity=headers,
-                extra={"allow_private": allow_private, "proxy": proxy if isinstance(proxy, str) else None, "max_bytes": settings.mcp_max_response_bytes},
+                extra={
+                    "allow_private": allow_private,
+                    "proxy": proxy if isinstance(proxy, str) else None,
+                    "max_bytes": settings.mcp_max_response_bytes,
+                    "allowed_hosts": sorted(str(host).lower() for host in allowed_hosts),
+                },
             )
             connector_factory = lambda: self.http_connector_factory(
                 endpoint,
