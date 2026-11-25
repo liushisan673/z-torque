@@ -137,3 +137,18 @@ async def test_streamable_http_rejects_host_not_in_whitelist():
     with pytest.raises(McpTransportError, match="whitelist"):
         await connector.negotiate()
     await connector.close()
+
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_enforces_response_limit_while_streaming():
+    transport = McpTransport()
+    connector = StreamableHttpMcpConnector(
+        "https://mcp.example.test",
+        allowed_hosts=["mcp.example.test"],
+        transport=transport,
+        max_response_bytes=32,
+    )
+    with pytest.raises(McpTransportError, match="exceeds configured limit"):
+        await connector.negotiate()
+    await connector.close()
