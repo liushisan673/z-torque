@@ -131,7 +131,6 @@ class HttpExecutor:
                     data: dict[str, Any] = {
                         "status_code": response.status_code,
                         "body": body,
-                        "truncated": truncated,
                     }
                     try:
                         data["json"] = None if truncated else json.loads(body)
