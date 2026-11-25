@@ -116,6 +116,13 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
                     detail={"state": "DEGRADED", "reason": str(exc)[:300]}, trace_id=request.state.trace_id,
                 )
     except Exception as exc:  # noqa: BLE001 - 解析器的第三方异常类型不可控，解析失败一律降级为 PARSE_FAILED，不阻断上传
+        emit_event("file.parse", {
+            "duration_ms": round((time.perf_counter() - parse_started) * 1000),
+            "suffix": suffix,
+            "block_count": 0,
+            "extracted_chars": 0,
+            "outcome": "failed",
+        })
         logger.warning("file parse failed: id=%s suffix=%s err=%s", file_id, suffix, exc, exc_info=True)
         item.status = "PARSE_FAILED"
         item.parse_error = str(exc)[:500]
