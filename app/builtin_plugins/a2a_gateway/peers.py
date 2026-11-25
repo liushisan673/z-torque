@@ -27,7 +27,11 @@ from urllib.parse import urljoin
 import httpx
 
 from app.builtin_plugins.a2a_gateway.config import A2AConfig, PeerConfig
-from app.builtin_plugins.a2a_gateway.jsonrpc import parse_jsonrpc_request, validate_agent_card, validate_jsonrpc_response
+from app.builtin_plugins.a2a_gateway.jsonrpc import (
+    parse_jsonrpc_request,
+    validate_agent_card,
+    validate_jsonrpc_response,
+)
 from app.core.errors import ApiError
 from app.plugin_sdk.observability import emit_event
 
