@@ -175,7 +175,9 @@ class Settings(BaseSettings):
     md_skill_watch_enabled: bool = True
     md_skill_scan_interval: float = 15.0
     # 单一系统（.exe 单机标准）：脚本能力默认开启；Windows 走「可信声明 + 用户确认 + 路径收口」
-    md_skill_script_enabled: bool = True\n    # 冻结桌面包使用随包分发的 python.exe，不能把 PyInstaller 主程序当作解释器。\n    sandbox_python_executable: Path = Field(default_factory=default_sandbox_python)
+    md_skill_script_enabled: bool = True
+    # 冻结桌面包使用随包分发的 python.exe，不能把 PyInstaller 主程序当作解释器。
+    sandbox_python_executable: Path = Field(default_factory=default_sandbox_python)
     # Windows 有限解禁总开关：关闭时即便技能声明可信也拒绝；exe 打包默认开启
     md_skill_windows_process_enabled: bool = True
     md_skill_script_timeout: float = 10.0
