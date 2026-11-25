@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     delegation_max_concurrency: int = 3
     delegation_max_total_timeout_seconds: int = 600
     delegation_max_rounds_per_child: int = 20
-    delegation_max_depth: int = 1
+    delegation_max_depth: int = 3
     delegation_default_child_timeout_seconds: int = 120
     mcp_protocol_version: str = '2025-06-18'
     mcp_timeout_seconds: float = 30
@@ -323,8 +323,8 @@ class Settings(BaseSettings):
         return [item for item in data if isinstance(item, dict)]
 
     def validate_runtime(self) -> None:
-        if self.delegation_max_depth > 1:
-            raise ValueError('delegation_max_depth must be <= 1')
+        if self.delegation_max_depth < 1 or self.delegation_max_depth > 5:
+            raise ValueError('delegation_max_depth must be between 1 and 5')
         if self.app_env == 'production':
             if self.app_debug:
                 raise ValueError('APP_DEBUG must be false in production')

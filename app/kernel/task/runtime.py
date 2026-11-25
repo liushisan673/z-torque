@@ -26,7 +26,7 @@ from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.checkpoints import latest_checkpoint, take_seed_checkpoint
 from app.kernel.task.dispatcher import OutboxDispatcher, execute_simulated
-from app.kernel.task.service import sanitize_summary, transition_task
+from app.kernel.task.service import create_task, sanitize_summary, transition_task
 from app.kernel.task.states import TERMINAL_STATES, TaskStatus
 from app.kernel.task.worker import Worker
 from app.models import (
@@ -173,9 +173,45 @@ class TaskRuntime:
                 logger.exception("task %s fail-safe marking failed", task_id)
             return {"task_id": str(task_id), "status": "FAILED"}
         finally:
-            # 任务执行结束（终态/挂起/跳过）后回收协作式取消事件，避免字典随任务数无界增长；
-            # WAITING_HUMAN 恢复重跑时 setdefault 会重新创建，取消路由只对 RUNNING 任务置位
+            # 任务执行结束（终态/挂起/跳过）后回收协作式取消事件。
             self._cancellation_events.pop(task_id, None)
+            # 子任务进入终态后，通过 Outbox 唤醒等待它的父任务；父 Worker 不占用执行槽。
+            try:
+                self._notify_parent_task(task_id)
+            except Exception:
+                logger.exception("task %s parent notification failed", task_id)
+
+    def _notify_parent_task(self, child_task_id: UUID) -> None:
+        with self.session_factory() as db:
+            child = db.get(Task, child_task_id)
+            if child is None or child.parent_task_id is None or child.status not in TERMINAL_STATES:
+                return
+            parent = db.get(Task, child.parent_task_id)
+            if parent is None or parent.status != TaskStatus.WAITING_CHILD:
+                return
+            checkpoint = latest_checkpoint(db, parent.id)
+            if checkpoint is None or checkpoint.status != "WAITING_CHILD":
+                return
+            context = dict(checkpoint.execution_context or {})
+            chat_context = dict(context.get("chat_context") or {})
+            if chat_context.get("child_task_id") != str(child.id):
+                return
+            checkpoint.status = "CHILD_COMPLETED"
+            context["chat_context"] = chat_context
+            checkpoint.execution_context = context
+            transition_task(
+                db, parent, TaskStatus.QUEUED, "TASK_CHILD_COMPLETED",
+                "delegated child task completed; parent task queued for resume",
+                trace_id=str(parent.id),
+            )
+            db.add(Outbox(
+                tenant_id=parent.tenant_id,
+                aggregate_type="TASK",
+                aggregate_id=parent.id,
+                event_type="TASK_READY",
+                payload={"task_id": str(parent.id)},
+            ))
+            db.commit()
 
     async def _execute_inner(self, task_id: UUID) -> dict:
         with self.session_factory() as db:
@@ -183,11 +219,10 @@ class TaskRuntime:
             task = db.get(Task, task_id)
             if task is None:
                 return {"task_id": str(task_id), "status": "NOT_FOUND"}
-            checkpoint = latest_checkpoint(db, task_id, statuses=("APPROVED", "RESUMED"))
+            checkpoint = latest_checkpoint(db, task_id, statuses=("APPROVED", "RESUMED", "CHILD_COMPLETED"))
             if checkpoint is not None and self.gateway is not None:
-                # chat 型任务（绑定会话）审批恢复走"重放工具 → 续跑执行循环 → 最终回复"；
-                # skill 型任务保持原有单工具重放语义。
-                if task.conversation_id is not None:
+                # 子任务完成后父任务从 checkpoint 恢复；审批恢复仍区分 chat 与 skill 任务。
+                if checkpoint.status == "CHILD_COMPLETED" or task.conversation_id is not None:
                     return await self._resume_chat_task(db, task, checkpoint, cancel_event)
                 if task.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING):
                     return {"task_id": str(task_id), "status": str(task.status)}
@@ -355,8 +390,11 @@ class TaskRuntime:
                     task_id=task.id,
                     cancellation_event=cancel_event,
                     deadline_at=task.deadline_at,
+                    delegation_depth=task.delegation_depth,
                     seed=seed,
                 )
+                if result.pending_delegation is not None:
+                    return self._pause_for_child_task(db, task, result.pending_delegation)
                 if result.pending_confirmation is not None:
                     # 写入类工具挂起等待审批：确认机制已把任务置为 WAITING_HUMAN，worker 直接让出，不判失败。
                     # 必须显式提交：checkpoint/confirmation/WAITING_HUMAN 状态与事件都在本事务里，
@@ -387,6 +425,67 @@ class TaskRuntime:
         self._cancellation_events.pop(task_id, None)
         return {"task_id": str(task_id), "status": "SUCCEEDED"}
 
+    def _pause_for_child_task(self, db, task: Task, pending: dict, checkpoint: TaskCheckpoint | None = None) -> dict:
+        """创建独立 Child Task，并把父任务挂起到可恢复 checkpoint。"""
+        try:
+            child_version_id = UUID(str(pending["agent_version_id"]))
+            task_text = str(pending.get("task_text") or "").strip()
+            call_id = str(pending.get("tool_call_id") or "")
+            messages = pending.get("messages") or []
+            if not task_text or not call_id or not messages:
+                raise ApiError("AI_A2A_ROUTE_FAILED", "delegation checkpoint is incomplete", 422)
+            settings = get_settings()
+            now = datetime.now(UTC)
+            child_deadline = now + timedelta(seconds=settings.delegation_default_child_timeout_seconds)
+            if task.deadline_at is not None:
+                child_deadline = min(child_deadline, ensure_utc(task.deadline_at))
+            ctx = SecurityContext(tenant_id=task.tenant_id, user_id=task.owner_user_id, trace_id=str(task.id))
+            child = create_task(
+                db,
+                ctx=ctx,
+                agent_id=db.get(AgentVersion, child_version_id).agent_id,
+                agent_version_id=child_version_id,
+                idempotency_key=f"a2a:{task.id}:{call_id}"[:128],
+                request_summary=task_text,
+                parent_task_id=task.id,
+                deadline_at=child_deadline,
+                trace_id=str(task.id),
+            )
+            chat_context = {
+                "messages": messages,
+                "tool_call_id": call_id,
+                "child_task_id": str(child.id),
+                "tool_name": str(pending.get("tool_name") or "route_specialist"),
+            }
+            context = {"chat_context": chat_context}
+            if checkpoint is None:
+                checkpoint = TaskCheckpoint(
+                    tenant_id=task.tenant_id,
+                    task_id=task.id,
+                    status="WAITING_CHILD",
+                    execution_context=context,
+                    completed_steps=[],
+                    pending_steps=[],
+                    pending_call={},
+                    idempotency_key=f"{task.id}:a2a:{call_id}"[:128],
+                )
+                db.add(checkpoint)
+            else:
+                checkpoint.status = "WAITING_CHILD"
+                checkpoint.execution_context = context
+                checkpoint.pending_call = {}
+                checkpoint.idempotency_key = f"{task.id}:a2a:{call_id}"[:128]
+            transition_task(
+                db, task, TaskStatus.WAITING_CHILD, "TASK_WAITING_CHILD",
+                f"waiting for delegated child task {child.id}",
+                trace_id=str(task.id),
+            )
+            db.commit()
+            return {"task_id": str(task.id), "status": "WAITING_CHILD", "child_task_id": str(child.id)}
+        except ApiError as exc:
+            db.rollback()
+            return self._fail_model_task(db, task, exc.code, exc.message)
+
     async def _resume_chat_task(self, db, task: Task, checkpoint: TaskCheckpoint, cancel_event: asyncio.Event) -> dict:
         """chat 型任务审批恢复：重放挂起的工具调用，回填结果后继续执行循环直至最终回复。"""
         task_id = task.id
@@ -399,46 +498,62 @@ class TaskRuntime:
         snapshot = chat_context.get("messages") or []
         if not snapshot:
             return self._fail_model_task(db, task, "AI_CHECKPOINT_INVALID", "chat checkpoint context is missing")
-        conversation = db.get(Conversation, task.conversation_id)
+        conversation = db.get(Conversation, task.conversation_id) if task.conversation_id else None
         trigger = db.get(Message, task.trigger_message_id) if task.trigger_message_id else None
-        if conversation is None or trigger is None:
+        if task.conversation_id is not None and (conversation is None or trigger is None):
             return self._fail_model_task(db, task, "AI_TASK_CONTEXT_INVALID", "task context is invalid")
         agent_version = db.get(AgentVersion, task.agent_version_id)
         mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id, user_id=task.owner_user_id)
-        # 重放挂起的工具调用（checkpoint 合法性与幂等检查：已成功执行过则直接取日志结果）
-        call = checkpoint.pending_call
-        tool_id = UUID(str(call["tool_version_id"]))
-        existing = db.query(SkillExecutionLog).filter(
-            SkillExecutionLog.task_id == task.id,
-            SkillExecutionLog.tool_version_id == tool_id,
-            SkillExecutionLog.status == "SUCCEEDED",
-        ).first()
-        if existing is not None and _pending_call_matches(existing, call):
-            data = (existing.result or {}).get("data")
-            tool_result = json.dumps(data, ensure_ascii=False, default=str) if data is not None else ""
+        if checkpoint.status == "CHILD_COMPLETED":
+            child_id = chat_context.get("child_task_id")
+            child = db.get(Task, UUID(str(child_id))) if child_id else None
+            if child is None or child.parent_task_id != task.id or child.status not in TERMINAL_STATES:
+                return self._fail_model_task(db, task, "AI_CHECKPOINT_INVALID", "delegated child task is not terminal")
+            child_payload = {
+                "status": str(child.status),
+                "agent_version_id": str(child.agent_version_id),
+                "task_id": str(child.id),
+                "content": (child.result or {}).get("content"),
+                "error_code": child.error_code,
+                "error_message": child.error_message,
+            }
+            tool_result = json.dumps(child_payload, ensure_ascii=False, default=str)
         else:
-            ctx = SecurityContext(tenant_id=task.tenant_id, user_id=task.owner_user_id, trace_id=str(task.id))
-            result = await self.gateway.execute_async(
-                db,
-                ctx,
-                skill_version_id=UUID(str(checkpoint.execution_context["skill_version_id"])),
-                tool_version_id=tool_id,
-                arguments=call.get("arguments", {}),
-                task_id=task.id,
-                resume_checkpoint_id=checkpoint.id,
-                cancellation_event=cancel_event,
-                deadline_at=task.deadline_at,
-            )
-            if result.status != "SUCCEEDED":
-                if result.status == "WAITING_HUMAN":
-                    # 重放仍要求确认（防御分支）：持久化当前状态后让出
-                    db.commit()
-                    return {"task_id": str(task_id), "status": "WAITING_HUMAN"}
-                return self._fail_model_task(db, task, result.error_code or "AI_SKILL_FAILED", result.error_message or "tool execution failed")
-            tool_result = json.dumps(result.data, ensure_ascii=False, default=str)
+            # 审批恢复：重放挂起的 Skill 工具调用。
+            call = checkpoint.pending_call
+            tool_id = UUID(str(call["tool_version_id"]))
+        else:
+            existing = db.query(SkillExecutionLog).filter(
+                SkillExecutionLog.task_id == task.id,
+                SkillExecutionLog.tool_version_id == tool_id,
+                SkillExecutionLog.status == "SUCCEEDED",
+            ).first()
+            if existing is not None and _pending_call_matches(existing, call):
+                data = (existing.result or {}).get("data")
+                tool_result = json.dumps(data, ensure_ascii=False, default=str) if data is not None else ""
+            else:
+                ctx = SecurityContext(tenant_id=task.tenant_id, user_id=task.owner_user_id, trace_id=str(task.id))
+                result = await self.gateway.execute_async(
+                    db,
+                    ctx,
+                    skill_version_id=UUID(str(checkpoint.execution_context["skill_version_id"])),
+                    tool_version_id=tool_id,
+                    arguments=call.get("arguments", {}),
+                    task_id=task.id,
+                    resume_checkpoint_id=checkpoint.id,
+                    cancellation_event=cancel_event,
+                    deadline_at=task.deadline_at,
+                )
+                if result.status != "SUCCEEDED":
+                    if result.status == "WAITING_HUMAN":
+                        # 重放仍要求确认（防御分支）：持久化当前状态后让出
+                        db.commit()
+                        return {"task_id": str(task_id), "status": "WAITING_HUMAN"}
+                    return self._fail_model_task(db, task, result.error_code or "AI_SKILL_FAILED", result.error_message or "tool execution failed")
+                tool_result = json.dumps(result.data, ensure_ascii=False, default=str)
         selection = self._resolve_selection(db, task.tenant_id, agent_version)
         request = ModelRequest(
-            trace_id=str(task.id), task_id=task.id, conversation_id=conversation.id,
+            trace_id=str(task.id), task_id=task.id, conversation_id=task.conversation_id,
             tenant_id=task.tenant_id,
             agent_version_id=task.agent_version_id,
             model=selection.model, temperature=selection.temperature, max_tokens=selection.max_tokens,
@@ -454,8 +569,11 @@ class TaskRuntime:
                 task_id=task.id,
                 cancellation_event=cancel_event,
                 deadline_at=task.deadline_at,
+                delegation_depth=task.delegation_depth,
                 resume={"messages": snapshot, "tool_result": tool_result, "tool_call_id": chat_context.get("tool_call_id")},
             )
+            if loop_result.pending_delegation is not None:
+                return self._pause_for_child_task(db, task, loop_result.pending_delegation, checkpoint=checkpoint)
             if loop_result.pending_confirmation is not None:
                 # 续跑循环命中新的待确认工具：同主执行路径，先提交挂起状态再让出
                 db.commit()

@@ -140,6 +140,8 @@ class LoopResult:
     rounds: int
     # 写入类工具触发人工审批时的挂起信息（confirmation_id/tool_version_id/arguments/task_id）
     pending_confirmation: dict | None = None
+    # A2A dispatch is checkpointed as a separate Child Task; the parent worker yields its slot.
+    pending_delegation: dict | None = None
 
 
 class AgentExecutionLoop:
@@ -257,8 +259,23 @@ class AgentExecutionLoop:
                             "error_message": "本次任务已派发一个专业智能体；为避免重复调度，本次调用未执行。",
                         }
                     else:
-                        if is_site_a2a:
-                            a2a_dispatch_count += 1
+                        a2a_dispatch_count += 1
+                        # 有持久化 Task 时不在父 Worker 内嵌执行子 Agent。
+                        # 把模型上下文与 tool_call_id 返回给 TaskRuntime，创建独立 Child Task 后挂起父任务。
+                        if task is not None:
+                            return LoopResult(
+                                response,
+                                messages,
+                                round_number,
+                                pending_delegation={
+                                    "agent_version_id": str(dispatch_target),
+                                    "task_text": str(arguments.get("task", "")).strip(),
+                                    "tool_call_id": call.id,
+                                    "tool_name": call.name,
+                                    "messages": [_serialize_message(message) for message in messages],
+                                },
+                            )
+                        # 无 Task 的兼容调用仍使用原有 in-process 执行路径。
                         child_result = await self._run_child_agent(
                             db,
                             ctx=ctx,
