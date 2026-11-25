@@ -274,7 +274,13 @@ class _Client:
         self.calls: list[dict] = []
 
     async def post(self, url, *, json=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "json": json, "headers": dict(headers or {}), "timeout": timeout})
+        self.calls.append({"method": "POST", "url": url, "json": json, "headers": dict(headers or {}), "timeout": timeout})
+        if self._error is not None:
+            raise self._error
+        return self._response
+
+    async def get(self, url, *, headers=None, timeout=None):
+        self.calls.append({"method": "GET", "url": url, "headers": dict(headers or {}), "timeout": timeout})
         if self._error is not None:
             raise self._error
         return self._response
@@ -1224,3 +1230,39 @@ def test_agent_card_selects_only_declared_a2a_v1_jsonrpc_interfaces():
         }
     )
     assert [item["url"] for item in card["supportedInterfaces"]] == ["https://peer.test/a2a"]
+
+
+@pytest.mark.asyncio
+async def test_peer_registry_fetches_and_validates_standard_agent_card():
+    card = {
+        "name": "Finance Agent",
+        "description": "Financial reporting",
+        "supportedInterfaces": [
+            {"url": "https://peer.test/a2a/jsonrpc", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"}
+        ],
+    }
+    client = _Client(response=_Response(200, json.dumps(card).encode()))
+    registry = _peer_registry(_config(), client=client)
+    result = await registry.fetch_agent_card(PeerConfig(peer_id="beta", base_url="https://peer.test"))
+
+    assert result["name"] == "Finance Agent"
+    assert result["supportedInterfaces"][0]["url"] == "https://peer.test/a2a/jsonrpc"
+    assert client.calls[0]["method"] == "GET"
+    assert client.calls[0]["url"] == "https://peer.test/.well-known/agent-card.json"
+
+
+@pytest.mark.asyncio
+async def test_peer_registry_rejects_agent_card_without_jsonrpc_v1_interface():
+    card = {
+        "name": "Old Agent",
+        "supportedInterfaces": [
+            {"url": "https://peer.test/old", "protocolBinding": "JSONRPC", "protocolVersion": "0.3"}
+        ],
+    }
+    client = _Client(response=_Response(200, json.dumps(card).encode()))
+    registry = _peer_registry(_config(), client=client)
+
+    with pytest.raises(ApiError) as excinfo:
+        await registry.fetch_agent_card(PeerConfig(peer_id="beta", base_url="https://peer.test"))
+
+    assert excinfo.value.code == "AI_A2A_PEER_UNAVAILABLE"
