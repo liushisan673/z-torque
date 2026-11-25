@@ -6,9 +6,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request, UploadFile
 from fastapi import File as UploadFileParam
 from fastapi.responses import FileResponse
-from starlette.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_current_user
 from app.config import get_settings
@@ -22,6 +22,7 @@ from app.kernel.ports.object_store import ObjectStore
 from app.kernel.security_context import SecurityContext
 from app.models import Conversation, File, User
 from app.models.message import message_file
+from app.plugin_sdk.observability import emit_event
 from app.services import knowledge_service
 from app.services.bridge_media import export_file_to_bridge
 from app.services.file_parser import SUPPORTED, parse_file_structured
@@ -78,6 +79,7 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         store.delete(str(file_id))
         raise ApiError("AI_FILE_TYPE_UNSUPPORTED", "file content does not match its type", 415)
     item = File(id=file_id, tenant_id=user.tenant_id, owner_user_id=user.id, conversation_id=conversation_id, original_name=Path(upload.filename or "file").name[:255], media_type=upload.content_type or "application/octet-stream", size_bytes=size, sha256=digest, storage_key=str(file_id), status="UPLOADED")
+    parse_started = time.perf_counter()
     try:
         parsed = await run_in_threadpool(
             parse_file_structured,
@@ -85,6 +87,14 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
             max_blocks=settings.knowledge_max_chunks_per_file,
             max_block_chars=settings.knowledge_chunk_max_chars,
         )
+        emit_event("file.parse", {
+            "duration_ms": round((time.perf_counter() - parse_started) * 1000),
+            "suffix": suffix,
+            "block_count": len(parsed.blocks),
+            "extracted_chars": len(parsed.text),
+            "truncated": parsed.truncated,
+            "outcome": "parsed",
+        })
         item.extracted_text = parsed.text
         item.status = "PARSED"
         provider = knowledge_service.get_provider(request)
