@@ -4,6 +4,8 @@ import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import type {
+  AuditEvent,
+  AuditListResponse,
   Connector,
   ConnectorDiscoverResult,
   ConnectorDiscoveredToolSummary,
@@ -243,6 +245,11 @@ export function ConnectorsPage() {
   const [testResults, setTestResults] = useState<Record<string, ConnectorTestResult>>({});
   const [testFailure, setTestFailure] = useState<{ connectorId: string; message: string; traceId?: string } | null>(null);
   const [testing, setTesting] = useState(false);
+  // 持久化检查历史来自 audit 表；与本会话内存中的详细探测结果分开管理。
+  const [testHistory, setTestHistory] = useState<AuditEvent[]>([]);
+  const [testHistoryLoading, setTestHistoryLoading] = useState(false);
+  const [testHistoryError, setTestHistoryError] = useState<string | null>(null);
+  const [testHistoryRefresh, setTestHistoryRefresh] = useState(0);
 
   // MCP 工具发现（/discover 结果，切换连接时重置）
   const [discovering, setDiscovering] = useState(false);
@@ -536,6 +543,36 @@ export function ConnectorsPage() {
     [items, selectedId, detail],
   );
 
+  // 后端 CONNECTOR_TESTED 审计事件是持久化记录；普通用户只会拿到自己的事件，管理员范围由后端决定。
+  useEffect(() => {
+    const connectorId = selected?.id;
+    if (!connectorId) {
+      setTestHistory([]);
+      setTestHistoryError(null);
+      return;
+    }
+    let cancelled = false;
+    setTestHistoryLoading(true);
+    setTestHistoryError(null);
+    const qs = new URLSearchParams({
+      action: "CONNECTOR_TESTED",
+      resource_type: "CONNECTOR",
+      resource_id: connectorId,
+      offset: "0",
+      limit: "10",
+    });
+    request<AuditListResponse>(`/api/z-torque/audit?${qs.toString()}`)
+      .then((response) => { if (!cancelled) setTestHistory(response.items); })
+      .catch((err) => {
+        if (!cancelled) {
+          setTestHistory([]);
+          setTestHistoryError(errorText(err, "检查历史暂不可用"));
+        }
+      })
+      .finally(() => { if (!cancelled) setTestHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [selected?.id, testHistoryRefresh]);
+
   // 列表筛选 + 搜索（名称 / 描述 / 目标）
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
@@ -670,6 +707,7 @@ export function ConnectorsPage() {
       });
     } finally {
       setTesting(false);
+      setTestHistoryRefresh((value) => value + 1);
     }
   }
 
@@ -1507,6 +1545,38 @@ export function ConnectorsPage() {
                       {!enabled && (
                         <p className="connector-foot-hint">连接已停用，启用后才能运行检查。</p>
                       )}
+
+                      <div className="connector-test-history" style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                          <strong style={{ fontSize: 13 }}>最近检查记录</strong>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>持久化审计 · 最近 10 条</span>
+                        </div>
+                        {testHistoryLoading ? (
+                          <div className="text-muted text-sm">正在加载检查历史…</div>
+                        ) : testHistoryError ? (
+                          <div className="text-muted text-sm">{testHistoryError}</div>
+                        ) : testHistory.length === 0 ? (
+                          <div className="text-muted text-sm">暂无持久化检查记录。新检查完成后会写入审计。</div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                            {testHistory.map((event) => {
+                              const partial = event.detail?.partial === true;
+                              const failed = event.result === "failed" || event.result === "denied";
+                              const label = failed ? "检查失败" : partial ? "部分检查" : "检查成功";
+                              const latency = typeof event.detail?.latency_ms === "number" ? ` · ${event.detail.latency_ms} ms` : "";
+                              return (
+                                <div key={event.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 7 }}>
+                                  <div style={{ minWidth: 0 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 600, color: failed ? "var(--danger, #dc4446)" : partial ? "var(--warning, #b7791f)" : "var(--text)" }}>{label}{latency}</div>
+                                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{fmtTime(event.created_at)}</div>
+                                  </div>
+                                  <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--mono)", flexShrink: 0 }}>{event.trace_id ? `${event.trace_id.slice(0, 8)}…` : "无 Trace"}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
                       {lastTest && (
                         <div className={`connector-test-result ${lastTest.partial ? "warn" : "ok"}`}>
                           {/* REST：区分「真的连上了」「被鉴权拒了」「压根没发请求」三种情况 */}
