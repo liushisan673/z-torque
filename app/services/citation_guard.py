@@ -18,6 +18,6 @@ def validate_citations(answer: str, chunks: list[KnowledgeChunk]) -> dict:
     used = bool(chunks)
     citations = _CITATION_RE.findall(answer or "")
     allowed_ids = {str((chunk.metadata or {}).get("chunk_id")) for chunk in chunks}
-    valid = [item for item in citations if item.startswith("[chunk:") and item[7:-1] in allowed_ids] or citations
+    valid = [item for item in citations if item.startswith("[chunk:") and item[7:-1] in allowed_ids]
     ok = (not used) or bool(valid)
     return {"citation_valid": ok, "used_retrieval": used, "citations": citations, "action": "OK" if ok else "REJECTED"}
