@@ -74,3 +74,11 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 3. Connectors: distinguish configured, healthy, degraded and unavailable states; provide a safe test action and a concise last-test result without exposing credentials.
 4. Run & Audit: make task status, elapsed time, failure reason and trace/correlation identifiers scannable; keep detailed event payloads in a secondary inspection panel.
 5. Responsive and accessibility pass: verify narrow window behavior, collapsed navigation tooltips, focus order, minimum window size and reduced-motion behavior.
+
+
+## Interaction and access consistency pass (2026-11-25)
+
+- Agent, Skill and Connector list cards are keyboard-operable: Tab focuses the selected item; Enter or Space opens its detail; `aria-pressed` exposes the current selection state.
+- Managed routes for Agents, Skills, Audit and Settings use the same `APP_NAV` permission metadata as the sidebar. Hiding a navigation entry is not treated as an access-control boundary; direct URL navigation is checked as well.
+- Keep backend authorization authoritative. These route guards are a console usability/access consistency layer, not a replacement for API permission checks.
+- Do not convert list cards into nested interactive controls; keep destructive and configuration actions in the detail pane.
