@@ -94,3 +94,39 @@ async def test_stdio_fake_server_cancellation_cleans_process(tmp_path):
     assert connector.process is None
 
 
+
+
+
+@pytest.mark.asyncio
+async def test_stdio_fake_server_serializes_concurrent_requests(tmp_path):
+    connector = StdioMcpConnector(sys.executable, [str(_fake_server(tmp_path))], allowed_environment={}, cwd=str(tmp_path), timeout_seconds=1)
+    await connector.negotiate()
+    first, second = await asyncio.gather(
+        connector.call_tool("echo", {"value": 1}),
+        connector.call_tool("echo", {"value": 2}),
+    )
+    assert first["content"][0]["text"] == "ok"
+    assert second["content"][0]["text"] == "ok"
+    await connector.close()
+
+
+@pytest.mark.asyncio
+async def test_stdio_fake_server_enforces_output_limit(tmp_path):
+    script = tmp_path / "oversized_server.py"
+    script.write_text(
+        "import json, sys\\n"
+        "for line in sys.stdin:\\n"
+        "    request = json.loads(line)\\n"
+        "    if request.get('method') == 'notifications/initialized': continue\\n"
+        "    result = {'protocolVersion': '2025-06-18'} if request.get('method') == 'initialize' else {'content': [{'type': 'text', 'text': 'x' * 2000}]}\\n"
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': request.get('id'), 'result': result}), flush=True)\\n",
+        encoding="utf-8",
+    )
+    connector = StdioMcpConnector(
+        sys.executable, [str(script)], allowed_environment={}, cwd=str(tmp_path),
+        timeout_seconds=1, max_output_bytes=256,
+    )
+    await connector.negotiate()
+    with pytest.raises(McpTransportError, match="exceeds configured limit"):
+        await connector.call_tool("echo", {})
+    await connector.close()
