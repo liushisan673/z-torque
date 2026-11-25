@@ -22,7 +22,7 @@ import os
 import tempfile
 import time
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import httpx
 
@@ -270,6 +270,8 @@ class PeerRegistry:
         """
         peer = self.resolve(peer.peer_id)
         request = parse_jsonrpc_request(payload)
+        from urllib.parse import urlparse
+
         base = urlparse(peer.base_url)
         target = urlparse(endpoint_url)
         if (
