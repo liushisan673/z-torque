@@ -30,6 +30,9 @@ class TaskResponse(BaseModel):
     id: UUID
     status: TaskStatus
     owner_user_id: UUID
+    agent_id: UUID
+    parent_task_id: UUID | None
+    child_sequence: int | None
     root_task_id: UUID
     delegation_depth: int
     request_summary: str
