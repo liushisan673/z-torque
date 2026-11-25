@@ -111,6 +111,20 @@ def publish_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: 
     return version
 
 
+def _running_task_count(db: Session, tenant_id: UUID, version_id: UUID) -> int:
+    """归档保护：统计仍引用该不可变版本快照的非终态任务。"""
+    return (
+        db.scalar(
+            select(func.count(Task.id)).where(
+                Task.tenant_id == tenant_id,
+                Task.agent_version_id == version_id,
+                Task.status.notin_([str(status) for status in TERMINAL_STATES]),
+            )
+        )
+        or 0
+    )
+
+
 def _archive_blockers(db: Session, agent: Agent, version: AgentVersion) -> tuple[list[dict], list[dict], int, list[AgentVersion]]:
     """归档阻断项与提示项：只检查当前发布指针和非终态 Task 引用。
 
