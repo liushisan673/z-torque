@@ -487,6 +487,7 @@ def _global_knowledge_context(
         return ""
     return _format_knowledge_chunks(list(chunks), max_chars=max_chars)
 
+
 def build_context(
     db: Session,
     conversation: Conversation,
