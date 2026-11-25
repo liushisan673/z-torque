@@ -14,6 +14,7 @@ from app.models import (
     Agent,
     AgentVersion,
     AgentVersionSkill,
+    KnowledgeBase,
     Skill,
     SkillVersion,
     SkillVersionTool,
@@ -85,6 +86,43 @@ def update_draft(
     return version
 
 
+def bind_knowledge_bases(
+    db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UUID, knowledge_base_ids: list[UUID]
+) -> AgentVersion:
+    """将用户拥有的知识库写入 Agent 草稿快照；发布版本不可变。"""
+    version = db.get(AgentVersion, version_id)
+    if not version or version.tenant_id != tenant_id:
+        raise ApiError("AI_AGENT_VERSION_NOT_FOUND", VERSION_NOT_FOUND, 404)
+    _owned_agent(db, tenant_id, user_id, version.agent_id)
+    if version.status != "DRAFT":
+        raise ApiError("AI_REQUEST_INVALID", "published version is immutable", 422)
+
+    unique_ids = list(dict.fromkeys(knowledge_base_ids))
+    if unique_ids:
+        owned_ids = set(db.scalars(
+            select(KnowledgeBase.id).where(
+                KnowledgeBase.id.in_(unique_ids),
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.owner_user_id == user_id,
+                KnowledgeBase.status == "ACTIVE",
+            )
+        ).all())
+    else:
+        owned_ids = set()
+    if len(owned_ids) != len(unique_ids):
+        raise ApiError("AI_FORBIDDEN", "one or more knowledge bases are unavailable to this user", 403)
+
+    snapshot = dict(version.config_snapshot or {})
+    snapshot["knowledge_base_ids"] = [str(item) for item in unique_ids]
+    version.config_snapshot = snapshot
+    record_audit(
+        db, tenant_id=tenant_id, actor_user_id=user_id, action="AGENT_KNOWLEDGE_BASES_BOUND",
+        resource_type="AGENT_VERSION", resource_id=version.id, summary="knowledge bases bound to agent draft",
+        detail={"knowledge_base_ids": snapshot["knowledge_base_ids"]},
+    )
+    return version
+
+
 def publish_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UUID) -> AgentVersion:
     version = db.get(AgentVersion, version_id)
     if not version or version.tenant_id != tenant_id:
@@ -94,6 +132,25 @@ def publish_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: 
         raise ApiError("AI_REQUEST_INVALID", "version is not a draft", 422)
     if not version.config_snapshot:
         raise ApiError("AI_REQUEST_INVALID", "version configuration is empty", 422)
+    raw_knowledge_ids = version.config_snapshot.get("knowledge_base_ids", [])
+    if not isinstance(raw_knowledge_ids, list):
+        raise ApiError("AI_REQUEST_INVALID", "knowledge_base_ids must be a list", 422)
+    try:
+        knowledge_ids = list(dict.fromkeys(UUID(str(item)) for item in raw_knowledge_ids))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ApiError("AI_REQUEST_INVALID", "knowledge_base_ids contains an invalid id", 422) from exc
+    if knowledge_ids:
+        owned_knowledge_ids = set(db.scalars(
+            select(KnowledgeBase.id).where(
+                KnowledgeBase.id.in_(knowledge_ids),
+                KnowledgeBase.tenant_id == tenant_id,
+                KnowledgeBase.owner_user_id == user_id,
+                KnowledgeBase.status == "ACTIVE",
+            )
+        ).all())
+        if len(owned_knowledge_ids) != len(knowledge_ids):
+            raise ApiError("AI_FORBIDDEN", "agent cannot be published with unavailable knowledge bases", 403)
+    version.config_snapshot = {**version.config_snapshot, "knowledge_base_ids": [str(item) for item in knowledge_ids]}
     bound_skill_ids: list[UUID] = []
     for link in db.query(AgentVersionSkill).filter(AgentVersionSkill.agent_version_id == version.id).all():
         skill = db.get(SkillVersion, link.skill_version_id)

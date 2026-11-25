@@ -18,7 +18,7 @@ from app.db.session import get_db
 from app.kernel.audit.service import record_audit, record_audit_detached
 from app.kernel.ports.object_store import ObjectStore
 from app.kernel.security_context import SecurityContext
-from app.models import Conversation, File, User
+from app.models import Conversation, File, KnowledgeBaseDocument, User
 from app.models.message import message_file
 from app.services import knowledge_service
 from app.services.bridge_media import export_file_to_bridge
@@ -218,6 +218,11 @@ async def remove(file_id: UUID, request: Request, user: User = Depends(get_curre
     except Exception:
         logger.exception("failed to delete object %s for file %s", item.storage_key, item.id)
         raise ApiError("AI_FILE_DELETE_FAILED", "failed to delete stored file", 500) from None
+    # 文件删除时同步解除所有知识库关联；知识库本身保留。
+    db.query(KnowledgeBaseDocument).filter(
+        KnowledgeBaseDocument.tenant_id == user.tenant_id,
+        KnowledgeBaseDocument.file_id == item.id,
+    ).delete(synchronize_session=False)
     item.status = "DELETED"
     item.extracted_text = None
     # 删除级联：doc/chunk/FTS 同步清理，检索不再命中（失败不阻断文件删除，但审计留痕）

@@ -79,6 +79,37 @@ def delete_index(db: Session, *, provider: KnowledgeProvider | None, tenant_id: 
     provider.delete_file(db, tenant_id=tenant_id, file_id=file_id)
 
 
+def allowed_paths_for_knowledge_base(request, db: Session, *, tenant_id: UUID, user_id: UUID, knowledge_base_id: UUID) -> list[str]:
+    """只返回指定知识库内、当前用户拥有且已解析的文件路径。"""
+    from app.core.errors import ApiError
+    from app.models import File, KnowledgeBase, KnowledgeBaseDocument
+
+    base = db.scalar(select(KnowledgeBase).where(
+        KnowledgeBase.id == knowledge_base_id,
+        KnowledgeBase.tenant_id == tenant_id,
+        KnowledgeBase.owner_user_id == user_id,
+        KnowledgeBase.status == "ACTIVE",
+    ))
+    if base is None:
+        raise ApiError("AI_RESOURCE_NOT_FOUND", "knowledge base not found", 404)
+    registry = getattr(request.app.state, "port_registry", None)
+    object_store = registry.get("object.store") if registry is not None else None
+    if object_store is None:
+        return []
+    storage_keys = db.scalars(
+        select(File.storage_key)
+        .join(KnowledgeBaseDocument, KnowledgeBaseDocument.file_id == File.id)
+        .where(
+            KnowledgeBaseDocument.tenant_id == tenant_id,
+            KnowledgeBaseDocument.knowledge_base_id == knowledge_base_id,
+            File.tenant_id == tenant_id,
+            File.owner_user_id == user_id,
+            File.status == "PARSED",
+        )
+    ).all()
+    return [str(Path(object_store.local_path(key)).resolve()) for key in storage_keys]
+
+
 def search(
     db: Session, *, provider: KnowledgeProvider, ctx: SecurityContext,
     query: str, allowed_paths: list[str], top_k: int,

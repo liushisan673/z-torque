@@ -42,7 +42,10 @@ async def search(payload: KnowledgeSearchRequest, request: Request, user: User =
     if provider is None:
         raise ApiError("AI_CAPABILITY_UNAVAILABLE", "local knowledge search is unavailable", 503)
     ctx = _ctx(request, user)
-    allowed = knowledge_service.allowed_paths_for_user(request, db, tenant_id=user.tenant_id, user_id=user.id)
+    if payload.knowledge_base_id is not None:
+        allowed = knowledge_service.allowed_paths_for_knowledge_base(request, db, tenant_id=user.tenant_id, user_id=user.id, knowledge_base_id=payload.knowledge_base_id)
+    else:
+        allowed = knowledge_service.allowed_paths_for_user(request, db, tenant_id=user.tenant_id, user_id=user.id)
     chunks = knowledge_service.search(db, provider=provider, ctx=ctx, query=payload.query, allowed_paths=allowed, top_k=payload.top_k)
     return success_response(request, {
         "state": knowledge_service.resolve_state(provider),

@@ -107,13 +107,13 @@ def test_profile_rejects_unknown_entry():
 
 
 def test_module_requires_ports_enforced():
-    """模块级 requires_ports：vector.store 无实现（UNAVAILABLE）→ 合成模块 fail fast。"""
+    """模块级 requires_ports：未提供的 Port → 合成模块 fail fast。"""
     import app.builtin_plugins.modules as modules_mod
 
-    monkey_spec = ModuleSpec(name="synthetic", description="t", plugins=(), requires_ports=("vector.store",))
+    monkey_spec = ModuleSpec(name="synthetic", description="t", plugins=(), requires_ports=("embedding.provider",))
     modules_mod.MODULE_REGISTRY[monkey_spec.name] = monkey_spec
     try:
-        with pytest.raises(AssemblyError, match="module synthetic requires port vector.store"):
+        with pytest.raises(AssemblyError, match="module synthetic requires port embedding.provider"):
             assemble(get_settings(), engine, profile=(*PROFILE_COMMUNITY, "synthetic"))
     finally:
         modules_mod.MODULE_REGISTRY.pop(monkey_spec.name, None)
@@ -124,8 +124,8 @@ def test_assembly_result_smoke_after_module_refactor():
     result = assemble(get_settings(), engine)
     resolved = [item for item in result.registry.status() if item["state"] == PortState.RESOLVED]
     assert len(result.plugins) == 22
-    # 22 插件中 20 个解析为独立 Port（知识库落地 knowledge.provider；21 Port 仍冻结）
-    assert len(resolved) == 20
+    # 22 插件中 21 个 Port 均解析；知识库与本地向量存储均已落地
+    assert len(resolved) == 21
     # 单一系统：默认档即含导出/归档/A2A 服务句柄（无版本差距）
     assert "audit_export_service" in result.objects
     assert "a2a_gateway" in result.objects
