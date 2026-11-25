@@ -15,9 +15,9 @@ from app.kernel.model_gateway.contracts import ModelRequest, normalize_usage
 from app.kernel.security_context import SecurityContext
 from app.models import Agent, AgentVersion, Conversation, Message
 from app.repositories import get_owned, get_owned_version
+from app.services import knowledge_service
 from app.services.chat_application import _maybe_summarize, create_chat_task
 from app.services.context_builder import assistant_reasoning_parts
-from app.services import knowledge_service
 from app.services.execution_loop import serialize_seed
 from app.services.usage_service import record_usage_summary
 

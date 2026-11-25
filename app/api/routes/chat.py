@@ -22,8 +22,8 @@ from app.services.chat_application import (
     resolve_agent_mentions,
     resolve_chat_model_name,
 )
-from app.services.context_builder import build_agent_system_prompt, build_context
 from app.services import knowledge_service
+from app.services.context_builder import build_agent_system_prompt, build_context
 from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens
 from app.services.stream_service import sse_event

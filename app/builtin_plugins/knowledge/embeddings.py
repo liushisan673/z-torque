@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+
 import httpx
 
 from app.config import get_settings
