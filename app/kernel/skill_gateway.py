@@ -22,7 +22,7 @@ from app.kernel.md_skill_runtime import MdSkillRuntime
 from app.kernel.plugin_guard import CIRCUIT_OPEN_CODE, QUOTA_EXCEEDED_CODE, PluginGuardRegistry
 from app.kernel.ports.approval_provider import ApprovalProvider
 from app.kernel.ports.authz_provider import AuthzProvider
-from app.kernel.ports.connector import McpConnector, McpProtocolError, McpTransportError
+from app.kernel.ports.connector import McpConnector, McpProtocolError, McpRemoteError, McpTransportError
 from app.kernel.ports.interceptor import ExecutionInterceptor
 from app.kernel.ports.sandbox_driver import (
     PATCH_COMMITTED,
@@ -158,6 +158,12 @@ class NegotiatedMcpExecutor:
         try:
             result = await self.connector.call_tool(str(config["tool_name"]), arguments)
             return ExecutionResult(status="SUCCEEDED", data=result)
+        except McpRemoteError as exc:
+            return ExecutionResult(status="FAILED", error_code="AI_MCP_TOOL_CALL_FAILED", error_message=str(exc))
+        except McpTransportError as exc:
+            return ExecutionResult(status="FAILED", error_code="AI_MCP_TRANSPORT_FAILED", error_message=str(exc))
+        except McpProtocolError as exc:
+            return ExecutionResult(status="FAILED", error_code="AI_MCP_PROTOCOL_FAILED", error_message=str(exc))
         except _EXECUTION_ERRORS as exc:
             return ExecutionResult(status="FAILED", error_code="AI_MCP_TOOL_CALL_FAILED", error_message=str(exc))
         except Exception as exc:  # noqa: BLE001
@@ -581,8 +587,8 @@ class SkillGateway:
                     return connected
         try:
             result = await asyncio.wait_for(executor.execute_async(config, arguments), timeout=timeout_seconds)
-            if result.status != "SUCCEEDED":
-                # 会话可能已被对端关闭（重启 / 会话过期）：丢弃缓存，下次重新协商
+            if result.error_code in {"AI_MCP_TRANSPORT_FAILED", "AI_MCP_PROTOCOL_FAILED"}:
+                # 只有传输中断或响应协议失步才丢弃会话；JSON-RPC 工具级业务错误仍可复用连接。
                 await self._evict_mcp_session(session_key)
             return result
         except TimeoutError:
