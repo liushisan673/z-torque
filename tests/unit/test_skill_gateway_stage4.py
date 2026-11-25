@@ -10,6 +10,7 @@ from app.kernel.skill_gateway import SkillGateway
 
 class FlakyExecutor:
     tool_type = "TEST"
+    retry_safe = True
 
     def __init__(self):
         self.calls = 0
@@ -77,3 +78,50 @@ def test_md_skill_loader_rejects_missing_metadata(tmp_path: Path):
     with pytest.raises(ApiError) as error:
         MdSkillInstructionLoader(tmp_path).load("SKILL.md")
     assert error.value.code == "AI_SKILL_METADATA_INVALID"
+
+
+
+@pytest.mark.asyncio
+async def test_gateway_does_not_retry_http_post_after_ambiguous_failure():
+    class PostExecutor:
+        tool_type = "HTTP"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, config, arguments, timeout_seconds):
+            self.calls += 1
+            return ExecutionResult(status="FAILED", error_code="AI_HTTP_REQUEST_FAILED", error_message="connection lost")
+
+    gateway = SkillGateway()
+    executor = PostExecutor()
+    result = await gateway._execute_with_retry(
+        executor, {"method": "POST"}, {"value": 1},
+        timeout_seconds=1, max_retries=3, backoff_seconds=0,
+    )
+    assert result.status == "FAILED"
+    assert executor.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_retries_http_get_on_transient_failure():
+    class GetExecutor:
+        tool_type = "HTTP"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, config, arguments, timeout_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                return ExecutionResult(status="FAILED", error_code="AI_HTTP_REQUEST_FAILED", error_message="temporary")
+            return ExecutionResult(status="SUCCEEDED", data={"ok": True})
+
+    gateway = SkillGateway()
+    executor = GetExecutor()
+    result = await gateway._execute_with_retry(
+        executor, {"method": "GET"}, {},
+        timeout_seconds=1, max_retries=1, backoff_seconds=0,
+    )
+    assert result.status == "SUCCEEDED"
+    assert executor.calls == 2
