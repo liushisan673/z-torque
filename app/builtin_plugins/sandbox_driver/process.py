@@ -37,8 +37,9 @@ from app.plugin_sdk.observability import emit_event
 class ProcessSandboxDriver(FilePatchMixin, SandboxDriver):
     """sandbox.driver 的进程内实现：独立解释器 -I + 最小环境变量 + cwd 白名单 + rlimit。
 
-    平台降级：Windows 无 rlimit 与进程组语义，超时仅 process.kill()（子进程可能残留，
-    v1 明确不承诺强隔离），由 MdSkillRuntime 在 Windows 上直接拒绝脚本执行。
+    平台降级：Windows 无 rlimit 与 POSIX 进程组语义；超时通过 taskkill /T /F 尽可能清理
+    进程树，但不等价于 Job Object 或容器隔离。是否允许执行仍由 MdSkillRuntime 的
+    windows_trusted、人工确认与路径白名单共同约束。
     """
 
     def __init__(
