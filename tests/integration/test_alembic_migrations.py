@@ -87,7 +87,7 @@ def test_postgres_schema_matches_models():
     engine = create_engine(_PG_URL)
     try:
         with engine.connect() as conn:
-            context = MigrationContext.configure(conn, opts={"compare_type": compare_type})
+            context = MigrationContext.configure(conn, opts={"compare_type": compare_type, "include_object": include_object})
             diff = compare_metadata(context, Base.metadata)
             # FTS5 虚表及影子表（_config/_idx/_data/_docsize）由迁移 raw SQL 管理，
             # 不属于 ORM metadata；DB 中存在是预期状态，不能判为漂移。降级路径的
