@@ -26,9 +26,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from app.builtin_plugins.a2a_gateway.jsonrpc import parse_jsonrpc_request, validate_agent_card, validate_jsonrpc_response
-
 from app.builtin_plugins.a2a_gateway.config import A2AConfig, PeerConfig
+from app.builtin_plugins.a2a_gateway.jsonrpc import parse_jsonrpc_request, validate_agent_card, validate_jsonrpc_response
 from app.core.errors import ApiError
 from app.plugin_sdk.observability import emit_event
 
@@ -199,6 +198,7 @@ class PeerRegistry:
 
     async def fetch_agent_card(self, peer: PeerConfig) -> dict[str, Any]:
         """通过受控 HTTPS 获取远端标准 well-known Agent Card。"""
+        peer = self.resolve(peer.peer_id)
         self._sdk.require_permission("network.outbound")
         started = time.monotonic()
         try:
@@ -268,10 +268,6 @@ class PeerRegistry:
 
         endpoint 必须与配置 peer 同源，防止恶意/被篡改 Agent Card 将凭据导向其他主机。
         """
-        from urllib.parse import urlparse
-
-        from app.builtin_plugins.a2a_gateway.jsonrpc import parse_jsonrpc_request, validate_jsonrpc_response
-
         peer = self.resolve(peer.peer_id)
         request = parse_jsonrpc_request(payload)
         base = urlparse(peer.base_url)
