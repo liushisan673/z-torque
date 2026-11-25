@@ -945,6 +945,31 @@ class TaskRuntime:
                     if confirmation and confirmation.status == "APPROVED" and checkpoint.status == "APPROVED":
                         transition_task(db, task, TaskStatus.QUEUED, "TASK_APPROVAL_RECOVERED", "approved task resumed after restart")
                         db.add(Outbox(id=new_uuid7(), tenant_id=task.tenant_id, aggregate_type="TASK", aggregate_id=task.id, event_type="TASK_READY", payload={"task_id": str(task.id), "resume_checkpoint_id": str(checkpoint.id), "recovered": True}))
+            # Two-pass recovery: a child that was RUNNING may have been marked FAILED
+            # earlier in this same recovery pass. Re-scan WAITING_CHILD parents after all
+            # task states have been reconciled so no parent remains stranded.
+            waiting_parents = db.query(Task).filter(Task.status == TaskStatus.WAITING_CHILD).all()
+            for parent in waiting_parents:
+                checkpoint = latest_checkpoint(db, parent.id)
+                chat_context = ((checkpoint.execution_context or {}).get("chat_context") or {}) if checkpoint else {}
+                child_id = chat_context.get("child_task_id")
+                child = db.get(Task, UUID(str(child_id))) if child_id else None
+                if (
+                    checkpoint is None or checkpoint.status != "WAITING_CHILD"
+                    or child is None or child.parent_task_id != parent.id
+                    or child.status not in TERMINAL_STATES
+                ):
+                    continue
+                checkpoint.status = "CHILD_COMPLETED"
+                transition_task(
+                    db, parent, TaskStatus.QUEUED, "TASK_CHILD_RECOVERED",
+                    "completed child task detected during recovery",
+                )
+                db.add(Outbox(
+                    id=new_uuid7(), tenant_id=parent.tenant_id, aggregate_type="TASK",
+                    aggregate_id=parent.id, event_type="TASK_READY",
+                    payload={"task_id": str(parent.id), "recovered": True},
+                ))
             db.commit()
 
     async def _dispatch_loop(self) -> None:
