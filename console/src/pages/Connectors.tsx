@@ -1561,7 +1561,8 @@ export function ConnectorsPage() {
                           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                             {testHistory.map((event) => {
                               const partial = event.detail?.partial === true;
-                              const failed = event.result === "failed" || event.result === "denied";
+                              const failed = event.result === "failed" || event.result === "denied"
+                                || event.summary === "connector test failed" || typeof event.detail?.error === "string";
                               const label = failed ? "检查失败" : partial ? "部分检查" : "检查成功";
                               const latency = typeof event.detail?.latency_ms === "number" ? ` · ${event.detail.latency_ms} ms` : "";
                               return (
