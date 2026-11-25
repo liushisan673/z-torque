@@ -48,7 +48,8 @@ def _rebuild(*, with_tenant: bool) -> None:
             sa.Column("text", sa.Text(), nullable=False),
         ])
         op.create_table(_FTS, *columns)
-        op.create_index(f"ix_{_FTS}_text", _FTS, ["text"])
+        if with_tenant:
+            op.create_index(f"ix_{_FTS}_tenant_id", _FTS, ["tenant_id"])
     target_columns = "tenant_id, chunk_id, text" if with_tenant else "chunk_id, text"
     source_columns = "CAST(c.tenant_id AS VARCHAR(36)), CAST(c.id AS VARCHAR(36)), c.text" if with_tenant else "CAST(c.id AS VARCHAR(36)), c.text"
     op.execute(f"INSERT INTO {_FTS}({target_columns}) SELECT {source_columns} FROM zr_knowledge_chunk c")
