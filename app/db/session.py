@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import get_settings
 from app.runtime_paths import is_frozen
 
-
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 _SQLITE_CACHE_SIZE_KIB = 8_192
 
