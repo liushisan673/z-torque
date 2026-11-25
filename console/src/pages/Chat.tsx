@@ -503,11 +503,11 @@ export function ChatPage() {
       // 保留本地步骤（seq < 0 的「理解需求」等），真实事件按 seq 追加在后
       setActiveRun((prev) =>
         prev?.taskId === taskId
-          ? { ...prev, steps: [...prev.steps.filter((s) => s.seq < 0), ...mapped], status: t.status, waiting: t.status === "WAITING_HUMAN" }
+          ? { ...prev, steps: [...prev.steps.filter((s) => s.seq < 0), ...mapped], status: t.status, waiting: t.status === "WAITING_HUMAN" || t.status === "WAITING_CHILD" }
           : prev,
       );
       setWaitingConfirm(t.status === "WAITING_HUMAN");
-      if (t.status === "WAITING_HUMAN") setTaskPanelOpen(true);
+      if (t.status === "WAITING_HUMAN" || t.status === "WAITING_CHILD") setTaskPanelOpen(true);
       const last = ev.items[ev.items.length - 1];
       lastEventIdRef.current = last ? String(last.seq) : "";
       void refreshChildTasks(t.id);
@@ -1178,6 +1178,7 @@ export function ChatPage() {
   const taskBadgeInfo = useMemo(() => {
     if (!task) return { cls: "muted", label: "—" } as const;
     if (task.status === "WAITING_HUMAN") return { cls: "waiting", label: "等待确认" } as const;
+    if (task.status === "WAITING_CHILD") return { cls: "waiting", label: "等待子智能体" } as const;
     if (task.status === "SUCCESS") return { cls: "success", label: "已完成" } as const;
     if (task.status === "FAILED" || task.status === "TIMEOUT") return { cls: "failed", label: task.status === "TIMEOUT" ? "执行超时" : "执行失败" } as const;
     if (task.status === "CANCELLED") return { cls: "muted", label: "已取消" } as const;
@@ -1188,7 +1189,7 @@ export function ChatPage() {
   // 时间线节点样式：根据事件类型与位置推断 done/active/waiting/error
   function timelineItemClass(s: TaskStep, idx: number, total: number): string {
     if (s.eventType.includes("FAILED") || s.eventType.includes("ERROR") || s.eventType === "task.error") return "error";
-    if (s.eventType === "TASK_WAITING_HUMAN" || s.eventType === "task.waiting_human") return "waiting";
+    if (s.eventType === "TASK_WAITING_HUMAN" || s.eventType === "task.waiting_human" || s.eventType === "TASK_WAITING_CHILD") return "waiting";
     if (idx === total - 1 && taskRunning) return "active";
     return "done";
   }

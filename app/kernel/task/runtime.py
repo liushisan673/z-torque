@@ -440,10 +440,13 @@ class TaskRuntime:
             if task.deadline_at is not None:
                 child_deadline = min(child_deadline, ensure_utc(task.deadline_at))
             ctx = SecurityContext(tenant_id=task.tenant_id, user_id=task.owner_user_id, trace_id=str(task.id))
+            child_version = db.get(AgentVersion, child_version_id)
+            if child_version is None:
+                raise ApiError("AI_AGENT_NOT_FOUND", "delegated Agent version is unavailable", 404)
             child = create_task(
                 db,
                 ctx=ctx,
-                agent_id=db.get(AgentVersion, child_version_id).agent_id,
+                agent_id=child_version.agent_id,
                 agent_version_id=child_version_id,
                 idempotency_key=f"a2a:{task.id}:{call_id}"[:128],
                 request_summary=task_text,
@@ -522,7 +525,6 @@ class TaskRuntime:
             # 审批恢复：重放挂起的 Skill 工具调用。
             call = checkpoint.pending_call
             tool_id = UUID(str(call["tool_version_id"]))
-        else:
             existing = db.query(SkillExecutionLog).filter(
                 SkillExecutionLog.task_id == task.id,
                 SkillExecutionLog.tool_version_id == tool_id,
@@ -941,7 +943,7 @@ class TaskRuntime:
                                 task.error_code = "AI_TASK_TIMEOUT"
                                 task.error_message = "task deadline exceeded"
                                 checkpoint = latest_checkpoint(db, task.id)
-                                if checkpoint and checkpoint.status in {"WAITING_APPROVAL", "APPROVED"}:
+                                if checkpoint and checkpoint.status in {"WAITING_APPROVAL", "APPROVED", "WAITING_CHILD", "CHILD_COMPLETED"}:
                                     checkpoint.status = "EXPIRED"
                                 transition_task(db, task, TaskStatus.TIMEOUT, "TASK_TIMEOUT", "task timed out", expected_epoch=task.attempt_epoch)
                         except ApiError:

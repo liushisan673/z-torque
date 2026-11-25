@@ -100,6 +100,7 @@ export type TaskStatus =
   | "QUEUED"
   | "RUNNING"
   | "WAITING_HUMAN"
+  | "WAITING_CHILD"
   | "CANCELING"
   | "CANCEL_REQUESTED"
   | "SUCCESS"
