@@ -200,7 +200,7 @@ def test_waiting_child_task_yields_parent_and_resumes_after_child_terminal(monke
     monkeypatch.setattr("app.kernel.task.runtime.list_user_permissions", lambda *_args, **_kwargs: {"a2a.invoke"})
     runtime = TaskRuntime(queue=object(), session_factory=SessionLocal)
 
-    with SessionLocal.begin() as db:
+    with SessionLocal() as db:
         target = Agent(
             tenant_id=tenant_id,
             owner_user_id=None,
