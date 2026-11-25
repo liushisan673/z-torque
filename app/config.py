@@ -53,7 +53,8 @@ class Settings(BaseSettings):
     app_debug: bool = False
     # 会话 Cookie 是否仅经 HTTPS 传输；生产默认开启（P2-17）
     cookie_secure: bool = False
-    data_dir: Path = Field(default_factory=default_data_dir)\n    database_url: str = Field(default_factory=default_database_url)
+    data_dir: Path = Field(default_factory=default_data_dir)
+    database_url: str = Field(default_factory=default_database_url)
     access_token_ttl_minutes: int = 60
     refresh_token_ttl_days: int = 7
     login_failure_limit: int = 5
@@ -405,7 +406,9 @@ class Settings(BaseSettings):
             raise ValueError('BRIDGE_MEDIA_OUTBOUND_SUBDIR must be a single relative directory name')
         if self.model_max_images_per_message < 0 or self.model_max_image_mb < 1 or self.model_image_history_limit < 0:
             raise ValueError('MODEL_MAX_IMAGES_PER_MESSAGE / MODEL_MAX_IMAGE_MB / MODEL_IMAGE_HISTORY_LIMIT must be valid')
-        if not 1 <= self.task_max_model_rounds <= 30:\n            raise ValueError('TASK_MAX_MODEL_ROUNDS must be within 1..30')\n        if self.worker_concurrency < 1 or self.sqlite_worker_concurrency < 1:
+        if not 1 <= self.task_max_model_rounds <= 30:
+            raise ValueError('TASK_MAX_MODEL_ROUNDS must be within 1..30')
+        if self.worker_concurrency < 1 or self.sqlite_worker_concurrency < 1:
             raise ValueError('worker concurrency limits must be positive')
         if self.sandbox_max_processes < 1 or self.sandbox_max_file_bytes < 1:
             raise ValueError('sandbox resource limits must be positive')
@@ -473,10 +476,10 @@ def _ensure_frozen_runtime_secrets() -> None:
         username = os.getenv("ADMIN_INITIAL_USERNAME", "admin")
         credentials = data_dir / "FIRST_RUN_CREDENTIALS.txt"
         credentials.write_text(
-            "Z-Torque 初始管理员凭据\\n"
-            f"用户名：{username}\\n"
-            f"初始密码：{stored['admin_initial_password']}\\n\\n"
-            "首次登录后请立即修改密码，并删除本文件。\\n",
+            "Z-Torque 初始管理员凭据\n"
+            f"用户名：{username}\n"
+            f"初始密码：{stored['admin_initial_password']}\n\n"
+            "首次登录后请立即修改密码，并删除本文件。\n",
             encoding="utf-8",
         )
         try:
