@@ -30,6 +30,7 @@ from app.kernel.task.service import create_task, sanitize_summary, transition_ta
 from app.kernel.task.states import TERMINAL_STATES, TaskStatus
 from app.kernel.task.worker import Worker
 from app.models import (
+    Agent,
     AgentVersion,
     Confirmation,
     Conversation,
@@ -51,6 +52,8 @@ from app.services.context_builder import (
 from app.services.execution_loop import AgentExecutionLoop
 from app.services.model_limits import effective_max_tokens, model_capabilities
 from app.services.tool_mapping_builder import build_tool_mappings
+from app.repositories import visible_owner_clause
+from app.security.permissions import list_user_permissions
 from app.services.usage_service import record_usage_summary
 
 logger = logging.getLogger("z_torque.task_worker")
@@ -187,7 +190,11 @@ class TaskRuntime:
             if child is None or child.parent_task_id is None or child.status not in TERMINAL_STATES:
                 return
             parent = db.get(Task, child.parent_task_id)
-            if parent is None or parent.status != TaskStatus.WAITING_CHILD:
+            if (
+                parent is None or parent.status != TaskStatus.WAITING_CHILD
+                or parent.tenant_id != child.tenant_id
+                or parent.owner_user_id != child.owner_user_id
+            ):
                 return
             checkpoint = latest_checkpoint(db, parent.id)
             if checkpoint is None or checkpoint.status != "WAITING_CHILD":
@@ -435,6 +442,24 @@ class TaskRuntime:
             if not task_text or not call_id or not messages:
                 raise ApiError("AI_A2A_ROUTE_FAILED", "delegation checkpoint is incomplete", 422)
             settings = get_settings()
+            if task.owner_user_id is None or "a2a.invoke" not in list_user_permissions(
+                db, tenant_id=task.tenant_id, user_id=task.owner_user_id
+            ):
+                raise ApiError("AI_A2A_DENIED", "user is not authorized to invoke A2A agents", 403)
+            target_version = db.scalar(
+                select(AgentVersion)
+                .join(Agent, Agent.id == AgentVersion.agent_id)
+                .where(
+                    AgentVersion.id == child_version_id,
+                    AgentVersion.tenant_id == task.tenant_id,
+                    AgentVersion.status == "PUBLISHED",
+                    Agent.current_published_version_id == AgentVersion.id,
+                    Agent.status == "ACTIVE",
+                    visible_owner_clause(Agent, task.tenant_id, task.owner_user_id),
+                )
+            )
+            if target_version is None:
+                raise ApiError("AI_AGENT_NOT_FOUND", "delegated Agent version is not current, published, or visible", 404)
             now = datetime.now(UTC)
             child_deadline = now + timedelta(seconds=settings.delegation_default_child_timeout_seconds)
             if task.deadline_at is not None:
@@ -808,7 +833,7 @@ class TaskRuntime:
                 {Outbox.status: "PENDING", Outbox.next_retry_at: None},
                 synchronize_session=False,
             )
-            pending = db.query(Task).filter(Task.status.in_([TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_HUMAN, TaskStatus.CANCELING])).all()
+            pending = db.query(Task).filter(Task.status.in_([TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_HUMAN, TaskStatus.WAITING_CHILD, TaskStatus.CANCELING])).all()
             for task in pending:
                 if task.status == TaskStatus.RUNNING:
                     # 模型推理阶段没有外部副作用，可以安全重新入队；
@@ -902,6 +927,14 @@ class TaskRuntime:
                         ))
                 elif task.status == TaskStatus.CANCELING:
                     transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled during recovery", expected_epoch=task.attempt_epoch)
+                elif task.status == TaskStatus.WAITING_CHILD:
+                    checkpoint = latest_checkpoint(db, task.id)
+                    child_id = ((checkpoint.execution_context or {}).get("chat_context") or {}).get("child_task_id") if checkpoint else None
+                    child = db.get(Task, UUID(str(child_id))) if child_id else None
+                    if child is not None and child.status in TERMINAL_STATES and checkpoint.status == "WAITING_CHILD":
+                        checkpoint.status = "CHILD_COMPLETED"
+                        transition_task(db, task, TaskStatus.QUEUED, "TASK_CHILD_RECOVERED", "completed child task detected during recovery")
+                        db.add(Outbox(id=new_uuid7(), tenant_id=task.tenant_id, aggregate_type="TASK", aggregate_id=task.id, event_type="TASK_READY", payload={"task_id": str(task.id), "recovered": True}))
                 elif task.status == TaskStatus.WAITING_HUMAN:
                     checkpoint = latest_checkpoint(db, task.id)
                     confirmation = db.get(Confirmation, checkpoint.confirmation_id) if checkpoint and checkpoint.confirmation_id else None
@@ -932,7 +965,7 @@ class TaskRuntime:
                     tasks = db.query(Task).filter(
                         Task.deadline_at.is_not(None),
                         Task.deadline_at <= now,
-                        Task.status.in_([TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_HUMAN, TaskStatus.CANCEL_REQUESTED]),
+                        Task.status.in_([TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_HUMAN, TaskStatus.WAITING_CHILD, TaskStatus.CANCEL_REQUESTED]),
                     ).all()
                     for task in tasks:
                         try:

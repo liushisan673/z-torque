@@ -225,7 +225,7 @@ class AgentExecutionLoop:
                     else:
                         messages.append(ModelMessage("tool", "SKIPPED：同一轮其它工具调用参数校验失败，本调用未执行；请在修复回合重新发起。", tool_call_id=item.call.id))
                 continue
-            for item in validated_calls:
+            for call_index, item in enumerate(validated_calls):
                 call = item.call
                 mapping = item.mapping
                 arguments = item.arguments
@@ -263,6 +263,18 @@ class AgentExecutionLoop:
                         # 有持久化 Task 时不在父 Worker 内嵌执行子 Agent。
                         # 把模型上下文与 tool_call_id 返回给 TaskRuntime，创建独立 Child Task 后挂起父任务。
                         if task is not None:
+                            # 同一模型回合的其它 tool_call 不能留成孤儿调用；本轮先标记为跳过，
+                            # 父任务恢复后由模型根据子任务结果决定是否重新发起。
+                            for deferred in validated_calls[call_index + 1:]:
+                                messages.append(ModelMessage(
+                                    "tool",
+                                    json.dumps({
+                                        "status": "SKIPPED",
+                                        "error_code": "AI_A2A_DISPATCH_PAUSED",
+                                        "error_message": "本轮委派已挂起，其余工具调用未执行；请在子任务返回后重新判断。",
+                                    }, ensure_ascii=False),
+                                    tool_call_id=deferred.call.id,
+                                ))
                             return LoopResult(
                                 response,
                                 messages,
