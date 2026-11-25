@@ -307,9 +307,9 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
             text(
                 "SELECT m.id, m.conversation_id, m.sender_type, m.content, m.created_at "
                 "FROM zr_message m JOIN zr_conversation c ON c.id = m.conversation_id "
-                "WHERE m.tenant_id = :tenant AND c.owner_user_id = :user "
+                "WHERE CAST(m.tenant_id AS VARCHAR(36)) = :tenant AND CAST(c.owner_user_id AS VARCHAR(36)) = :user "
                 "AND m.content LIKE :pattern ESCAPE '\\' "
-                "AND (:conv IS NULL OR m.conversation_id = :conv) "
+                "AND (:conv IS NULL OR CAST(m.conversation_id AS VARCHAR(36)) = :conv) "
                 "ORDER BY m.created_at DESC LIMIT :limit"
             ),
             {
