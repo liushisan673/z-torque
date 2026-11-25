@@ -82,3 +82,5 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 - Managed routes for Agents, Skills, Audit and Settings use the same `APP_NAV` permission metadata as the sidebar. Hiding a navigation entry is not treated as an access-control boundary; direct URL navigation is checked as well.
 - Keep backend authorization authoritative. These route guards are a console usability/access consistency layer, not a replacement for API permission checks.
 - Do not convert list cards into nested interactive controls; keep destructive and configuration actions in the detail pane.
+
+- Run & Audit now starts with a compact page heading, a live total-record count and a clear all-users/self data-scope indicator; the detailed filters and event table remain unchanged.
