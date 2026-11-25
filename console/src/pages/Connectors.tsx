@@ -1556,7 +1556,7 @@ export function ConnectorsPage() {
                         ) : testHistoryError ? (
                           <div className="text-muted text-sm">{testHistoryError}</div>
                         ) : testHistory.length === 0 ? (
-                          <div className="text-muted text-sm">暂无持久化检查记录。新检查完成后会写入审计。</div>
+                          <div className="text-muted text-sm">暂无已持久化的检查记录。部分在探测前即被拒绝的请求可能不会生成检查历史事件。</div>
                         ) : (
                           <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                             {testHistory.map((event) => {
