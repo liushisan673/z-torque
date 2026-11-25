@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Alert, Button, Card, Empty, Input, List, Modal, Popconfirm, Progress,
-  Space, Table, Tag, Tooltip, Typography,
+  Select, Space, Table, Tag, Tooltip, Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
@@ -68,6 +69,7 @@ function knowledgeState(state: string): { label: string; color: string; descript
 
 export function KnowledgePage() {
   const { push: toast } = useToast();
+  const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<KnowledgeFile[]>([]);
   const [status, setStatus] = useState<KnowledgeStatus | null>(null);
@@ -76,6 +78,8 @@ export function KnowledgePage() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [query, setQuery] = useState("");
+  const [fileKeyword, setFileKeyword] = useState("");
+  const [fileFilter, setFileFilter] = useState("ALL");
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState<KnowledgeChunk[] | null>(null);
   const [preview, setPreview] = useState<{ name: string; content: string } | null>(null);
@@ -208,13 +212,17 @@ export function KnowledgePage() {
     },
   ];
   const stateView = status ? knowledgeState(status.search) : null;
+  const parsedCount = files.filter((file) => file.status === "PARSED").length;
+  const failedCount = files.filter((file) => file.status === "PARSE_FAILED").length;
+  const processingCount = files.filter((file) => file.status === "UPLOADED").length;
+  const filteredFiles = useMemo(() => files.filter((file) => (fileFilter === "ALL" || file.status === fileFilter) && file.name.toLowerCase().includes(fileKeyword.trim().toLowerCase())), [files, fileFilter, fileKeyword]);
 
   return (
     <div className="knowledge-page">
       <div className="knowledge-header">
         <div>
-          <Typography.Title level={3}>知识库</Typography.Title>
-          <Typography.Paragraph type="secondary">管理本机资料，让智能体在回答问题时检索你授权的文件内容。</Typography.Paragraph>
+          <div className="knowledge-title-row"><Typography.Title level={3}>知识库</Typography.Title>{stateView && <Tag color={stateView.color}>{stateView.label}</Tag>}</div>
+          <Typography.Paragraph type="secondary">集中管理本机资料、验证检索效果，并在工作台中检查智能体是否能正确引用资料。</Typography.Paragraph>
         </div>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => void load(true)} loading={refreshing}>刷新</Button>
@@ -222,6 +230,8 @@ export function KnowledgePage() {
           <input ref={inputRef} type="file" accept={ALLOWED_EXTENSIONS.join(",")} multiple hidden onChange={(event) => void handleUpload(event.target.files)} />
         </Space>
       </div>
+
+      <section className="knowledge-workflow"><div><b>01</b><strong>添加资料</strong><span>导入本机文件</span></div><i>→</i><div><b>02</b><strong>验证检索</strong><span>用真实问题测试</span></div><i>→</i><div><b>03</b><strong>工作台使用</strong><span>提问并核对引用</span></div><Button type="link" onClick={() => navigate("/chat")}>打开工作台</Button></section>
 
       {stateView && (
         <Alert className="knowledge-state-alert" type={status?.search === "AVAILABLE" || status?.search === "READY" ? "success" : status?.search === "DEGRADED" ? "warning" : "error"} showIcon
@@ -265,8 +275,8 @@ export function KnowledgePage() {
         <Card className="knowledge-summary-card" bordered>
           <div className="knowledge-card-heading"><div className="knowledge-card-icon"><DatabaseOutlined /></div><div><Typography.Title level={5}>资料概况</Typography.Title><Typography.Text type="secondary">当前本机知识资源</Typography.Text></div></div>
           <div className="knowledge-stat"><span>资料总数</span><strong>{files.length}</strong></div>
-          <div className="knowledge-stat"><span>解析成功</span><strong>{files.filter((file) => file.status === "PARSED").length}</strong></div>
-          <div className="knowledge-stat"><span>解析失败</span><strong>{files.filter((file) => file.status === "PARSE_FAILED").length}</strong></div>
+          <div className="knowledge-stat"><span>解析成功</span><strong className="knowledge-number-success">{parsedCount}</strong></div>
+          <div className="knowledge-stat"><span>处理中</span><strong>{processingCount}</strong></div><div className="knowledge-stat"><span>解析失败</span><strong className={failedCount > 0 ? "knowledge-number-danger" : ""}>{failedCount}</strong></div>
           <div className="knowledge-stat"><span>来源引用校验</span><Tag color={status?.citation_enforcement ? "success" : "warning"}>{status?.citation_enforcement ? "已启用" : "未启用"}</Tag></div>
           <div className="knowledge-summary-foot"><span>本地检索方式</span><Tag color={status?.fts5 ? "success" : "default"}>{status?.fts5 ? "全文索引" : "基础检索"}</Tag></div>
           <Button block icon={<ReloadOutlined />} loading={reindexing} disabled={status?.search === "UNAVAILABLE"} onClick={() => void rebuildIndex()}>检查并重建索引</Button>
@@ -276,11 +286,11 @@ export function KnowledgePage() {
       <Card className="knowledge-files-card" bordered>
         <div className="knowledge-files-heading">
           <div><Typography.Title level={5}>我的资料</Typography.Title><Typography.Text type="secondary">上传的文件仅在当前用户授权范围内参与检索。</Typography.Text></div>
-          <Tag>{files.length} 份资料</Tag>
+          <div className="knowledge-files-tools"><Input.Search allowClear value={fileKeyword} onChange={(event) => setFileKeyword(event.target.value)} placeholder="搜索资料名称" /><Select value={fileFilter} onChange={setFileFilter} options={[{ value: "ALL", label: "全部状态" }, { value: "PARSED", label: "已解析" }, { value: "UPLOADED", label: "处理中" }, { value: "PARSE_FAILED", label: "解析失败" }]} /><Tag>{filteredFiles.length} / {files.length} 份</Tag></div>
         </div>
-        <Table rowKey="id" columns={columns} dataSource={files} loading={loading}
+        <Table rowKey="id" columns={columns} dataSource={filteredFiles} loading={loading}
           pagination={{ pageSize: 8, showSizeChanger: false, showTotal: (total) => `共 ${total} 份资料` }}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有资料，添加 PDF、TXT、Markdown、CSV 或 Excel 文件开始构建知识库。" /> }}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={files.length === 0 ? "还没有资料，添加 PDF、TXT、Markdown、CSV 或 Excel 文件开始构建知识库。" : "没有符合当前搜索和筛选条件的资料。"} /> }}
           scroll={{ x: 720 }}
         />
       </Card>
