@@ -11,6 +11,17 @@ class FakeResponse:
     def __init__(self, status_code=200, text="ok"):
         self.status_code = status_code
         self.text = text
+        self.encoding = "utf-8"
+        self.headers = {"content-length": str(len(text.encode("utf-8")))}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def iter_bytes(self):
+        yield self.text.encode("utf-8")
 
     @property
     def is_success(self):
@@ -32,12 +43,8 @@ class FakeClient:
     def __exit__(self, *args):
         return False
 
-    def get(self, url, **kwargs):
-        FakeClient.calls.append(("GET", url, kwargs))
-        return FakeClient.response
-
-    def post(self, url, **kwargs):
-        FakeClient.calls.append(("POST", url, kwargs))
+    def stream(self, method, url, **kwargs):
+        FakeClient.calls.append((method, url, kwargs))
         return FakeClient.response
 
 
@@ -146,3 +153,20 @@ def test_allowed_url_matrix(monkeypatch):
     assert allow("https://evil.com/x", ["example.com"]) is False  # 白名单外
     assert allow("https://example.com/x", []) is False  # 空白名单 fail-closed
     assert allow("ftp://example.com/x", ["example.com"], True) is False  # 非 http(s) scheme
+
+
+
+def test_response_body_is_capped_during_stream_read(fake_http):
+    config = {
+        **BASE_CONFIG,
+        "method": "GET",
+        "url": "https://192.168.2.10/search",
+        "target_policy": {"allow_private_network": True},
+        "max_response_bytes": 8,
+    }
+    fake_http.response = FakeResponse(status_code=200, text='{"payload":"' + "x" * 1000 + '"}')
+    result = HttpExecutor().execute(config, {}, 5)
+    assert result.status == "SUCCEEDED"
+    assert len(result.data["body"].encode("utf-8")) == 8
+    assert result.data["json"] is None
+    assert set(result.data) == {"status_code", "body", "json"}
