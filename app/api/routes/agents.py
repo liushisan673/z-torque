@@ -21,6 +21,7 @@ from app.kernel.agent.skill_service import attach_skill_version, detach_skill_ve
 from app.kernel.agent.version_service import (
     archive_check,
     archive_version,
+    bind_knowledge_bases,
     create_version,
     publish_version,
     rollback_version,
@@ -36,6 +37,7 @@ from app.schemas.agent import (
     VersionCreate,
 )
 from app.schemas.agent_skill import AgentSkillAttachRequest
+from app.schemas.knowledge_base import AgentKnowledgeBaseBindingRequest
 from app.security.permissions import admin_owned_clause
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -188,6 +190,28 @@ async def detach_skill(agent_id: UUID, version_id: UUID, skill_version_id: UUID,
     item = detach_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, agent_version_id=version_id, skill_version_id=skill_version_id)
     db.commit()
     return out(request, {"id": str(item.id), "skill_version_id": str(item.skill_version_id), "detached": True})
+
+
+@router.put("/{agent_id}/versions/{version_id}/knowledge-bases", summary="为智能体草稿版本绑定知识库")
+async def bind_knowledge_base_versions(
+    agent_id: UUID,
+    version_id: UUID,
+    payload: AgentKnowledgeBaseBindingRequest,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    get_agent(db, user, agent_id)
+    item = db.scalar(select(AgentVersion).where(AgentVersion.id == version_id, AgentVersion.agent_id == agent_id))
+    if item is None:
+        raise ApiError("AI_AGENT_VERSION_NOT_FOUND", "version not found", 404)
+    item = bind_knowledge_bases(
+        db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id,
+        knowledge_base_ids=payload.knowledge_base_ids,
+    )
+    db.commit()
+    db.refresh(item)
+    return out(request, AgentVersionResponse.model_validate(item).model_dump(mode="json"))
 
 
 @router.get("/{agent_id}/versions/{version_id}/skills", summary="获取智能体版本技能列表")
