@@ -9,6 +9,7 @@
 """
 
 import os
+import sys
 from pathlib import Path
 
 from app.builtin_plugins.sandbox_driver.container import (
@@ -137,7 +138,7 @@ class SandboxDriverPlugin:
                 rlimit_enabled=rlimit_enabled,
                 max_processes=int(getattr(settings, "sandbox_max_processes", 64)),
                 max_file_bytes=int(getattr(settings, "sandbox_max_file_bytes", 16 * 1024 * 1024)),
-                python_executable=str(getattr(settings, "sandbox_python_executable", None) or __import__("sys").executable),
+                python_executable=str(getattr(settings, "sandbox_python_executable", None) or sys.executable),
             )
             label = f"builtin_inprocess_sandbox(rlimit={effective_rlimit})"
         # 装配期对象共享：skill_executors 构造 SkillGateway 时注入 MdSkillRuntime
