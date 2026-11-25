@@ -8,9 +8,9 @@ import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-import uvicorn
 from alembic import command
 from alembic.config import Config
+import uvicorn
 
 from app.config import get_settings
 from app.runtime_paths import is_frozen, resource_dir
