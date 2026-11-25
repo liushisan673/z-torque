@@ -37,7 +37,7 @@ def ensure_schema(bind: Any) -> bool:
         return False
     with bind.begin() as connection:
         connection.exec_driver_sql(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS zr_knowledge_fts USING fts5(tenant_id, chunk_id, text, tokenize='trigram')"
+            "CREATE VIRTUAL TABLE IF NOT EXISTS zr_knowledge_fts USING fts5(tenant_id UNINDEXED, chunk_id UNINDEXED, text, tokenize='trigram')"
         )
     return True
 
