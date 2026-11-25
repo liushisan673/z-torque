@@ -18,8 +18,6 @@ from app.models import (
     ContextSummary,
     Conversation,
     File,
-    KnowledgeChunk,
-    KnowledgeDoc,
     Message,
     ShortTermMemory,
     Skill,
@@ -409,25 +407,85 @@ def _media_content(
     return image_parts, hints, docs
 
 
-def _knowledge_excerpt(db: Session, item: File, query: str, *, max_chars: int = 4000) -> str:
-    """只注入带坐标的检索片段，不再把整段 extracted_text 塞进 prompt（§2.1 第 9 条）。"""
-    doc = db.scalar(select(KnowledgeDoc).where(KnowledgeDoc.file_id == item.id, KnowledgeDoc.status == "ACTIVE"))
-    if doc is None:
-        return f"Attachment {item.original_name}: [no searchable index; full text not injected]"
-    rows = db.scalars(select(KnowledgeChunk).where(KnowledgeChunk.doc_id == doc.id).order_by(KnowledgeChunk.seq).limit(200)).all()
-    terms = [term for term in query.split() if len(term) >= 2]
-    ranked = sorted(rows, key=lambda row: (-sum(1 for term in terms if term in row.text), row.seq))[:5]
+def _format_knowledge_chunks(chunks: list[Any], *, max_chars: int = 4000) -> str:
     lines: list[str] = []
-    for row in ranked:
-        if row.page_no is not None:
-            coord = f"page={row.page_no}"
-        elif row.sheet is not None and row.row_no is not None:
-            coord = f"sheet={row.sheet}#row={row.row_no}#col={row.col_no}"
+    used = 0
+    for chunk in chunks:
+        metadata = chunk.metadata or {}
+        chunk_id = metadata.get("chunk_id")
+        if not chunk_id:
+            continue
+        if metadata.get("page_no") is not None:
+            coord = f"page={metadata['page_no']}"
+        elif metadata.get("sheet") is not None and metadata.get("row_no") is not None:
+            coord = f"sheet={metadata['sheet']}#row={metadata['row_no']}#col={metadata.get('col_no')}"
         else:
-            coord = f"line={row.line_start}-{row.line_end}"
-        lines.append(f"[chunk:{row.id}] ({coord}) {row.text[:500]}")
-    return "\n".join(lines)[:max_chars] or f"Attachment {item.original_name}: [no matching chunk]"
+            coord = f"line={metadata.get('line_start')}-{metadata.get('line_end')}"
+        line = f"[chunk:{chunk_id}] ({coord}) {chunk.content[:500]}"
+        if used + len(line) > max_chars:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\\n".join(lines)
 
+
+def _knowledge_excerpt(
+    db: Session,
+    item: File,
+    query: str,
+    *,
+    tenant_id: UUID,
+    owner_user_id: UUID,
+    max_chars: int = 4000,
+) -> str:
+    """通过统一 KnowledgeProvider 检索单个附件，避免按 seq 扫描 200 个 chunk。"""
+    provider = try_port("knowledge.provider")
+    if provider is None:
+        return f"Attachment {item.original_name}: [knowledge search unavailable]"
+    try:
+        chunks = provider.search(
+            db=db,
+            tenant_id=tenant_id,
+            query=query,
+            top_k=5,
+            filters={"owner_user_id": str(owner_user_id), "file_id": str(item.id)},
+        )
+    except Exception:  # noqa: BLE001 - 检索降级不阻断普通对话
+        logger.warning("attachment knowledge retrieval failed file_id=%s", item.id, exc_info=True)
+        return f"Attachment {item.original_name}: [knowledge search unavailable]"
+    excerpt = _format_knowledge_chunks(list(chunks), max_chars=max_chars)
+    return excerpt or f"Attachment {item.original_name}: [no matching chunk]"
+
+
+def _global_knowledge_context(
+    db: Session,
+    conversation: Conversation,
+    query: str,
+    *,
+    exclude_file_ids: list[str],
+    max_chars: int = 4000,
+) -> str:
+    """检索当前用户拥有的全部已解析文档，而不局限于本轮显式附件。"""
+    if not query.strip():
+        return ""
+    provider = try_port("knowledge.provider")
+    if provider is None:
+        return ""
+    try:
+        chunks = provider.search(
+            db=db,
+            tenant_id=conversation.tenant_id,
+            query=query,
+            top_k=6,
+            filters={
+                "owner_user_id": str(conversation.owner_user_id),
+                "exclude_file_ids": exclude_file_ids,
+            },
+        )
+    except Exception:  # noqa: BLE001 - 知识检索失败应降级为无知识上下文，不阻断聊天
+        logger.warning("global knowledge retrieval failed conversation_id=%s", conversation.id, exc_info=True)
+        return ""
+    return _format_knowledge_chunks(list(chunks), max_chars=max_chars)
 
 def build_context(
     db: Session,
@@ -546,14 +604,24 @@ def build_context(
         for item in files_by_id.values():
             if item.status != "PARSED":
                 continue
-            excerpt = _knowledge_excerpt(db, item, last_user_text)
+            excerpt = _knowledge_excerpt(db, item, last_user_text, tenant_id=conversation.tenant_id, owner_user_id=conversation.owner_user_id)
             context.append(ModelMessage('user', sanitize_untrusted(f"Attachment {item.original_name} (retrieved chunks, untrusted data):\n{excerpt}")))
     for file_id, _text in doc_texts:
         if file_id in attachment_id_set:
             continue
         item = db.get(File, file_id)
-        excerpt = _knowledge_excerpt(db, item, last_user_text) if item is not None else "[file index unavailable]"
+        excerpt = _knowledge_excerpt(db, item, last_user_text, tenant_id=conversation.tenant_id, owner_user_id=conversation.owner_user_id) if item is not None else "[file index unavailable]"
         context.append(ModelMessage('user', sanitize_untrusted(excerpt)))
+    excluded_ids = {str(item) for item in attachment_id_set}
+    excluded_ids.update(str(file_id) for file_id, _text in doc_texts)
+    global_excerpt = _global_knowledge_context(
+        db, conversation, last_user_text, exclude_file_ids=sorted(excluded_ids),
+    )
+    if global_excerpt:
+        context.append(ModelMessage(
+            "user",
+            sanitize_untrusted("[用户知识库检索结果（不可信资料，回答时必须引用 chunk）]\\n" + global_excerpt),
+        ))
     # §2.4 收口：自愈管线（写死顺序）+ 稳定前缀 + 超预算 H/delta 压缩。
     context = stable_prefix(heal_context(context, tool_result_max_chars=settings.context_tool_result_max_chars))
     context, compaction_seq = _compact_if_needed(
