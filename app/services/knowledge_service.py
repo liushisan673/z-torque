@@ -85,7 +85,7 @@ def search(
     audit_degradation(provider, ctx)
     chunks = list(provider.search(
         db=db, tenant_id=ctx.tenant_id, query=query, top_k=top_k,
-        filters={"allowed_paths": allowed_paths},
+        filters={"allowed_paths": allowed_paths, "owner_user_id": str(ctx.user_id)},
     ))
     if get_settings().knowledge_message_search_enabled:
         message_chunks = list(provider.search_messages(
