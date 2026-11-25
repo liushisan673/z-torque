@@ -16,6 +16,7 @@ def test_sqlite_engine_uses_wal_and_bounded_wait_pragmas(tmp_path):
             assert connection.exec_driver_sql("PRAGMA synchronous").scalar_one() == 1
             assert connection.exec_driver_sql("PRAGMA temp_store").scalar_one() == 2
             assert connection.exec_driver_sql("PRAGMA cache_size").scalar_one() == -8_192
+            assert connection.exec_driver_sql("PRAGMA wal_autocheckpoint").scalar_one() == 1_000
     finally:
         engine.dispose()
 
