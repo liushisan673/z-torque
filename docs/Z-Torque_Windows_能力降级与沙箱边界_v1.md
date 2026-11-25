@@ -47,7 +47,8 @@
 
 补充说明：
 
-- `windows_trusted` 默认 `false`；未声明的技能在 Windows 上一律拒绝，不能靠"路径恰好在白名单里"绕过。\n- 桌面冻结包通过 `sandbox_python_executable` 指向随包的 `runtime/python.exe`；不能使用 PyInstaller 主程序的 `sys.executable` 作为脚本解释器。缺少随包解释器时 fail-closed，返回 `AI_CAPABILITY_UNAVAILABLE`。
+- `windows_trusted` 默认 `false`；未声明的技能在 Windows 上一律拒绝，不能靠"路径恰好在白名单里"绕过。
+- 桌面冻结包通过 `sandbox_python_executable` 指向随包的 `runtime/python.exe`；不能使用 PyInstaller 主程序的 `sys.executable` 作为脚本解释器。缺少随包解释器时 fail-closed，返回 `AI_CAPABILITY_UNAVAILABLE`。
 - 审批 checkpoint 内冻结 `sandbox_scope`；恢复时在执行点二次校验，篡改即 `AI_SANDBOX_DENIED`（fail-closed，老 checkpoint 无 scope 一律拒绝）。
 - 所有平台统一使用显式 `SandboxScope` 对象贯穿，**禁止**用 `ContextVar` 或环境变量传递（异步 / 线程 / subprocess 均不继承线程内改动）。
 
@@ -111,7 +112,8 @@ diff 正文只写独立 artifact 表（TTL 24h）；审计只记 `artifact_id + 
 
 1. 禁止把 `process` 模式声明为"不可信执行可用"。
 2. 禁止在 Windows 上虚报 `rlimit` / `isolation_level=container`。
-3. 禁止绕过 `SkillGateway` 直接调用 sandbox driver / `subprocess.spawn`（CI 静态红线）。\n4. Windows `taskkill /T /F` 仅用于超时资源回收，不得描述为强沙箱或完整进程隔离。
+3. 禁止绕过 `SkillGateway` 直接调用 sandbox driver / `subprocess.spawn`（CI 静态红线）。
+4. Windows `taskkill /T /F` 仅用于超时资源回收，不得描述为强沙箱或完整进程隔离。
 4. 禁止用提示词警告代替结构性剔除：不可信内容在构建 prompt 前剔除。
 5. 禁止在 capabilities 中暴露绝对路径、出站白名单等敏感细节（仅管理员可见）。
 
