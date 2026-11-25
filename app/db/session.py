@@ -134,6 +134,7 @@ def _sqlite_pragmas(dbapi_connection, _connection_record=None) -> None:
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA temp_store=MEMORY")
         cursor.execute(f"PRAGMA cache_size=-{_SQLITE_CACHE_SIZE_KIB}")
+        cursor.execute("PRAGMA wal_autocheckpoint=1000")
     finally:
         cursor.close()
 
