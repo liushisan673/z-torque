@@ -40,17 +40,18 @@ def _rebuild(*, with_tenant: bool) -> None:
         columns = "tenant_id, " if with_tenant else ""
         op.execute(f"CREATE VIRTUAL TABLE {_FTS} USING fts5({columns}chunk_id, text, tokenize='unicode61')")
     else:
-        columns = [
+        columns = [sa.Column("rowid", sa.Integer(), primary_key=True, autoincrement=True)]
+        if with_tenant:
+            columns.append(sa.Column("tenant_id", sa.String(36), nullable=False))
+        columns.extend([
             sa.Column("chunk_id", sa.String(36), nullable=False),
             sa.Column("text", sa.Text(), nullable=False),
-        ]
-        if with_tenant:
-            columns.insert(0, sa.Column("tenant_id", sa.String(36), nullable=False))
+        ])
         op.create_table(_FTS, *columns)
         op.create_index(f"ix_{_FTS}_text", _FTS, ["text"])
-    columns = "c.rowid, c.tenant_id, c.id, c.text" if with_tenant else "c.rowid, c.id, c.text"
-    target = f"{_FTS}(rowid, tenant_id, chunk_id, text)" if with_tenant else f"{_FTS}(rowid, chunk_id, text)"
-    op.execute(f"INSERT INTO {target} SELECT {columns} FROM zr_knowledge_chunk c")
+    target_columns = "tenant_id, chunk_id, text" if with_tenant else "chunk_id, text"
+    source_columns = "c.tenant_id, c.id, c.text" if with_tenant else "c.id, c.text"
+    op.execute(f"INSERT INTO {_FTS}({target_columns}) SELECT {source_columns} FROM zr_knowledge_chunk c")
 
 
 def upgrade() -> None:
