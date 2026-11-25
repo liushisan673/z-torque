@@ -79,7 +79,7 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
   const moreActive = Boolean(activeMoreItem);
   const moreMenuItems: MenuProps["items"] = [
     {
-      type: "group",
+      type: "group" as const,
       label: t("nav.group.operations"),
       children: moreItems.filter((item) => item.group === "operations").map((item) => ({
         key: item.to,
