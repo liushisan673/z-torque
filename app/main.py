@@ -29,7 +29,7 @@ from app.kernel.registry.port_registry import PortState
 from app.kernel.task.runtime import TaskRuntime
 from app.models import Tenant, User
 from app.security.permissions import is_admin_user
-from app.services.capability_presentation import build_capability_cards
+from app.services.capability_presentation import build_capability_cards\nfrom app.runtime_paths import resource_dir
 
 logger = logging.getLogger("z_torque")
 
@@ -345,8 +345,8 @@ async def capabilities(request: Request, user: User | None = Depends(get_optiona
 def _resolve_console_dist(settings) -> Path:
     dist = settings.console_dist_dir
     if not dist.is_absolute():
-        # 相对路径按仓库根解析：locator 而不是 CWD，避免从别处启动时找不到构建产物
-        dist = Path(__file__).resolve().parents[1] / dist
+        # 相对路径按应用资源根解析，而不是进程 CWD；PyInstaller 与源码运行保持一致。
+        dist = resource_dir() / dist
     return dist
 
 
