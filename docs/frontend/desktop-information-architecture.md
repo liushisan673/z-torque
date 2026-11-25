@@ -91,6 +91,6 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 - The empty workbench state now explains the product boundary: ordinary questions remain chat messages; Task is created only when tools/skills or explicit execution are required.
 - Live execution status is announced accessibly and distinguishes running from waiting for human confirmation.
 - Entering `WAITING_HUMAN` from a task snapshot, event stream or restored task detail automatically opens the execution panel so the approval action is not hidden.
-- The approval panel explains the checkpoint behavior: the current task pauses and releases its execution slot while awaiting confirmation; approval resumes from the checkpoint, while other tasks may proceed.
+- The approval panel explains the checkpoint behavior: the current task pauses and releases its execution slot while awaiting confirmation; approval resumes from the checkpoint. The UI explicitly tells users to switch conversations to continue other work, then return to approve/reject.
 - Task history includes a direct detail action, and terminal task labels distinguish success, failure, timeout and cancellation.
 - Keep the workbench centered on conversation and task progress; do not surface sandbox/runtime infrastructure as a peer navigation destination.
