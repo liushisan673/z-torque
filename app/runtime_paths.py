@@ -54,3 +54,10 @@ def default_user_path(name: str) -> Path:
     if name == "console/dist":
         return Path("./console/dist")
     return Path("./data") / name
+
+
+def default_sandbox_python() -> Path:
+    """Interpreter for isolated MD-Skill execution; frozen builds bundle python.exe."""
+    if is_frozen():
+        return resource_dir() / "runtime" / "python.exe"
+    return Path(sys.executable)
