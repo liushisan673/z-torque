@@ -7,6 +7,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
+from app.runtime_paths import is_frozen
 
 
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
@@ -14,12 +15,19 @@ _SQLITE_CACHE_SIZE_KIB = 8_192
 
 
 def _database_url() -> str:
-    url = get_settings().database_url
+    settings = get_settings()
+    url = settings.database_url
     parsed = make_url(url)
     if parsed.get_backend_name() == "sqlite":
         database = parsed.database
         if database and database != ":memory:" and not database.startswith("file:"):
-            Path(database).expanduser().parent.mkdir(parents=True, exist_ok=True)
+            database_path = Path(database).expanduser()
+            # 冻结桌面程序不依赖启动时的 CWD；用户配置的相对 SQLite 路径也锚定在数据目录。
+            if is_frozen() and not database_path.is_absolute():
+                database_path = settings.data_dir / database_path
+            database_path.parent.mkdir(parents=True, exist_ok=True)
+            if str(database_path) != database:
+                url = parsed.set(database=str(database_path)).render_as_string(hide_password=False)
     return url
 
 
