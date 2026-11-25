@@ -239,7 +239,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                 key = f"exclude_{index}"
                 params[key] = value
                 names.append(f":{key}")
-            clauses.append(f"d.file_id NOT IN ({', '.join(names)})")
+            clauses.append(f"CAST(d.file_id AS VARCHAR(36)) NOT IN ({', '.join(names)})")
 
         where = " AND ".join(clauses)
         fts_expression = _fts_query(query)
