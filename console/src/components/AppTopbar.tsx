@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   AppstoreOutlined, AuditOutlined, CloudServerOutlined, DatabaseOutlined,
@@ -54,7 +55,7 @@ export function visibleNav(nav: NavItem[], user: UserInfo | null): NavItem[] {
   });
 }
 
-const NAV_ICONS: Record<string, React.ReactNode> = {
+const NAV_ICONS: Record<string, ReactNode> = {
   "/chat": <AppstoreOutlined />,
   "/knowledge": <DatabaseOutlined />,
   "/agents": <RobotOutlined />,
