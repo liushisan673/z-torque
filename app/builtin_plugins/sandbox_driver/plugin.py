@@ -43,11 +43,6 @@ class SandboxDriverPlugin:
                     "default": None,
                     "description": "cwd 白名单；None → [MD_SKILLS_DIR]，[] → 装配期拒绝（空 = 不限制语义反转为拒绝）",
                 },
-                "sandbox_python_executable": {
-                    "type": "string",
-                    "default": "python.exe",
-                    "description": "独立脚本解释器路径；冻结桌面包使用随包 Python runtime",
-                },
                 "sandbox_rlimit_enabled": {
                     "type": "boolean",
                     "default": True,
