@@ -327,7 +327,7 @@ class StdioMcpConnector:
             if message.get("id") != expected_id:
                 raise McpProtocolError("MCP stdio response id mismatch")
             if "error" in message:
-                raise McpProtocolError(str(message["error"]))
+                raise McpRemoteError(str(message["error"]))
             return message.get("result", {})
     async def _drain_stderr(self) -> None:
         if not self.process or not self.process.stderr:
