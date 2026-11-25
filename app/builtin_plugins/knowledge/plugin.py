@@ -17,12 +17,15 @@ from uuid import UUID
 from sqlalchemy import bindparam, delete, select, text
 from sqlalchemy.orm import Session
 
+from app.builtin_plugins.knowledge.embeddings import EmbeddingClient, EmbeddingError
 from app.builtin_plugins.knowledge.vector_store import LocalVectorStore
 from app.builtin_plugins.manifest import PluginManifest
 from app.config import get_settings
 from app.core.errors import ApiError
 from app.core.ids import utc_now
 from app.kernel.ports.knowledge_provider import KnowledgeChunk, KnowledgeProvider, ParsedFile
+from app.kernel.ports.vector_store import VectorRecord
+from app.models import File as FileRow
 from app.models import KnowledgeChunk as ChunkRow
 from app.models import KnowledgeDoc as DocRow
 
@@ -93,12 +96,40 @@ def _cjk_fallback_terms(query: str) -> list[str]:
 
 
 class SqliteKnowledgeProvider(KnowledgeProvider):
-    def __init__(self, *, fts5: bool | None = None) -> None:
+    def __init__(self, *, fts5: bool | None = None, vector_store: LocalVectorStore | None = None, embedding_client: EmbeddingClient | None = None) -> None:
         self.fts5 = probe_fts5() if fts5 is None else fts5
-        self.last_degradation_reason: str | None = None if self.fts5 else "sqlite3 FTS5 is unavailable; LIKE fallback in use"
+        self.vector_store = vector_store
+        self.embedding_client = embedding_client
+        self.last_degradation_reason: str | None = None
+        self._refresh_mode()
+
+    def _refresh_mode(self) -> None:
+        if not self.fts5:
+            self.last_degradation_reason = "SQLite FTS5 unavailable; lexical LIKE fallback in use"
+        elif self.embedding_client is None or not self.embedding_client.configured:
+            self.last_degradation_reason = "Embedding is not enabled; lexical-only retrieval in use"
+        elif self.embedding_client.last_error:
+            self.last_degradation_reason = "Embedding provider request failed"
+        else:
+            self.last_degradation_reason = None
 
     def mode(self) -> str:
-        return "AVAILABLE" if self.fts5 and self.last_degradation_reason is None else "DEGRADED"
+        self._refresh_mode()
+        return "AVAILABLE" if self.last_degradation_reason is None else "DEGRADED"
+
+    def embedding_status(self) -> dict:
+        configured = bool(self.embedding_client and self.embedding_client.configured)
+        return {
+            "enabled": configured,
+            "provider": self.embedding_client.settings.embedding_provider if self.embedding_client else None,
+            "model": self.embedding_client.model if configured else None,
+            "semantic_search": configured and self.vector_store is not None and not bool(self.embedding_client.last_error),
+            "hybrid_search": self.fts5 and configured and self.vector_store is not None and not bool(self.embedding_client.last_error),
+        }
+
+    @staticmethod
+    def _vector_namespace(tenant_id: UUID, user_id: UUID) -> str:
+        return f"tenant:{tenant_id}:user:{user_id}"
 
     def index_file(self, db: Session, *, tenant_id: UUID, file_id: UUID, path: str, sha256: str, parsed: ParsedFile, size_bytes: int) -> dict:
         existing = db.scalar(select(DocRow).where(DocRow.tenant_id == tenant_id, DocRow.file_id == file_id))
@@ -154,9 +185,30 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                         if str(chunk.id) in rowid_by_id
                     ],
                 )
+        file_row = db.get(FileRow, file_id)
+        owner_id = file_row.owner_user_id if file_row is not None else None
+        if chunks and owner_id is not None and self.embedding_client is not None and self.embedding_client.configured and self.vector_store is not None:
+            try:
+                vectors = self.embedding_client.embed([chunk.text for chunk in chunks])
+                self.vector_store.upsert_in_session(
+                    db, namespace=self._vector_namespace(tenant_id, owner_id),
+                    records=[
+                        VectorRecord(id=str(chunk.id), vector=vector, metadata={"chunk_id": str(chunk.id), "file_id": str(file_id), "doc_id": str(doc.id)})
+                        for chunk, vector in zip(chunks, vectors, strict=True)
+                    ],
+                )
+            except EmbeddingError:
+                self.embedding_client.last_error = "EmbeddingError"
+                self.last_degradation_reason = "Embedding provider request failed; lexical retrieval remains available"
+        self._refresh_mode()
         return {"doc_id": str(doc.id), "chunks": len(kept), "truncated": truncated, "mode": self.mode()}
 
     def _delete_doc(self, db: Session, doc: DocRow) -> None:
+        if self.vector_store is not None:
+            file_row = db.get(FileRow, doc.file_id)
+            chunk_ids = [str(value) for value in db.scalars(select(ChunkRow.id).where(ChunkRow.doc_id == doc.id)).all()]
+            if file_row is not None and file_row.owner_user_id is not None:
+                self.vector_store.delete_in_session(db, namespace=self._vector_namespace(doc.tenant_id, file_row.owner_user_id), ids=chunk_ids)
         # SQLite FTS5/LIKE 索引表与 chunk 双写；其他方言直接从 chunk 表检索，不维护 rowid 索引。
         if db.get_bind().dialect.name == "sqlite":
             db.execute(
@@ -308,12 +360,75 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
         for row in rows:
             if not _path_allowed(row["path"], allowed):
                 continue
+            file_row = db.get(FileRow, UUID(str(row["file_id"])))
             results.append(
                 KnowledgeChunk(
                     source=row["path"], content=row["text"], score=float(row["score"]),
-                    metadata={"chunk_id": str(row["id"]), "file_id": str(row["file_id"]), "page_no": row["page_no"], "sheet": row["sheet"], "row_no": row["row_no"], "col_no": row["col_no"], "line_start": row["line_start"], "line_end": row["line_end"]},
+                    metadata={"chunk_id": str(row["id"]), "file_id": str(row["file_id"]), "file_name": file_row.original_name if file_row else Path(row["path"]).name, "page_no": row["page_no"], "sheet": row["sheet"], "row_no": row["row_no"], "col_no": row["col_no"], "line_start": row["line_start"], "line_end": row["line_end"], "retrieval_method": "fts"},
                 )
             )
+        user_id_raw = (filters or {}).get("user_id")
+        if self.embedding_client is not None and self.embedding_client.configured and self.vector_store is not None and user_id_raw:
+            try:
+                user_id = UUID(str(user_id_raw))
+                query_vector = self.embedding_client.embed([query])[0]
+                matches = self.vector_store.search_in_session(
+                    db, namespace=self._vector_namespace(tenant_id, user_id), query=query_vector,
+                    top_k=min(50, max(limit * 5, limit)),
+                )
+                semantic: list[KnowledgeChunk] = []
+                for match in matches:
+                    try:
+                        chunk_id = UUID(match.id)
+                    except ValueError:
+                        continue
+                    row = db.execute(
+                        select(ChunkRow, DocRow).join(DocRow, DocRow.id == ChunkRow.doc_id).where(
+                            ChunkRow.id == chunk_id, ChunkRow.tenant_id == tenant_id,
+                            DocRow.tenant_id == tenant_id, DocRow.status == "ACTIVE", DocRow.path.in_(allowed),
+                        )
+                    ).first()
+                    if row is None:
+                        continue
+                    chunk, doc = row
+                    if not _path_allowed(doc.path, allowed):
+                        continue
+                    file_row = db.get(FileRow, doc.file_id)
+                    semantic.append(KnowledgeChunk(
+                        source=doc.path, content=chunk.text, score=float(match.score),
+                        metadata={
+                            "chunk_id": str(chunk.id), "file_id": str(doc.file_id),
+                            "file_name": file_row.original_name if file_row else Path(doc.path).name,
+                            "page_no": chunk.page_no, "sheet": chunk.sheet, "row_no": chunk.row_no,
+                            "col_no": chunk.col_no, "line_start": chunk.line_start, "line_end": chunk.line_end,
+                            "retrieval_method": "vector",
+                        },
+                    ))
+                fused: dict[str, tuple[float, KnowledgeChunk]] = {}
+                for rank, item in enumerate(results, start=1):
+                    key = str((item.metadata or {}).get("chunk_id") or item.source)
+                    fused[key] = (1.0 / (60 + rank), item)
+                for rank, item in enumerate(semantic, start=1):
+                    key = str((item.metadata or {}).get("chunk_id") or item.source)
+                    prior = fused.get(key)
+                    if prior is None:
+                        fused[key] = (1.0 / (60 + rank), item)
+                    else:
+                        prior_item = prior[1]
+                        score = prior[0] + 1.0 / (60 + rank)
+                        fused[key] = (score, KnowledgeChunk(
+                            source=prior_item.source, content=prior_item.content, score=score,
+                            metadata={**(prior_item.metadata or {}), "retrieval_method": "hybrid"},
+                        ))
+                results = [
+                    KnowledgeChunk(source=item.source, content=item.content, score=score,
+                        metadata={**(item.metadata or {}), "retrieval_score": score})
+                    for score, item in sorted(fused.values(), key=lambda pair: pair[0], reverse=True)[:limit]
+                ]
+            except (EmbeddingError, ValueError):
+                self.embedding_client.last_error = "EmbeddingError"
+                self.last_degradation_reason = "Embedding query failed; lexical retrieval remains available"
+        self._refresh_mode()
         return results
 
     def search_messages(self, db: Any, *, tenant_id: UUID, user_id: UUID | None, query: str, top_k: int = 5, conversation_id: UUID | None = None) -> list[KnowledgeChunk]:
@@ -375,11 +490,12 @@ class KnowledgePlugin:
 
     def contribute(self, sdk: Any) -> None:
         fts5_available = ensure_schema(sdk.engine)
-        provider = SqliteKnowledgeProvider(fts5=fts5_available)
+        vector_store = LocalVectorStore(sdk.session)
+        embedding_client = EmbeddingClient()
+        provider = SqliteKnowledgeProvider(fts5=fts5_available, vector_store=vector_store, embedding_client=embedding_client)
         if sdk.engine.dialect.name != "sqlite":
             provider.last_degradation_reason = "non-SQLite dialect; using chunk-table LIKE retrieval"
         sdk.publish("knowledge.provider", provider)
         label = "builtin_sqlite_fts5" if fts5_available else "builtin_like_fallback"
         sdk.register_port("knowledge.provider", lambda: provider, label=label)
-        vector_store = LocalVectorStore(sdk.session)
         sdk.register_port("vector.store", lambda: vector_store, label="builtin_local_exact_cosine")

@@ -4,6 +4,8 @@
 FTS5 不可用时三态上报 DEGRADED 并审计，不静默退回 LIKE 假装可用。
 """
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
@@ -33,7 +35,8 @@ async def status(request: Request, user: User = Depends(get_current_user)):
     provider = knowledge_service.get_provider(request)
     state = knowledge_service.resolve_state(provider)
     knowledge_service.audit_degradation(provider, _ctx(request, user))
-    return success_response(request, {"search": state, "fts5": bool(provider is not None and getattr(provider, "fts5", False)), "citation_enforcement": True})
+    embedding = provider.embedding_status() if provider is not None and hasattr(provider, "embedding_status") else {"enabled": False, "semantic_search": False, "hybrid_search": False, "provider": None, "model": None}
+    return success_response(request, {"search": state, "fts5": bool(provider is not None and getattr(provider, "fts5", False)), "embedding": embedding, "citation_enforcement": True})
 
 
 @router.post("/search", summary="本地知识库检索（带坐标引用）")
@@ -49,7 +52,7 @@ async def search(payload: KnowledgeSearchRequest, request: Request, user: User =
     chunks = knowledge_service.search(db, provider=provider, ctx=ctx, query=payload.query, allowed_paths=allowed, top_k=payload.top_k)
     return success_response(request, {
         "state": knowledge_service.resolve_state(provider),
-        "chunks": [{"source": item.source, "content": item.content, "score": item.score, **(item.metadata or {})} for item in chunks],
+        "chunks": [{"source": (item.metadata or {}).get("file_name") or Path(item.source).name, "content": item.content, "score": item.score, **(item.metadata or {})} for item in chunks],
     })
 
 
@@ -72,13 +75,21 @@ async def verify_answer(payload: CitationVerifyRequest, request: Request, user: 
             except ValueError:
                 continue
         if ids:
+            from app.models import File
+
             rows = db.execute(
-                select(ChunkRow, DocRow.path).join(DocRow, ChunkRow.doc_id == DocRow.id)
-                .where(ChunkRow.id.in_(ids), ChunkRow.tenant_id == user.tenant_id)
+                select(ChunkRow, File.original_name)
+                .join(DocRow, ChunkRow.doc_id == DocRow.id)
+                .join(File, File.id == DocRow.file_id)
+                .where(
+                    ChunkRow.id.in_(ids), ChunkRow.tenant_id == user.tenant_id,
+                    DocRow.tenant_id == user.tenant_id, File.tenant_id == user.tenant_id,
+                    File.owner_user_id == user.id,
+                )
             ).all()
             chunks = [
-                KnowledgeChunk(source=path, content=row.text, metadata={"chunk_id": str(row.id), "page_no": row.page_no, "sheet": row.sheet, "row_no": row.row_no, "col_no": row.col_no})
-                for row, path in rows
+                KnowledgeChunk(source=file_name, content=row.text, metadata={"chunk_id": str(row.id), "file_name": file_name, "page_no": row.page_no, "sheet": row.sheet, "row_no": row.row_no, "col_no": row.col_no})
+                for row, file_name in rows
             ]
     result = validate_citations(payload.answer, chunks)
     if not result["citation_valid"]:

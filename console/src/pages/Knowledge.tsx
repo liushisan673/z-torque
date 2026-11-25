@@ -30,8 +30,9 @@ interface KnowledgeFile {
 interface KnowledgeBase { id: string; name: string; description?: string | null; status: string; }
 interface KnowledgeBaseDocument { file_id: string; file_name: string; indexed: boolean; }
 interface KnowledgeStatus {
-  search: "READY" | "DEGRADED" | "UNAVAILABLE" | string;
+  search: "READY" | "AVAILABLE" | "DEGRADED" | "UNAVAILABLE" | string;
   fts5: boolean;
+  embedding?: { enabled: boolean; provider?: string | null; model?: string | null; semantic_search: boolean; hybrid_search: boolean };
   citation_enforcement: boolean;
 }
 interface KnowledgeChunk {
@@ -313,7 +314,7 @@ export function KnowledgePage() {
       {stateView && (
         <Alert className="knowledge-state-alert" type={status?.search === "AVAILABLE" || status?.search === "READY" ? "success" : status?.search === "DEGRADED" ? "warning" : "error"} showIcon
           message={<Space><span>本地知识检索</span><Tag color={stateView.color}>{stateView.label}</Tag></Space>}
-          description={stateView.description}
+          description={<Space direction="vertical" size={2}><span>{stateView.description}</span><span>{status?.embedding?.hybrid_search ? `混合检索已启用：${status.embedding.provider} / ${status.embedding.model}` : "语义 Embedding 未启用：当前使用全文检索；可配置本机 Ollama 或 OpenAI 兼容 Embeddings API 后重新索引。"}</span></Space>}
         />
       )}
       {uploading && <Card size="small" className="knowledge-upload-progress"><Space direction="vertical" style={{ width: "100%" }} size={6}><Typography.Text>正在上传资料…</Typography.Text><Progress percent={uploadProgress} size="small" /></Space></Card>}

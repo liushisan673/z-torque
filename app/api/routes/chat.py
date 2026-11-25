@@ -23,6 +23,7 @@ from app.services.chat_application import (
     resolve_chat_model_name,
 )
 from app.services.context_builder import build_agent_system_prompt, build_context
+from app.services import knowledge_service
 from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens
 from app.services.stream_service import sse_event
@@ -106,11 +107,19 @@ async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: s
     )
     max_tokens = effective_max_tokens(db, tenant_id=ctx.tenant_id, model_identifier=model_name, snapshot_max_tokens=(snapshot_cfg or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
     temperature, max_tokens = apply_generation_preset(payload.generation_preset, temperature, max_tokens)
+    knowledge_chunks = knowledge_service.retrieve_agent_knowledge(
+        db, tenant_id=ctx.tenant_id, user_id=ctx.user_id, agent_version=agent_version,
+        query=content, trace_id=request.state.trace_id,
+    )
+    system_prompt = build_agent_system_prompt(db, agent_version)
+    knowledge_prompt = knowledge_service.build_knowledge_context(knowledge_chunks)
+    if knowledge_prompt:
+        system_prompt = (system_prompt or "") + "\n\n" + knowledge_prompt
     model_request = ModelRequest(
         trace_id=request.state.trace_id,
         conversation_id=conversation.id,
         tenant_id=ctx.tenant_id,
-        messages=build_context(db, conversation, system_prompt=build_agent_system_prompt(db, agent_version), model=model_name, trace_id=request.state.trace_id),
+        messages=build_context(db, conversation, system_prompt=system_prompt, model=model_name, trace_id=request.state.trace_id),
         model=model_name,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -119,7 +128,7 @@ async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: s
     )
     db.commit()
     return StreamingResponse(
-        stream_chat_events(gateway=gateway, request=model_request, ctx=ctx, conversation_id=conversation.id, user_message_id=str(user_message.id), idempotency_key=idempotency_key, trace_id=request.state.trace_id, short_memory=request.app.state.port_registry.get("memory.short")),
+        stream_chat_events(gateway=gateway, request=model_request, ctx=ctx, conversation_id=conversation.id, user_message_id=str(user_message.id), idempotency_key=idempotency_key, trace_id=request.state.trace_id, short_memory=request.app.state.port_registry.get("memory.short"), knowledge_chunks=knowledge_chunks),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Trace-ID": request.state.trace_id},
     )

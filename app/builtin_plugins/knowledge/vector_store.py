@@ -43,13 +43,13 @@ class LocalVectorStore(VectorStore):
             raise ValueError("stored vector payload is corrupt")
         return struct.unpack("<" + "f" * dimension, data)
 
-    def upsert(self, *, namespace: str, records: list[VectorRecord]) -> None:
+    def upsert_in_session(self, db: Any, *, namespace: str, records: list[VectorRecord]) -> None:
         if not namespace or len(namespace) > 512:
             raise ApiError("AI_REQUEST_INVALID", "vector namespace is invalid", 422)
         if not records:
             return
-        ids: list[str] = []
-        prepared: dict[str, tuple[int, bytes, dict | None]] = {}
+        ids = []
+        prepared = {}
         for record in records:
             if not record.id or len(record.id) > 64:
                 raise ApiError("AI_REQUEST_INVALID", "vector record id is invalid", 422)
@@ -57,31 +57,23 @@ class LocalVectorStore(VectorStore):
             if record.id in prepared:
                 raise ApiError("AI_REQUEST_INVALID", "duplicate vector record id in batch", 422)
             ids.append(record.id)
-            prepared[record.id] = (
-                len(record.vector),
-                self._pack(record.vector),
-                dict(record.metadata) if record.metadata is not None else None,
-            )
+            prepared[record.id] = (len(record.vector), self._pack(record.vector), dict(record.metadata) if record.metadata is not None else None)
+        existing = db.scalars(select(KnowledgeVector).where(KnowledgeVector.namespace == namespace, KnowledgeVector.record_id.in_(ids))).all()
+        by_id = {row.record_id: row for row in existing}
+        for record_id, (dimension, vector_data, metadata) in prepared.items():
+            row = by_id.get(record_id)
+            if row is None:
+                row = KnowledgeVector(namespace=namespace, record_id=record_id)
+                db.add(row)
+            row.dimension, row.vector_data, row.record_metadata = dimension, vector_data, metadata
+        db.flush()
+
+    def upsert(self, *, namespace: str, records: list[VectorRecord]) -> None:
         with self._session_factory() as db:
-            existing = db.scalars(
-                select(KnowledgeVector).where(
-                    KnowledgeVector.namespace == namespace,
-                    KnowledgeVector.record_id.in_(ids),
-                )
-            ).all()
-            by_id = {row.record_id: row for row in existing}
-            for record_id, (dimension, vector_data, metadata) in prepared.items():
-                row = by_id.get(record_id)
-                if row is None:
-                    row = KnowledgeVector(namespace=namespace, record_id=record_id)
-                    db.add(row)
-                row.dimension = dimension
-                row.vector_data = vector_data
-                row.record_metadata = metadata
-            db.flush()
+            self.upsert_in_session(db, namespace=namespace, records=records)
             db.commit()
 
-    def search(self, *, namespace: str, query: list[float], top_k: int = 5) -> list[VectorMatch]:
+    def search_in_session(self, db: Any, *, namespace: str, query: list[float], top_k: int = 5) -> list[VectorMatch]:
         if not namespace or len(namespace) > 512:
             raise ApiError("AI_REQUEST_INVALID", "vector namespace is invalid", 422)
         self._validate_vector(query)
@@ -89,38 +81,36 @@ class LocalVectorStore(VectorStore):
         query_norm = math.sqrt(math.fsum(float(value) * float(value) for value in query))
         if query_norm == 0:
             return []
-        with self._session_factory() as db:
-            rows = db.scalars(
-                select(KnowledgeVector).where(KnowledgeVector.namespace == namespace)
-            ).all()
-            matches: list[VectorMatch] = []
-            for row in rows:
-                if row.dimension != len(query):
-                    continue
-                try:
-                    vector = self._unpack(row.vector_data, row.dimension)
-                except (ValueError, struct.error):
-                    continue
-                norm = math.sqrt(math.fsum(value * value for value in vector))
-                if norm == 0:
-                    continue
-                dot = math.fsum(float(left) * right for left, right in zip(query, vector, strict=True))
-                score = dot / (query_norm * norm)
-                matches.append(VectorMatch(id=row.record_id, score=score, metadata=row.record_metadata))
+        rows = db.scalars(select(KnowledgeVector).where(KnowledgeVector.namespace == namespace)).all()
+        matches = []
+        for row in rows:
+            if row.dimension != len(query):
+                continue
+            try:
+                vector = self._unpack(row.vector_data, row.dimension)
+            except (ValueError, struct.error):
+                continue
+            norm = math.sqrt(math.fsum(value * value for value in vector))
+            if norm == 0:
+                continue
+            dot = math.fsum(float(left) * right for left, right in zip(query, vector, strict=True))
+            matches.append(VectorMatch(id=row.record_id, score=dot / (query_norm * norm), metadata=row.record_metadata))
         matches.sort(key=lambda item: item.score, reverse=True)
         return matches[:limit]
 
-    def delete(self, *, namespace: str, ids: list[str]) -> None:
+    def search(self, *, namespace: str, query: list[float], top_k: int = 5) -> list[VectorMatch]:
+        with self._session_factory() as db:
+            return self.search_in_session(db, namespace=namespace, query=query, top_k=top_k)
+
+    def delete_in_session(self, db: Any, *, namespace: str, ids: list[str]) -> None:
         if not ids:
             return
+        rows = db.scalars(select(KnowledgeVector).where(KnowledgeVector.namespace == namespace, KnowledgeVector.record_id.in_(ids))).all()
+        for row in rows:
+            db.delete(row)
+        db.flush()
+
+    def delete(self, *, namespace: str, ids: list[str]) -> None:
         with self._session_factory() as db:
-            rows = db.scalars(
-                select(KnowledgeVector).where(
-                    KnowledgeVector.namespace == namespace,
-                    KnowledgeVector.record_id.in_(ids),
-                )
-            ).all()
-            for row in rows:
-                db.delete(row)
-            db.flush()
+            self.delete_in_session(db, namespace=namespace, ids=ids)
             db.commit()

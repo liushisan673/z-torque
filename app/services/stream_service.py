@@ -17,6 +17,7 @@ from app.models import Agent, AgentVersion, Conversation, Message
 from app.repositories import get_owned, get_owned_version
 from app.services.chat_application import _maybe_summarize, create_chat_task
 from app.services.context_builder import assistant_reasoning_parts
+from app.services import knowledge_service
 from app.services.execution_loop import serialize_seed
 from app.services.usage_service import record_usage_summary
 
@@ -57,7 +58,7 @@ def sse_event(event_id: str, event: str, data: dict[str, Any]) -> str:
     return f"id: {event_id}\nevent: {event}\ndata: {json.dumps(data, ensure_ascii=True, default=str)}\n\n"
 
 
-async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, conversation_id: Any, user_message_id: str, idempotency_key: str | None, trace_id: str | None, short_memory=None) -> AsyncIterator[str]:
+async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, conversation_id: Any, user_message_id: str, idempotency_key: str | None, trace_id: str | None, short_memory=None, knowledge_chunks=None) -> AsyncIterator[str]:
     """Chat 流式统一入口（阶段05 2.6 分流）：
 
     - 流式期间透传 message.delta；
@@ -183,6 +184,8 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
             # 闲聊：纯文本回复落库，不创建任务。空回复按失败处理（与任务链路 runtime 的空回复防呆一致），
             # 避免落库空消息让用户看到"只有时间戳的空气泡"
             reply = (final_response.content or "").strip()
+            if knowledge_chunks:
+                reply = knowledge_service.ensure_answer_citations(reply, knowledge_chunks)
             if not reply:
                 audit_model_call(
                     "MODEL_CALL_FAILED",

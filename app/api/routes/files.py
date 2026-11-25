@@ -71,6 +71,8 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         store.delete(str(file_id))
         raise ApiError("AI_FILE_TYPE_UNSUPPORTED", "file content does not match its type", 415)
     item = File(id=file_id, tenant_id=user.tenant_id, owner_user_id=user.id, conversation_id=conversation_id, original_name=Path(upload.filename or "file").name[:255], media_type=upload.content_type or "application/octet-stream", size_bytes=size, sha256=digest, storage_key=str(file_id), status="UPLOADED")
+    db.add(item)
+    db.flush()
     try:
         parsed = parse_file_structured(
             target, suffix, settings.file_max_extracted_text,
@@ -98,7 +100,6 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         logger.warning("file parse failed: id=%s suffix=%s err=%s", file_id, suffix, exc, exc_info=True)
         item.status = "PARSE_FAILED"
         item.parse_error = str(exc)[:500]
-    db.add(item)
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="FILE_UPLOADED", resource_type="FILE", resource_id=item.id, summary="file uploaded", trace_id=request.state.trace_id)
     db.commit()
     db.refresh(item)
