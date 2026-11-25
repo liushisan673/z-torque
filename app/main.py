@@ -28,9 +28,9 @@ from app.kernel.md_skill_watcher import MdSkillWatcher
 from app.kernel.registry.port_registry import PortState
 from app.kernel.task.runtime import TaskRuntime
 from app.models import Tenant, User
+from app.runtime_paths import resource_dir
 from app.security.permissions import is_admin_user
 from app.services.capability_presentation import build_capability_cards
-from app.runtime_paths import resource_dir
 
 logger = logging.getLogger("z_torque")
 
