@@ -13,6 +13,8 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Iterator
+from itertools import islice
 from pathlib import Path
 
 from app.kernel.ports.knowledge_provider import ParsedBlock, ParsedFile
@@ -33,38 +35,47 @@ def _truncate_block(text: str, max_block_chars: int) -> tuple[str, bool]:
     return text[:max_block_chars], True
 
 
-def _text_blocks(path: Path) -> list[ParsedBlock]:
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return [
-        ParsedBlock("\n".join(lines[start:start + _LINES_PER_BLOCK]), line_start=start + 1, line_end=min(start + _LINES_PER_BLOCK, len(lines)))
-        for start in range(0, len(lines), _LINES_PER_BLOCK)
-    ]
+def _text_blocks(path: Path) -> Iterator[ParsedBlock]:
+    """按固定行数流式读取，不把整个文件一次性载入内存。"""
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        line_start = 1
+        while lines := list(islice(handle, _LINES_PER_BLOCK)):
+            normalized = [line.rstrip("\r\n") for line in lines]
+            yield ParsedBlock(
+                "\n".join(normalized),
+                line_start=line_start,
+                line_end=line_start + len(normalized) - 1,
+            )
+            line_start += len(normalized)
 
 
-def _csv_blocks(path: Path) -> list[ParsedBlock]:
+def _csv_blocks(path: Path) -> Iterator[ParsedBlock]:
     with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
-        rows = list(csv.reader(handle))[:10000]
-    return [ParsedBlock("\t".join(row[:100]), line_start=index + 1, line_end=index + 1) for index, row in enumerate(rows)]
+        for index, row in enumerate(csv.reader(handle)):
+            if index >= _MAX_XLSX_ROWS:
+                break
+            yield ParsedBlock("\t".join(row[:_MAX_XLSX_COLS]), line_start=index + 1, line_end=index + 1)
 
 
-def _pdf_blocks(path: Path) -> list[ParsedBlock]:
+def _pdf_blocks(path: Path) -> Iterator[ParsedBlock]:
     try:
         from pypdf import PdfReader
     except ImportError as exc:
         raise ValueError("PDF parser unavailable") from exc
-    return [
-        ParsedBlock(page.extract_text() or "", page_no=index + 1)
-        for index, page in enumerate(PdfReader(path).pages[:_MAX_PDF_PAGES])
-    ]
+    reader = PdfReader(path)
+    for index, page in enumerate(reader.pages):
+        if index >= _MAX_PDF_PAGES:
+            break
+        yield ParsedBlock(page.extract_text() or "", page_no=index + 1)
 
 
-def _xlsx_blocks(path: Path) -> list[ParsedBlock]:
+def _xlsx_blocks(path: Path) -> Iterator[ParsedBlock]:
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError("XLSX parser unavailable") from exc
-    # 存储层文件名为无扩展名 UUID，openpyxl 会按后缀拒收；传二进制流按内容校验
-    blocks: list[ParsedBlock] = []
+    # 存储层文件名为无扩展名 UUID，openpyxl 会按后缀拒收；传二进制流按内容校验。
+    # 生成器在调用方达到 max_blocks/max_chars 时关闭，finally 确保工作簿句柄释放。
     with path.open("rb") as handle:
         workbook = load_workbook(handle, read_only=True, data_only=True)
         try:
@@ -73,11 +84,9 @@ def _xlsx_blocks(path: Path) -> list[ParsedBlock]:
                     for cell in row:
                         if cell.value is None or str(cell.value).strip() == "":
                             continue
-                        blocks.append(ParsedBlock(str(cell.value), sheet=sheet.title, row_no=cell.row, col_no=cell.column))
+                        yield ParsedBlock(str(cell.value), sheet=sheet.title, row_no=cell.row, col_no=cell.column)
         finally:
             workbook.close()
-    return blocks
-
 
 _BLOCK_PARSERS = {".txt": _text_blocks, ".md": _text_blocks, ".csv": _csv_blocks, ".pdf": _pdf_blocks, ".xlsx": _xlsx_blocks}
 
@@ -96,19 +105,39 @@ def parse_file_structured(
         raise ValueError("unsupported file type")
     blocks: list[ParsedBlock] = []
     truncated = False
-    for block in parser(path):
-        if len(blocks) >= max_blocks:
-            truncated = True
-            break
-        text, block_truncated = _truncate_block(block.text, max_block_chars)
-        truncated = truncated or block_truncated
-        if not text.strip():
-            continue
-        blocks.append(ParsedBlock(text, block.page_no, block.sheet, block.row_no, block.col_no, block.line_start, block.line_end))
+    total_chars = 0
+    iterator = iter(parser(path))
+    try:
+        for block in iterator:
+            if len(blocks) >= max_blocks:
+                truncated = True
+                break
+            text, block_truncated = _truncate_block(block.text, max_block_chars)
+            truncated = truncated or block_truncated
+            if not text.strip():
+                continue
+            remaining = max_chars - total_chars - (1 if blocks else 0)
+            if remaining <= 0:
+                truncated = True
+                break
+            if len(text) > remaining:
+                text = text[:remaining]
+                truncated = True
+            blocks.append(ParsedBlock(text, block.page_no, block.sheet, block.row_no, block.col_no, block.line_start, block.line_end))
+            total_chars += len(text) + (1 if len(blocks) > 1 else 0)
+            if total_chars >= max_chars:
+                # 只探测一个后续块来区分「刚好结束」与「因字符上限截断」，随后立即关闭生成器。
+                try:
+                    next(iterator)
+                    truncated = True
+                except StopIteration:
+                    pass
+                break
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close()
     joined = "\n".join(block.text for block in blocks)
-    if len(joined) > max_chars:
-        joined = joined[:max_chars]
-        truncated = True
     return ParsedFile(joined, tuple(blocks), truncated)
 
 
