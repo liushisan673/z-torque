@@ -7,7 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import select, update
 
-from app.core.errors import ApiError
+from app.core.errors import ApiError\nfrom app.config import get_settings
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import (
     ModelContentPart,
@@ -176,7 +176,7 @@ class AgentExecutionLoop:
             # 决策轮种子（/chat/stream 已完成的那一轮）：命中则跳过重复推理，直接从工具执行开始
             seeded = seed_round(seed, mappings)
             messages = seeded[0] if seeded is not None else list(request.messages)
-        for round_number in range(1, MAX_ROUNDS + 1):
+        max_rounds = min(MAX_ROUNDS, max(1, int(get_settings().task_max_model_rounds)))\n        for round_number in range(1, max_rounds + 1):
             # §2.4 自愈管线：每次模型调用前修复畸形 tool call / 孤儿 result，
             # 保证 tool_calls 与 toolResult 成对，且超长结果不撑爆上下文。
             messages = heal_context(messages, tool_result_max_chars=MAX_TOOL_RESULT_CHARS)
