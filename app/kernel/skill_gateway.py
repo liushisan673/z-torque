@@ -599,7 +599,7 @@ class SkillGateway:
             except Exception:  # noqa: BLE001 - 执行器异常统一降级为失败结果并记账
                 logger.exception("unexpected tool executor failure")
                 result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message=_TOOL_FAILURE_MESSAGE)
-            if result.status == "SUCCEEDED" or attempt == max_retries or not self._is_retryable(result):
+            if result.status == "SUCCEEDED" or attempt == max_retries or not self._is_retryable(result, executor=executor, config=config):
                 break
             await asyncio.sleep(min(backoff_seconds * (2 ** attempt), 30))
         if guard_key is not None:
@@ -629,15 +629,38 @@ class SkillGateway:
             self._guard.record(f"executor.{key}", succeeded=False)
 
     @staticmethod
-    def _is_retryable(result: ExecutionResult) -> bool:
-        return result.error_code in {
+    def _is_retryable(
+        result: ExecutionResult,
+        *,
+        executor: ToolExecutor | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> bool:
+        """只对可安全重放的操作重试，避免 POST / DB 写入 / MCP 副作用被重复执行。"""
+        retryable_codes = {
             "AI_SKILL_TIMEOUT",
             "AI_SKILL_FAILED",
             "AI_HTTP_REQUEST_FAILED",
             "AI_HTTP_ERROR",
-            "AI_MCP_TOOL_CALL_FAILED",
-            "AI_MCP_NEGOTIATION_FAILED",
+            "AI_CONNECTOR_UNAVAILABLE",
         }
+        if result.error_code not in retryable_codes:
+            return False
+        options = config or {}
+        tool_type = str(getattr(executor, "tool_type", "") or "").upper()
+        if result.error_code == "AI_HTTP_ERROR":
+            status_code = (result.data or {}).get("status_code") if isinstance(result.data, dict) else None
+            if status_code not in {429, 502, 503, 504}:
+                return False
+        if tool_type == "HTTP":
+            # GET 是安全/幂等语义；POST 默认不重试，除非调用方明确声明远端支持幂等重放。
+            method = str(options.get("method", "GET")).upper()
+            return method == "GET" or options.get("retry_safe") is True
+        if tool_type == "DB_QUERY":
+            # DB_QUERY 在执行器内强制单条只读 SELECT。
+            return True
+        # DB_SQL、MCP、MD_SCRIPT、COMPOSITE 及第三方执行器默认不重放副作用；
+        # 需要重试时必须由执行器或工具配置显式声明 retry_safe。
+        return bool(getattr(executor, "retry_safe", False) or options.get("retry_safe") is True)
 
     def execute(
         self,
