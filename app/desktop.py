@@ -34,7 +34,7 @@ def _configure_file_logging(data_dir: Path, level: str) -> None:
     root.addHandler(handler)
 
 
-def _upgrade_database(database_url: str) -> None:
+def _upgrade_database() -> None:
     config_path = resource_dir() / "alembic.ini"
     if not config_path.is_file():
         raise RuntimeError(f"Alembic configuration is missing: {config_path}")
@@ -50,10 +50,10 @@ def main() -> None:
     settings = get_settings()
     _configure_file_logging(settings.data_dir, settings.log_level)
 
-    if is_frozen() and settings.app_host not in {"127.0.0.1", "localhost", "::1"}:
+    if is_frozen() and settings.app_host not in {"127.0.0.1", "localhost"}:
         raise RuntimeError("The single-machine desktop build only supports loopback binding.")
 
-    _upgrade_database(settings.database_url)
+    _upgrade_database()
 
     # Creates the default tenant, permissions, roles and initial administrator idempotently.
     from app.cli import init_admin
@@ -63,7 +63,7 @@ def main() -> None:
     # Import the application only after migrations and the first administrator exist.
     from app.main import app
 
-    url_host = "127.0.0.1" if settings.app_host in {"localhost", "0.0.0.0", "::"} else settings.app_host
+    url_host = "127.0.0.1" if settings.app_host == "localhost" else settings.app_host
     browser_url = f"http://{url_host}:{settings.app_port}/"
     if settings.serve_console:
         threading.Timer(1.5, lambda: webbrowser.open(browser_url)).start()
@@ -74,7 +74,6 @@ def main() -> None:
         port=settings.app_port,
         log_level=settings.log_level.lower(),
         access_log=False,
-        workers=1,
     )
 
 
