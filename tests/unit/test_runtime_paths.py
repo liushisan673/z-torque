@@ -1,10 +1,10 @@
 import json
-from pathlib import Path
 import sys
+from pathlib import Path
 
 from app.runtime_paths import (
-    default_database_url,
     default_data_dir,
+    default_database_url,
     default_env_file,
     default_sandbox_python,
     default_user_path,
