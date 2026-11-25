@@ -192,7 +192,7 @@ async def standard_agent_card(request: Request):
             "protocolBinding": "JSONRPC",
             "protocolVersion": A2A_PROTOCOL_VERSION,
         }],
-        "capabilities": {"streaming": False, "pushNotifications": False, "stateTransitionHistory": True},
+        "capabilities": {"streaming": False, "pushNotifications": False, "stateTransitionHistory": False},
         "defaultInputModes": ["text/plain", "application/json"],
         "defaultOutputModes": ["text/plain", "application/json"],
         "skills": skills,
