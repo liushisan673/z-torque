@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import sys
 
@@ -55,7 +56,7 @@ def test_frozen_runtime_generates_persistent_secrets_and_first_run_credentials(t
 
     config._ensure_frozen_runtime_secrets()
     data_dir = tmp_path / "Local" / "Z-Torque"
-    stored = __import__("json").loads((data_dir / "runtime-secrets.json").read_text(encoding="utf-8"))
+    stored = json.loads((data_dir / "runtime-secrets.json").read_text(encoding="utf-8"))
     assert len(stored["jwt_secret_key"]) >= 32
     Fernet(stored["secret_store_key"].encode("ascii"))
     assert len(stored["admin_initial_password"]) >= 12
