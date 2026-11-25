@@ -160,7 +160,7 @@ class Settings(BaseSettings):
     sqlite_worker_concurrency: int = 3
     task_default_timeout: int = 600
     task_max_timeout: int = 3600
-    task_max_model_rounds: int = 5
+    task_max_model_rounds: int = 12
     task_outbox_poll_interval: float = 0.25
     task_outbox_max_attempts: int = 10
     task_event_retention: int = 90
@@ -397,7 +397,7 @@ class Settings(BaseSettings):
             raise ValueError('BRIDGE_MEDIA_OUTBOUND_SUBDIR must be a single relative directory name')
         if self.model_max_images_per_message < 0 or self.model_max_image_mb < 1 or self.model_image_history_limit < 0:
             raise ValueError('MODEL_MAX_IMAGES_PER_MESSAGE / MODEL_MAX_IMAGE_MB / MODEL_IMAGE_HISTORY_LIMIT must be valid')
-        if self.worker_concurrency < 1 or self.sqlite_worker_concurrency < 1:
+        if not 1 <= self.task_max_model_rounds <= 30:\n            raise ValueError('TASK_MAX_MODEL_ROUNDS must be within 1..30')\n        if self.worker_concurrency < 1 or self.sqlite_worker_concurrency < 1:
             raise ValueError('worker concurrency limits must be positive')
         if self.sandbox_max_processes < 1 or self.sandbox_max_file_bytes < 1:
             raise ValueError('sandbox resource limits must be positive')
