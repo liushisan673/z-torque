@@ -1,4 +1,3 @@
-from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -37,6 +36,7 @@ class KnowledgeBaseDocumentResponse(BaseModel):
     file_status: str
     indexed: bool
     attached_at: UTCDatetime
+
 
 class AgentKnowledgeBaseBindingRequest(BaseModel):
     knowledge_base_ids: list[UUID] = Field(default_factory=list, max_length=50)
