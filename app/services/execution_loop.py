@@ -196,8 +196,7 @@ class AgentExecutionLoop:
                 response = seeded[1]
             else:
                 # 「模型推理中」先落库再调用：一轮推理动辄数秒，用户必须能看见当前在等什么。
-                # 推理完成不再单独发事件——紧随其后的工具调用/终态事件本身就是它的结束标志，
-                # 少一条重复的「模型推理完成」时间线也更好读。
+                # 模型调用完成后记录耗时、模型名、工具数与 token 用量；不记录 prompt/response 正文。
                 _progress_event(db, task, "TASK_MODEL_STARTED", f"model round {round_number} started", trace_id=request.trace_id, payload={"round": round_number})
                 model_started = time.perf_counter()
                 try:
