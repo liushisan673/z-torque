@@ -19,6 +19,7 @@ export function statusMeta(status: string): { label: string; variant: string; ru
     case "PROCESSING":
       return { label: statusLabel(status), variant: "tag-running", running: true };
     case "WAITING_HUMAN":
+    case "WAITING_CHILD":
     case "CANCELING":
     case "CANCEL_REQUESTED":
     case "DRAFT":
@@ -55,6 +56,7 @@ function statusLabel(status: string): string {
     QUEUED: "排队中",
     PENDING: "待处理",
     WAITING_HUMAN: "待确认",
+    WAITING_CHILD: "等待子任务",
     PROCESSING: "处理中",
     PARSED: "已解析",
     UPLOADED: "已上传",

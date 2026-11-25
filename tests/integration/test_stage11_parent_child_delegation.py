@@ -152,7 +152,7 @@ async def test_default_parent_used_when_agent_not_selected(baseline):
 
 
 @pytest.mark.asyncio
-async def test_child_task_requires_delegation_fields_and_depth_is_limited(baseline):
+async def test_child_task_requires_delegation_fields_and_respects_configured_depth(baseline):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client, "owner", "pass")
         headers = {"Authorization": f"Bearer {token}"}
@@ -214,8 +214,40 @@ async def test_child_task_requires_delegation_fields_and_depth_is_limited(baseli
                 "child_sequence": 1,
             },
         )
-        assert grandchild.status_code == 409
-        assert grandchild.json()["code"] == "AI_AGENT_DELEGATION_DEPTH_EXCEEDED"
+        assert grandchild.status_code == 200
+        grandchild_id = grandchild.json()["data"]["id"]
+
+        great_grandchild = await client.post(
+            "/api/z-torque/tasks",
+            headers=headers,
+            json={
+                "agent_id": str(baseline["default_parent_id"]),
+                "agent_version_id": str(baseline["default_parent_v1"]),
+                "idempotency_key": "stage11-great-grandchild",
+                "request_summary": "great grandchild",
+                "parent_task_id": grandchild_id,
+                "delegation_id": str(uuid4()),
+                "child_sequence": 1,
+            },
+        )
+        assert great_grandchild.status_code == 200
+        great_grandchild_id = great_grandchild.json()["data"]["id"]
+
+        too_deep = await client.post(
+            "/api/z-torque/tasks",
+            headers=headers,
+            json={
+                "agent_id": str(baseline["default_parent_id"]),
+                "agent_version_id": str(baseline["default_parent_v1"]),
+                "idempotency_key": "stage11-depth-four",
+                "request_summary": "too deep",
+                "parent_task_id": great_grandchild_id,
+                "delegation_id": str(uuid4()),
+                "child_sequence": 1,
+            },
+        )
+        assert too_deep.status_code == 409
+        assert too_deep.json()["code"] == "AI_AGENT_DELEGATION_DEPTH_EXCEEDED"
 
 
 @pytest.mark.asyncio

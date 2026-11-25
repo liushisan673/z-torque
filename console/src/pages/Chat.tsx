@@ -794,6 +794,10 @@ export function ChatPage() {
             setWaitingConfirm(true);
             setTaskPanelOpen(true);
             applyRun((prev) => ({ ...prev, status, waiting: true }));
+          } else if (status === "WAITING_CHILD") {
+            setWaitingConfirm(false);
+            setTaskPanelOpen(true);
+            applyRun((prev) => ({ ...prev, status, waiting: true }));
           }
           return;
         }
@@ -841,6 +845,11 @@ export function ChatPage() {
         applyRun((prev) => ({ ...prev, steps: prev.steps.some((s) => s.seq === seq) ? prev.steps : [...prev.steps, step] }));
         if (eventType === "TASK_WAITING_HUMAN") {
           setWaitingConfirm(true);
+          setTaskPanelOpen(true);
+          applyRun((prev) => ({ ...prev, waiting: true }));
+        }
+        if (eventType === "TASK_WAITING_CHILD") {
+          setWaitingConfirm(false);
           setTaskPanelOpen(true);
           applyRun((prev) => ({ ...prev, waiting: true }));
         }

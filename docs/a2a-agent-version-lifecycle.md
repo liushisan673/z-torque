@@ -30,7 +30,9 @@ Z-Torque 使用 A2A 作为 Agent-to-Agent 发现与委派的唯一入口，不�
 4. 执行侧再次检查目标仍是该 Agent 的当前发布版本且对原始用户可见。
 5. 本地执行使用 in-process Agent runtime；远程 Agent 使用配置的 A2A Peer 传输适配器。两者应共享发现、授权、任务关联、超时、循环/深度限制和审计契约。
 
-当前代码已统一站内 Agent 的工具入口和动态候选发现（包括普通 Agent 的下一跳委派）；现有 A2A Gateway 插件仍保留历史 `/a2a/invoke` 自定义 envelope 以兼容既有 Peer。它尚不能据此宣称已完整覆盖 A2A 官方 JSON-RPC/HTTP binding。后续应以官方 Agent Card、SendMessage、GetTask、CancelTask、SubscribeToTask 和标准 Task/Artifact 数据结构替换旧 envelope，并通过互操作测试后再移除兼容适配器。
+站内 A2A 委派已通过统一入口创建独立 Child Task：父任务保存模型上下文 checkpoint 并进入 `WAITING_CHILD`，随即释放 Worker 执行槽；子任务由正常 Task Worker 调度，使用原始用户身份执行。子任务进入人工审批时仅挂起子任务，父任务继续等待；子任务进入终态后，系统通过父子 Task 关系唤醒父任务，回填子任务结果并从 checkpoint 继续模型执行。父任务取消会级联取消未终态的后代任务，进程恢复时也会检查已完成但尚未通知父任务的子任务。
+
+这完成的是站内本地 Agent 的独立任务生命周期，不等于远程线协议已完整标准化。现有 A2A Gateway 插件仍保留历史 `/a2a/invoke` 自定义 envelope 以兼容既有 Peer，尚不能宣称完整覆盖 A2A 官方 JSON-RPC/HTTP binding。后续应以官方 Agent Card、SendMessage、GetTask、CancelTask、SubscribeToTask 和标准 Task/Artifact 数据结构替换旧 envelope，并通过互操作测试后再移除兼容适配器。
 
 ## AgentVersion 生命周期
 
@@ -43,7 +45,20 @@ Z-Torque 使用 A2A 作为 Agent-to-Agent 发现与委派的唯一入口，不�
 
 ## 当前边界与待完成项
 
-- 站内 A2A 的本地执行目前仍复用父 Task 的执行循环；统一了入口，但尚未把每次委派都转为独立 Child Task。
-- 子 Agent 的人工审批仍通过 fail-closed 策略排除需确认的工具；尚未实现父 Task 等待子 Task、子 Task checkpoint 恢复后父 Task 继续的完整调度链。
+- 站内本地 A2A 已具备独立 Child Task、父任务 checkpoint、等待/恢复、审批等待与终态通知；仍需补充端到端模型工具调用测试、并发/超时/崩溃恢复压力测试。
 - 远程 Peer 仍是旧自定义 A2A envelope，需完成标准 A2A JSON-RPC/HTTP binding 和 Agent Card 互操作后，才能宣称完整标准协议兼容。
 - 以上边界不得在 UI、文档或产品介绍中描述为已经完成。
+
+
+## 独立 Child Task 生命周期（2026-11-25）
+
+- 模型通过统一 `route_specialist` 工具提出站内委派时，执行循环不再直接递归执行子 Agent，而是返回委派意图与序列化消息上下文。
+- TaskRuntime 重新校验原始用户的 `a2a.invoke` 权限、目标 Agent 当前发布版本和用户可见性，再创建 Child Task。
+- Child Task 使用原始用户的 tenant/user SecurityContext；其工具映射、Skill/Tool 权限检查继续以该用户为准。
+- Parent Task 保存 `TaskCheckpoint(status=WAITING_CHILD)`，状态转为 `WAITING_CHILD` 并清空 lease 字段。Worker 返回，释放并发执行槽。
+- Child Task 通过正常 Outbox/Queue/Worker 执行；其状态、工具事件、审批记录和审计独立归属于 Child Task。
+- Child Task 进入 `WAITING_HUMAN` 时，Parent Task 保持 `WAITING_CHILD`。审批恢复只恢复 Child Task；Child Task 终态后通过父子 Task 关联把 Parent Task 重新入队。
+- Parent Task 从 checkpoint 恢复，将 Child Task 的结构化终态/结果作为 A2A tool result 回填，再继续模型推理。
+- Parent Task 取消会级联取消未终态后代；超时与进程恢复路径也识别 `WAITING_CHILD`。
+- 委派深度默认 3 层，可配置为 1–5 层；单个模型执行轮次仍限制一次 A2A 派发，避免重复委派。
+- A2A Invocation 在 Child Task 创建时再次授权，Discovery 候选列表不构成授权。

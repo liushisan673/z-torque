@@ -508,6 +508,10 @@ class TaskRuntime:
                 f"waiting for delegated child task {child.id}",
                 trace_id=str(task.id),
             )
+            # WAITING_CHILD is a durable suspension, not an active lease.
+            task.lease_owner = None
+            task.lease_expires_at = None
+            task.lease_heartbeat_at = None
             db.commit()
             return {"task_id": str(task.id), "status": "WAITING_CHILD", "child_task_id": str(child.id)}
         except ApiError as exc:
