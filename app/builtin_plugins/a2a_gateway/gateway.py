@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Mapping
+from uuid import uuid4
 
 from app.builtin_plugins.a2a_gateway.config import (
     IDENTITY_FULL_CONTEXT,
@@ -19,6 +20,7 @@ from app.builtin_plugins.a2a_gateway.config import (
 )
 from app.builtin_plugins.a2a_gateway.discovery import AgentDiscovery
 from app.builtin_plugins.a2a_gateway.identity import InboundIdentity, InboundPrincipal
+from app.builtin_plugins.a2a_gateway.jsonrpc import validate_send_message_result
 from app.builtin_plugins.a2a_gateway.peers import PeerRegistry
 from app.builtin_plugins.a2a_gateway.protocol import (
     A2A_DEPTH_HEADER,
@@ -97,6 +99,52 @@ class A2AGateway:
         self.require_enabled()
         principal = await self._authenticate(headers, trace_id=trace_id)
         return await self._run(principal, headers=headers, payload=payload)
+
+    async def send_message_to_peer(
+        self,
+        peer_id: str,
+        *,
+        message: dict[str, Any],
+        depth: int = 0,
+    ) -> dict[str, Any]:
+        """通过 Agent Card 发现的 A2A v1.0 JSON-RPC 接口向远端 Agent 发送 Message。
+
+        这是远端标准协议适配器入口；调用方负责在本地 Dispatcher 中建立/关联
+        Child Task，并把远端 Task ID 映射到本地委派记录。这里不把远端 Task 冒充本地 ORM Task。
+        """
+        self.require_enabled()
+        if not isinstance(message, dict) or not isinstance(message.get("parts"), list) or not message["parts"]:
+            raise ApiError("AI_A2A_JSONRPC_INVALID", "A2A Message must include a non-empty parts array", 400)
+        if isinstance(depth, bool) or not isinstance(depth, int) or depth < 0:
+            raise ApiError("AI_A2A_JSONRPC_INVALID", "A2A delegation depth must be a non-negative integer", 400)
+        outbound_depth = depth + 1
+        if outbound_depth > self._config.max_depth:
+            raise ApiError("AI_A2A_DEPTH_EXCEEDED", f"A2A depth {outbound_depth} exceeds max_depth {self._config.max_depth}", 400)
+        peer = self.peers.resolve(peer_id)
+        card = await self.peers.fetch_agent_card(peer)
+        interface = card["supportedInterfaces"][0]
+        request_id = str(uuid4())
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "SendMessage",
+            "params": {"message": message},
+        }
+        response = await self.peers.invoke_jsonrpc(
+            peer,
+            payload,
+            endpoint_url=interface["url"],
+            extra_headers={A2A_DEPTH_HEADER: str(outbound_depth)},
+            depth=outbound_depth,
+        )
+        if "error" in response:
+            error = response["error"]
+            raise ApiError(
+                "AI_A2A_PEER_UNAVAILABLE",
+                f"remote A2A peer returned JSON-RPC error {error['code']}: {error['message'][:200]}",
+                502,
+            )
+        return validate_send_message_result(response["result"])
 
     async def invoke_many(self, *, headers: Mapping[str, str], payloads: list[Any], trace_id: str | None = None) -> list[Any]:
         """扇出：`asyncio.Semaphore(max_fanout)` 限并发，超限排队而非静默丢弃。"""
