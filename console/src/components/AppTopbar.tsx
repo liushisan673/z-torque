@@ -87,7 +87,7 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
       })),
     },
     {
-      type: "group",
+      type: "group" as const,
       label: t("nav.group.configuration"),
       children: moreItems.filter((item) => item.group === "configuration").map((item) => ({
         key: item.to,
@@ -95,7 +95,7 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
       })),
     },
     {
-      type: "group",
+      type: "group" as const,
       label: t("nav.group.account"),
       children: moreItems.filter((item) => item.group === "account").map((item) => ({
         key: item.to,
