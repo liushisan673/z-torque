@@ -30,6 +30,8 @@ Z-Torque 使用 A2A 作为 Agent-to-Agent 发现与委派的唯一入口，不�
 4. 执行侧再次检查目标仍是该 Agent 的当前发布版本且对原始用户可见。
 5. 本地执行使用 in-process Agent runtime；远程 Agent 使用配置的 A2A Peer 传输适配器。两者应共享发现、授权、任务关联、超时、循环/深度限制和审计契约。
 
+普通对话仍遵循 Message-only 规则：非流式请求先让模型在可用工具定义下判断本轮是否需要执行；模型返回纯文本时直接落库 Message，不创建 Task；模型返回 tool call 时才创建 Task，并把首轮推理结果保存为 seed checkpoint，避免 Worker 重复推理。显式 @Agent 委派则直接创建目标 Agent 的 Task。
+
 站内 A2A 委派已通过统一入口创建独立 Child Task：父任务保存模型上下文 checkpoint 并进入 `WAITING_CHILD`，随即释放 Worker 执行槽；子任务由正常 Task Worker 调度，使用原始用户身份执行。子任务进入人工审批时仅挂起子任务，父任务继续等待；子任务进入终态后，系统通过父子 Task 关系唤醒父任务，回填子任务结果并从 checkpoint 继续模型执行。父任务取消会级联取消未终态的后代任务，进程恢复时也会检查已完成但尚未通知父任务的子任务。
 
 这完成的是站内本地 Agent 的独立任务生命周期，不等于远程线协议已完整标准化。现有 A2A Gateway 插件仍保留历史 `/a2a/invoke` 自定义 envelope 以兼容既有 Peer，尚不能宣称完整覆盖 A2A 官方 JSON-RPC/HTTP binding。后续应以官方 Agent Card、SendMessage、GetTask、CancelTask、SubscribeToTask 和标准 Task/Artifact 数据结构替换旧 envelope，并通过互操作测试后再移除兼容适配器。
@@ -45,7 +47,7 @@ Z-Torque 使用 A2A 作为 Agent-to-Agent 发现与委派的唯一入口，不�
 
 ## 当前边界与待完成项
 
-- 站内本地 A2A 已具备独立 Child Task、父任务 checkpoint、等待/恢复、审批等待与终态通知；仍需补充端到端模型工具调用测试、并发/超时/崩溃恢复压力测试。
+- 站内本地 A2A 已具备独立 Child Task、父任务 checkpoint、等待/恢复、审批等待与终态通知，并已覆盖非流式工具决策和 Child Task 挂起/恢复通知的回归测试；仍需补充完整模型→子任务→人工审批→父任务恢复的端到端测试，以及并发/超时/崩溃恢复压力测试。
 - 远程 Peer 仍是旧自定义 A2A envelope，需完成标准 A2A JSON-RPC/HTTP binding 和 Agent Card 互操作后，才能宣称完整标准协议兼容。
 - 以上边界不得在 UI、文档或产品介绍中描述为已经完成。
 

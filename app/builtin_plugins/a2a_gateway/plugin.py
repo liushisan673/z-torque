@@ -32,7 +32,7 @@ NETWORK_OUTBOUND_PERMISSION = "network.outbound"
 class A2AGatewayPlugin:
     manifest = PluginManifest(
         name="a2a_gateway",
-        description="Legacy skill-oriented a2a.invoke compatibility gateway; official A2A v1.0 JSON-RPC adapter is a separate pending implementation",
+        description="历史 Skill 级 a2a.invoke 兼容网关；官方 A2A v1.0 JSON-RPC 适配器尚待实现",
         provides=(),
         requires=(
             "skill.executor",
