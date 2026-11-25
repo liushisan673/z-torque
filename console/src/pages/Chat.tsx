@@ -35,7 +35,7 @@ import { useToast } from "../components/Toast";
 import { AppTopbar, APP_NAV, isAdminUser } from "../components/AppTopbar";
 import { useAuth } from "../stores/auth";
 // 内联执行块共享模块：与嵌入对话页（/embed/chat）共用类型/工具函数/渲染组件，保证实时链路展示一致
-import { RunBlock, eventLabel, localStep, payloadOf, TERMINAL, type ActiveRun, type TaskStep } from "./chatRun";
+import { RunBlock, eventLabel, localStep, payloadOf, toolCardOf, TERMINAL, type ActiveRun, type TaskStep } from "./chatRun";
 
 // 会话记忆摘要（GET /memory 与 POST /memory/summarize 共用返回结构）
 interface MemorySummary {
@@ -1844,12 +1844,28 @@ export function ChatPage() {
                   {steps.map((s, i) => {
                     const cls = timelineItemClass(s, i, steps.length);
                     const label = eventLabel(s.eventType);
+                    const tool = toolCardOf(s);
                     return (
                       <div key={s.seq} className={`chat-timeline-item ${cls}`}>
                         <div className="chat-timeline-dot" />
                         <div className="chat-timeline-title">{label}</div>
                         {s.summary && s.summary !== label && (
                           <div className="chat-timeline-desc">{s.summary}</div>
+                        )}
+                        {tool && (
+                          <div className="chat-tool-chip">
+                            <div className="chat-tool-chip-head">
+                              <span className="chat-tool-tag">工具</span>
+                              <span className="chat-tool-chip-name">{tool.name}</span>
+                            </div>
+                            {tool.result && <div className="chat-tool-result">{tool.result}</div>}
+                            {tool.args && (
+                              <details>
+                                <summary className="chat-tool-chip-toggle">查看参数</summary>
+                                <pre className="chat-tool-args">{tool.args}</pre>
+                              </details>
+                            )}
+                          </div>
                         )}
                         <div className="chat-timeline-time">{s.time}</div>
                       </div>
