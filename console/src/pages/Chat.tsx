@@ -471,11 +471,13 @@ export function ChatPage() {
     }
   }, []);
 
-  // 拉取子任务列表：同 root_task_id 且非根任务本身
-  const refreshChildTasks = useCallback(async (rootId: string) => {
+  // 只拉取当前任务的直接子任务，避免选中某个子任务时把同根任务的兄弟节点误标成它的子任务。
+  const refreshChildTasks = useCallback(async (parentTaskId: string) => {
     try {
       const all = await request<{ items: Task[] }>("/api/z-torque/tasks", { query: { limit: 100 } });
-      setChildTasks(all.items.filter((x) => x.root_task_id === rootId && x.id !== rootId));
+      setChildTasks(all.items
+        .filter((x) => x.parent_task_id === parentTaskId)
+        .sort((a, b) => (a.child_sequence ?? Number.MAX_SAFE_INTEGER) - (b.child_sequence ?? Number.MAX_SAFE_INTEGER)));
     } catch {
       /* 子任务加载失败不影响主流程 */
     }
@@ -508,7 +510,7 @@ export function ChatPage() {
       if (t.status === "WAITING_HUMAN") setTaskPanelOpen(true);
       const last = ev.items[ev.items.length - 1];
       lastEventIdRef.current = last ? String(last.seq) : "";
-      void refreshChildTasks(t.root_task_id || taskId);
+      void refreshChildTasks(t.id);
       return t;
     } catch (err) {
       setError(errorText(err, "加载任务详情失败"));
@@ -1806,6 +1808,15 @@ export function ChatPage() {
                 {task.id.slice(0, 10)}…
                 {copiedId === "task-id" && <span className="copy-flag">已复制</span>}
               </div>
+              {task.parent_task_id && (
+                <div className="chat-panel-status-meta" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>直接父任务</span>
+                  <button type="button" className="btn btn-ghost btn-xs" onClick={() => void loadTaskDetail(task.parent_task_id!)} title="查看直接父任务">
+                    {task.parent_task_id.slice(0, 10)}… · 查看
+                  </button>
+                  {task.child_sequence != null && <span>子任务序号 #{task.child_sequence}</span>}
+                </div>
+              )}
               {task.delegation_depth > 0 && task.root_task_id && (
                 <div className="chat-panel-status-meta">
                   根任务
@@ -1870,14 +1881,14 @@ export function ChatPage() {
 
               {childTasks.length > 0 && (
                 <div className="chat-delegation-block">
-                  <h4>子任务（{childTasks.length}）</h4>
+                  <h4>直接子任务（{childTasks.length}）</h4>
                   {childTasks.map((c) => (
                     <div key={c.id} className="chat-child-task" onClick={() => void loadTaskDetail(c.id)} title="点击查看该子任务">
                       <div className="ct-head">
                         <span className="ct-name">{c.request_summary || c.id.slice(0, 8)}</span>
                         <StatusTag status={c.status} />
                       </div>
-                      <div className="ct-meta">层级 {c.delegation_depth}</div>
+                      <div className="ct-meta">层级 {c.delegation_depth}{c.child_sequence != null ? ` · 序号 #${c.child_sequence}` : ""}</div>
                     </div>
                   ))}
                 </div>
