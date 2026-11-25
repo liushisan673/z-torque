@@ -18,6 +18,16 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from datetime import datetime, timezone
+from uuid import UUID
+
+from sqlalchemy import select
+
+from app.builtin_plugins.a2a_gateway.jsonrpc import A2A_PROTOCOL_VERSION, jsonrpc_error, jsonrpc_result, parse_jsonrpc_request
+from app.kernel.task.service import assert_agent_version_visible, create_task, transition_task
+from app.kernel.task.states import TERMINAL_STATES, TaskStatus
+from app.kernel.task.runtime import write_task_cancel_notice
+from app.models import Agent, Task
 from app.core.errors import ApiError
 from app.core.responses import success_response, trace_id_from
 from app.db.session import get_db
@@ -87,3 +97,208 @@ async def a2a_agents(
         raise ApiError("AI_A2A_DISABLED", "A2A local discovery is disabled (A2A_LOCAL_DISCOVERY=false)", 503)
     items = gateway.discovery.list_agents(tenant_id=user.tenant_id, limit=limit)
     return success_response(request, {"items": items})
+
+
+# The well-known Agent Card is mounted at the protocol-defined server-root path.
+well_known_router = APIRouter(tags=["a2a"])
+
+
+def _a2a_task_state(task: Task) -> str:
+    status = TaskStatus(task.status)
+    if status in {TaskStatus.PENDING, TaskStatus.QUEUED}:
+        return "submitted"
+    if status in {TaskStatus.RUNNING, TaskStatus.WAITING_CHILD}:
+        return "working"
+    if status == TaskStatus.WAITING_HUMAN:
+        return "input-required"
+    if status == TaskStatus.SUCCESS:
+        return "completed"
+    if status == TaskStatus.CANCELLED:
+        return "canceled"
+    return "failed"
+
+
+def _a2a_task(task: Task) -> dict:
+    result = {
+        "id": str(task.id),
+        "contextId": str(task.conversation_id or task.root_task_id),
+        "status": {
+            "state": _a2a_task_state(task),
+            "timestamp": task.updated_at.isoformat() if task.updated_at else None,
+        },
+    }
+    if task.result is not None:
+        result["artifacts"] = [{
+            "artifactId": str(task.id),
+            "name": "result",
+            "parts": [{"kind": "data", "data": task.result}],
+        }]
+    if task.error_code:
+        result["status"]["message"] = {
+            "kind": "message",
+            "messageId": f"{task.id}:status",
+            "role": "ROLE_AGENT",
+            "parts": [{"kind": "text", "text": task.error_message or task.error_code}],
+        }
+    return result
+
+
+def _rpc_error(request_id, code: int, message: str) -> dict:
+    return jsonrpc_error(request_id, code=code, message=message)
+
+
+def _standard_principal(request: Request, gateway):
+    value = request.headers.get("authorization", "")
+    scheme, _, token = value.partition(" ")
+    principal = gateway.identity.authenticate(
+        token.strip() if scheme.lower() == "bearer" and token.strip() else None,
+        trace_id=_inbound_trace_id(request),
+    )
+    # Task.owner_user_id is a mandatory FK. Do not invent an owner for a peer principal.
+    if principal.ctx.user_id is None:
+        raise ApiError("AI_A2A_DENIED", "federated Task operations require an explicitly mapped local service account", 403)
+    return principal
+
+
+@well_known_router.get("/.well-known/agent-card.json", include_in_schema=False)
+async def standard_agent_card(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    gateway = _gateway(request)
+    permissions = list_user_permissions(db, tenant_id=user.tenant_id, user_id=user.id)
+    if "a2a.invoke" not in permissions:
+        raise ApiError("AI_A2A_DENIED", "missing permission: a2a.invoke", 403)
+    if not gateway.is_local_discovery_enabled():
+        raise ApiError("AI_A2A_DISABLED", "A2A local discovery is disabled", 503)
+    agents = gateway.discovery.list_agents(tenant_id=user.tenant_id, limit=200)
+    skills = [{
+        "id": str(item["agent_id"]),
+        "name": str(item.get("name") or "Agent"),
+        "description": str(item.get("description") or ""),
+        "tags": ["z-torque-agent"],
+        "examples": [],
+    } for item in agents]
+    return {
+        "name": "Z-Torque",
+        "description": "Published Z-Torque Agents exposed through A2A",
+        "version": "1.0.0",
+        "protocolVersion": A2A_PROTOCOL_VERSION,
+        "supportedInterfaces": [{
+            "url": str(request.base_url).rstrip("/") + "/api/z-torque/a2a/jsonrpc",
+            "protocolBinding": "JSONRPC",
+            "protocolVersion": A2A_PROTOCOL_VERSION,
+        }],
+        "capabilities": {"streaming": False, "pushNotifications": False, "stateTransitionHistory": True},
+        "defaultInputModes": ["text/plain", "application/json"],
+        "defaultOutputModes": ["text/plain", "application/json"],
+        "skills": skills,
+        "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}},
+        "security": [{"bearerAuth": []}],
+    }
+
+
+@router.post("/jsonrpc", summary="A2A v1.0 JSON-RPC endpoint")
+async def standard_jsonrpc(request: Request, db: Session = Depends(get_db)):
+    gateway = _gateway(request)
+    limit = int(getattr(gateway, "max_request_bytes", 1_000_000))
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            return _rpc_error(None, -32600, "request body exceeds configured limit")
+    try:
+        payload = json.loads(bytes(body) or b"{}")
+        rpc = parse_jsonrpc_request(payload)
+    except (ValueError, TypeError):
+        return _rpc_error(None, -32700, "parse error")
+    except ApiError as exc:
+        request_id = payload.get("id") if isinstance(payload, dict) else None
+        return _rpc_error(request_id, -32600, exc.message)
+
+    try:
+        principal = _standard_principal(request, gateway)
+        ctx = principal.ctx
+        if rpc.method == "SendMessage":
+            message = rpc.params.get("message")
+            if not isinstance(message, dict) or message.get("role") != "ROLE_USER":
+                return _rpc_error(rpc.request_id, -32602, "params.message must be a user Message")
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            try:
+                agent_id = UUID(str(metadata.get("z-torque/agentId")))
+            except (TypeError, ValueError):
+                return _rpc_error(rpc.request_id, -32602, "message.metadata['z-torque/agentId'] is required")
+            parts = message.get("parts")
+            if not isinstance(parts, list) or not parts:
+                return _rpc_error(rpc.request_id, -32602, "message.parts must be a non-empty array")
+            text_parts = [part.get("text", "") for part in parts if isinstance(part, dict) and part.get("kind", "text") == "text"]
+            summary = "\n".join(str(value) for value in text_parts if value).strip()
+            if not summary:
+                return _rpc_error(rpc.request_id, -32602, "at least one text part is required")
+            agent = db.scalar(select(Agent).where(
+                Agent.id == agent_id,
+                Agent.tenant_id == ctx.tenant_id,
+                Agent.status == "ACTIVE",
+                Agent.current_published_version_id.is_not(None),
+            ))
+            if agent is None:
+                return _rpc_error(rpc.request_id, -32001, "target Agent is not available")
+            version_id = agent.current_published_version_id
+            assert_agent_version_visible(db, tenant_id=ctx.tenant_id, owner_user_id=ctx.user_id, agent_id=agent.id, agent_version_id=version_id)
+            message_id = str(message.get("messageId") or rpc.request_id)
+            task = create_task(
+                db, ctx=ctx, agent_id=agent.id, agent_version_id=version_id,
+                idempotency_key=("a2a:" + message_id)[:128],
+                request_summary=summary[:4000], trace_id=_inbound_trace_id(request),
+            )
+            db.commit()
+            db.refresh(task)
+            return jsonrpc_result(rpc.request_id, {"task": _a2a_task(task)})
+
+        if rpc.method in {"GetTask", "CancelTask"}:
+            try:
+                task_id = UUID(str(rpc.params.get("id")))
+            except (TypeError, ValueError):
+                return _rpc_error(rpc.request_id, -32602, "params.id must be a Task id")
+            task = db.scalar(select(Task).where(
+                Task.id == task_id, Task.tenant_id == ctx.tenant_id, Task.owner_user_id == ctx.user_id,
+            ))
+            if task is None:
+                return _rpc_error(rpc.request_id, -32001, "Task not found")
+            if rpc.method == "CancelTask":
+                status = TaskStatus(task.status)
+                if status not in TERMINAL_STATES:
+                    if status in {TaskStatus.PENDING, TaskStatus.QUEUED}:
+                        task.error_code = "AI_TASK_CANCELLED"
+                        task.error_message = "cancelled by A2A caller"
+                        transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "A2A caller cancelled task", _inbound_trace_id(request), expected_epoch=task.attempt_epoch)
+                        write_task_cancel_notice(db, task)
+                    elif status == TaskStatus.RUNNING:
+                        task.cancel_requested_at = datetime.now(timezone.utc)
+                        transition_task(db, task, TaskStatus.CANCELING, "TASK_CANCEL_REQUESTED", "A2A caller requested cancellation", _inbound_trace_id(request))
+                        runtime = getattr(request.app.state, "task_runtime", None)
+                        if runtime is not None:
+                            runtime.request_cancellation(task.id)
+                    else:
+                        return _rpc_error(rpc.request_id, -32002, "Task cannot be cancelled in its current state")
+                    db.commit()
+                    db.refresh(task)
+            return jsonrpc_result(rpc.request_id, {"task": _a2a_task(task)})
+
+        if rpc.method == "ListTasks":
+            try:
+                page_size = max(1, min(int(rpc.params.get("pageSize", 20)), 100))
+                offset = max(0, int(rpc.params.get("pageToken", "0")))
+            except (TypeError, ValueError):
+                return _rpc_error(rpc.request_id, -32602, "invalid pageSize or pageToken")
+            query = select(Task).where(
+                Task.tenant_id == ctx.tenant_id, Task.owner_user_id == ctx.user_id,
+            ).order_by(Task.created_at.desc())
+            rows = db.scalars(query.offset(offset).limit(page_size + 1)).all()
+            has_more = len(rows) > page_size
+            rows = rows[:page_size]
+            result = {"tasks": [_a2a_task(task) for task in rows], "pageSize": page_size}
+            if has_more:
+                result["nextPageToken"] = str(offset + page_size)
+            return jsonrpc_result(rpc.request_id, result)
+
+        return _rpc_error(rpc.request_id, -32601, f"method {rpc.method} is not implemented by this server")
+    except ApiError as exc:
+        return _rpc_error(rpc.request_id, -32003 if exc.status_code in (401, 403) else -32000, exc.message)
