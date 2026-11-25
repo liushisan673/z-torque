@@ -60,7 +60,7 @@ def _create_index() -> None:
     # the stable cross-dialect key; execution code resolves the index rowid by it.
     op.execute(
         f"INSERT INTO {_FTS}(tenant_id, chunk_id, text) "
-        "SELECT c.tenant_id, c.id, c.text FROM zr_knowledge_chunk c"
+        "SELECT CAST(c.tenant_id AS VARCHAR(36)), CAST(c.id AS VARCHAR(36)), c.text FROM zr_knowledge_chunk c"
     )
 
 
