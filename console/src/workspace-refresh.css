@@ -225,3 +225,92 @@ body { font-size: var(--page-body-size); }
   .audit-page-header { align-items: flex-start; flex-direction: column; gap: 12px; }
   .knowledge-header { align-items: flex-start; flex-direction: column; }
 }
+
+
+/* Shared page-level layout details */
+:root {
+  --agent-list-w: 320px;
+  --skill-list-w: 320px;
+  --connector-list-w: 320px;
+  --model-list-w: 286px;
+  --agent-detail-pad-x: 24px;
+  --skill-detail-pad-x: 24px;
+  --connector-detail-pad-x: 24px;
+  --model-detail-pad-x: 24px;
+}
+.agent-page,.skill-page,.connector-page,.model-page,.audit-page,.users-page {
+  width: 100%;
+  max-width: var(--page-max-width);
+  height: 100%;
+  min-height: 0;
+  margin-inline: auto;
+}
+.agent-shell,.skill-shell,.connector-shell,.model-shell {
+  min-height: 420px;
+}
+.agent-detail-pane,.skill-detail-pane,.connector-detail-pane,.model-detail-pane {
+  min-width: 0;
+}
+.agent-detail-pane h2,.skill-detail-pane h2,.connector-detail-pane h2,.model-detail-pane h2 {
+  font-size: var(--page-section-title-size);
+  line-height: 1.4;
+  font-weight: 650;
+}
+.audit-filter-bar,.users-toolbar {
+  border-color: var(--border);
+  border-radius: 12px;
+  box-shadow: var(--page-surface-shadow);
+}
+.users-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 2px 2px 16px;
+}
+.users-page-header h1 {
+  margin: 0;
+  font-size: var(--page-title-size);
+  line-height: 1.35;
+  font-weight: 680;
+  letter-spacing: -.025em;
+}
+.users-page-header p {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: var(--page-muted-size);
+}
+.app-shell > .content .ant-input,
+.app-shell > .content .ant-input-affix-wrapper,
+.app-shell > .content .ant-select-selector,
+.app-shell > .content select,
+.app-shell > .content input,
+.app-shell > .content textarea {
+  border-radius: 8px;
+}
+.app-shell > .content .ant-btn {
+  border-radius: 8px;
+  font-size: var(--page-control-size);
+  font-weight: 550;
+}
+.app-shell > .content .ant-card-head {
+  min-height: 48px;
+  padding-inline: 18px;
+  border-bottom-color: var(--border);
+}
+.app-shell > .content .ant-card-body { padding: 18px; }
+.app-shell > .content .ant-table {
+  font-size: 13px;
+}
+.app-shell > .content .ant-table-thead > tr > th {
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg) 78%, var(--bg-elevated));
+  font-size: 12px;
+  font-weight: 650;
+}
+.app-shell > .content .ant-table-tbody > tr > td {
+  padding-block: 11px;
+}
+@media (max-width: 900px) {
+  .agent-page,.skill-page,.connector-page,.model-page,.audit-page,.users-page { height: auto; min-height: 100%; }
+  .agent-shell,.skill-shell,.connector-shell,.model-shell { min-height: 520px; }
+}

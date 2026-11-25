@@ -249,6 +249,9 @@ export function UsersPage() {
 
   return (
     <div className="users-page" style={listPane.style}>
+      <header className="users-page-header">
+        <div><h1>用户与权限</h1><p>管理工作空间成员、角色与访问权限。</p></div>
+      </header>
       {/* 工具栏 */}
       <div className="users-toolbar">
         <div className="users-field">
