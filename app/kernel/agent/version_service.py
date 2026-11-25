@@ -10,7 +10,17 @@ from app.core.errors import ApiError
 from app.core.limits import MAX_SKILL_BOUND_TOOLS
 from app.kernel.audit.service import record_audit
 from app.kernel.task.states import TERMINAL_STATES
-from app.models import Agent, AgentVersion, AgentVersionSkill, Skill, SkillVersion, SkillVersionTool, Task, Tool, ToolVersion
+from app.models import (
+    Agent,
+    AgentVersion,
+    AgentVersionSkill,
+    Skill,
+    SkillVersion,
+    SkillVersionTool,
+    Task,
+    Tool,
+    ToolVersion,
+)
 
 VERSION_NOT_FOUND = "version not found"
 
