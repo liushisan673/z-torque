@@ -193,3 +193,29 @@ def test_rollback_rejects_draft_version():
             rollback_version(db, tenant_id=tenant.id, user_id=user.id, version_id=target.id)
         assert exc.value.code == "AI_AGENT_VERSION_NOT_ROLLBACKABLE"
         db.rollback()
+
+
+def test_copy_agent_does_not_inherit_legacy_child_agent_policy():
+    from app.kernel.agent.service import copy_agent
+
+    with SessionLocal() as db:
+        tenant, user, agent, current, _target = _fixture(db)
+        current.delegation_enabled = True
+        current.allowed_child_agent_versions = [str(uuid4())]
+        current.child_necessity_policy = {"required": True}
+        current.delegation_capability_version = "legacy-v1"
+        db.flush()
+
+        copied_agent = copy_agent(db, tenant_id=tenant.id, user_id=user.id, agent_id=agent.id)
+        copied_version = db.scalar(
+            select(AgentVersion).where(
+                AgentVersion.agent_id == copied_agent.id,
+                AgentVersion.status == "DRAFT",
+            )
+        )
+        assert copied_version is not None
+        assert copied_version.delegation_enabled is False
+        assert copied_version.allowed_child_agent_versions in (None, [])
+        assert copied_version.child_necessity_policy in (None, {})
+        assert copied_version.delegation_capability_version is None
+        db.rollback()
