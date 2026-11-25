@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
@@ -18,6 +19,7 @@ from app.kernel.model_gateway import (
     ModelRequest,
     ModelResponse,
     ModelToolCall,
+    normalize_usage,
 )
 from app.kernel.ports.model_selector import ModelSelector, resolve_model_selection
 from app.kernel.ports.skill_executor import ExecutionResult
@@ -197,9 +199,30 @@ class AgentExecutionLoop:
                 # 推理完成不再单独发事件——紧随其后的工具调用/终态事件本身就是它的结束标志，
                 # 少一条重复的「模型推理完成」时间线也更好读。
                 _progress_event(db, task, "TASK_MODEL_STARTED", f"model round {round_number} started", trace_id=request.trace_id, payload={"round": round_number})
-                response = await self.model_gateway.generate(
-                    ModelRequest(**{**request.__dict__, "messages": messages, "round_number": round_number, "timeout_seconds": timeout})
-                )
+                model_started = time.perf_counter()
+                try:
+                    response = await self.model_gateway.generate(
+                        ModelRequest(**{**request.__dict__, "messages": messages, "round_number": round_number, "timeout_seconds": timeout})
+                    )
+                except ModelGatewayError as exc:
+                    _progress_event(
+                        db, task, "TASK_MODEL_FAILED", f"model round {round_number} failed",
+                        trace_id=request.trace_id,
+                        payload={"round": round_number, "duration_ms": round((time.perf_counter() - model_started) * 1000), "error_code": exc.code},
+                    )
+                    raise
+                else:
+                    _progress_event(
+                        db, task, "TASK_MODEL_RESULT", f"model round {round_number} completed",
+                        trace_id=request.trace_id,
+                        payload={
+                            "round": round_number,
+                            "duration_ms": round((time.perf_counter() - model_started) * 1000),
+                            "model": request.model,
+                            "tool_calls": len(response.tool_calls),
+                            "usage": normalize_usage(response.usage),
+                        },
+                    )
             if not response.tool_calls:
                 if response.content is None:
                     raise ApiError("AI_MODEL_RESPONSE_INVALID", "model returned neither text nor tool calls", 502)
@@ -261,6 +284,7 @@ class AgentExecutionLoop:
                     else:
                         if is_site_a2a:
                             a2a_dispatch_count += 1
+                        tool_started = time.perf_counter()
                         child_result = await self._run_child_agent(
                             db,
                             ctx=ctx,
@@ -272,6 +296,7 @@ class AgentExecutionLoop:
                             deadline_at=deadline_at,
                             task_id=task_id,
                         )
+                        child_result["duration_ms"] = round((time.perf_counter() - tool_started) * 1000)
                     # 结构化结果保留成功/失败状态，父 Agent 不再把子 Agent 失败伪装成成功文本。
                     child_content = json.dumps(child_result, ensure_ascii=True, default=str)[:MAX_TOOL_RESULT_CHARS]
                     messages.append(ModelMessage("tool", child_content, tool_call_id=call.id))
@@ -286,11 +311,13 @@ class AgentExecutionLoop:
                             "tool_name": call.name,
                             "agent_version_id": str(dispatch_target),
                             "status": child_status,
+                            "duration_ms": child_result.get("duration_ms"),
                             "error_code": child_result.get("error_code"),
                             "result": _brief(child_result.get("content") or child_result.get("error_message") or child_content),
                         },
                     )
                     continue
+                tool_started = time.perf_counter()
                 result: ExecutionResult = await self.skill_gateway.execute_async(
                     db,
                     ctx,
@@ -301,6 +328,7 @@ class AgentExecutionLoop:
                     cancellation_event=cancellation_event,
                     deadline_at=deadline_at,
                 )
+                tool_duration_ms = round((time.perf_counter() - tool_started) * 1000)
                 if result.status == "WAITING_HUMAN":
                     # 写入类工具触发人工审批：任务已暂停（checkpoint 挂起），循环立即结束；
                     # 审批通过后由任务队列重放该次工具调用，调用方据此返回等待审批状态。
@@ -326,9 +354,9 @@ class AgentExecutionLoop:
                 if result.status == "SUCCEEDED":
                     if call.id in repaired_ids:
                         record_audit(db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="TOOL_CALL_REPAIRED", resource_type="TASK", resource_id=task_id, summary="tool call repaired in one round", detail={"status": "SUCCEEDED", "tool_version_id": str(mapping.tool_version_id) if mapping.tool_version_id else None, "reason": "arguments fixed after structured feedback"})
-                    _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload={"tool_name": call.name, "status": result.status, "result": _brief(result.data)})
+                    _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload={"tool_name": call.name, "status": result.status, "duration_ms": tool_duration_ms, "result": _brief(result.data)})
                 else:
-                    _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} failed: {result.error_code}", trace_id=request.trace_id, payload={"tool_name": call.name, "status": result.status, "error": result.error_message})
+                    _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} failed: {result.error_code}", trace_id=request.trace_id, payload={"tool_name": call.name, "status": result.status, "duration_ms": tool_duration_ms, "error": result.error_message})
         raise ApiError("AI_MAX_ROUNDS_EXCEEDED", "maximum model execution rounds exceeded", 422)
 
     async def _run_child_agent(
