@@ -1215,6 +1215,9 @@ export function AuditPage() {
                         <dl className="audit-kv">
                           <dt>任务状态</dt><dd>{taskInspection.task.status}</dd>
                           <dt>任务 ID</dt><dd className="mono">{taskInspection.task.id}</dd>
+                          <dt>Agent ID</dt><dd className="mono">{taskInspection.task.agent_id ?? "—"}</dd>
+                          <dt>直接父任务</dt><dd className="mono">{taskInspection.task.parent_task_id ?? "根任务"}</dd>
+                          <dt>子任务序号</dt><dd>{taskInspection.task.child_sequence ?? "—"}</dd>
                           <dt>根任务 ID</dt><dd className="mono">{taskInspection.task.root_task_id}</dd>
                           <dt>委派层级</dt><dd>{taskInspection.task.delegation_depth}</dd>
                           <dt>创建时间</dt><dd>{fmtTime(taskInspection.task.created_at)}</dd>
