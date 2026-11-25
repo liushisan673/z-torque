@@ -52,7 +52,7 @@ def _create_fallback_table() -> None:
 def _create_index() -> None:
     if _trigram_available():
         op.execute(
-            f"CREATE VIRTUAL TABLE {_FTS} USING fts5(tenant_id, chunk_id, text, tokenize='trigram')"
+            f"CREATE VIRTUAL TABLE {_FTS} USING fts5(tenant_id UNINDEXED, chunk_id UNINDEXED, text, tokenize='trigram')"
         )
     else:
         _create_fallback_table()
@@ -79,7 +79,7 @@ def downgrade() -> None:
             )
             connection.exec_driver_sql("DROP TABLE _zt_fts_probe")
             op.execute(
-                f"CREATE VIRTUAL TABLE {_FTS} USING fts5(tenant_id, chunk_id, text, tokenize='unicode61')"
+                f"CREATE VIRTUAL TABLE {_FTS} USING fts5(tenant_id UNINDEXED, chunk_id UNINDEXED, text, tokenize='unicode61')"
             )
         except Exception:  # noqa: BLE001 - fall back when FTS5 is unavailable
             _create_fallback_table()
