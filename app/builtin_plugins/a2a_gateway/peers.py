@@ -16,12 +16,17 @@ payload 白名单刻意不含 token、header 原文与请求/响应 body——�
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
+
+import httpx
+
+from app.builtin_plugins.a2a_gateway.jsonrpc import parse_jsonrpc_request, validate_agent_card, validate_jsonrpc_response
 
 from app.builtin_plugins.a2a_gateway.config import A2AConfig, PeerConfig
 from app.core.errors import ApiError
@@ -194,11 +199,6 @@ class PeerRegistry:
 
     async def fetch_agent_card(self, peer: PeerConfig) -> dict[str, Any]:
         """通过受控 HTTPS 获取远端标准 well-known Agent Card。"""
-        import json
-        import httpx
-
-        from app.builtin_plugins.a2a_gateway.jsonrpc import validate_agent_card
-
         self._sdk.require_permission("network.outbound")
         started = time.monotonic()
         try:
@@ -245,7 +245,7 @@ class PeerRegistry:
             self.record_breaker(peer.peer_id, succeeded=False)
             _emit_outbound(peer.peer_id, result=RESULT_TIMEOUT, duration_ms=_elapsed_ms(started), response_bytes=0, depth=None)
             raise ApiError("AI_A2A_TIMEOUT", f"peer {peer.peer_id!r} Agent Card request timed out", 504) from exc
-        except ApiError as exc:
+        except ApiError:
             self.record_breaker(peer.peer_id, succeeded=False)
             _emit_outbound(peer.peer_id, result=RESULT_ERROR, duration_ms=_elapsed_ms(started), response_bytes=0, depth=None)
             raise
