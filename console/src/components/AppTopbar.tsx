@@ -1,4 +1,6 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
+import { Dropdown } from "antd";
+import { DownOutlined } from "@ant-design/icons";
 import { useAuth } from "../stores/auth";
 import { useThemeMode } from "../theme/ThemeProvider";
 import type { UserInfo } from "../types";
@@ -12,21 +14,22 @@ export interface NavItem {
   permission?: string;
   /** 仅管理员可见（对应后端 require_admin） */
   adminOnly?: boolean;
+  section?: "primary" | "more";
 }
 
 // 全站统一导航：仅包含已实现路由的入口；展示时按用户角色/权限过滤。
 // 权限矩阵：模型/连接器不进普通用户管理页（仅通过 Skill/Agent 间接使用），审计对普通用户开放（仅本人记录）
 export const APP_NAV: NavItem[] = [
-  { to: "/chat", label: "会话管理", labelKey: "nav.chat" },
-  { to: "/agents", label: "智能体管理", labelKey: "nav.agents" },
-  { to: "/skills", label: "技能管理", labelKey: "nav.skills" },
-  { to: "/models", label: "模型管理", labelKey: "nav.models", adminOnly: true },
-  { to: "/connectors", label: "连接器管理", labelKey: "nav.connectors", adminOnly: true },
-  { to: "/webhooks", label: "Webhook 接入", labelKey: "nav.webhooks", adminOnly: true },
-  // 审计为例外入口：普通用户可见，但后端自动限定为仅本人记录
-  { to: "/audit", label: "审计管理", labelKey: "nav.audit" },
-  { to: "/users", label: "用户管理", labelKey: "nav.users", adminOnly: true },
-  { to: "/settings", label: "偏好设置", labelKey: "nav.settings" },
+  { to: "/chat", label: "工作台", labelKey: "nav.chat", section: "primary" },
+  { to: "/knowledge", label: "知识库", labelKey: "nav.knowledge", section: "primary" },
+  { to: "/agents", label: "智能体", labelKey: "nav.agents", section: "primary" },
+  { to: "/skills", label: "技能", labelKey: "nav.skills", section: "primary" },
+  { to: "/models", label: "模型接入", labelKey: "nav.models", adminOnly: true, section: "more" },
+  { to: "/connectors", label: "连接器", labelKey: "nav.connectors", adminOnly: true, section: "more" },
+  { to: "/webhooks", label: "Webhook", labelKey: "nav.webhooks", adminOnly: true, section: "more" },
+  { to: "/audit", label: "运行与审计", labelKey: "nav.audit", section: "more" },
+  { to: "/users", label: "用户与权限", labelKey: "nav.users", adminOnly: true, section: "more" },
+  { to: "/settings", label: "偏好设置", labelKey: "nav.settings", section: "more" },
 ];
 
 /**
@@ -65,8 +68,13 @@ export function visibleNav(nav: NavItem[], user: UserInfo | null): NavItem[] {
 export function AppTopbar({ nav }: { nav: NavItem[] }) {
   const { user, logout } = useAuth();
   const items = visibleNav(nav, user);
-  // 主题由 ThemeProvider 统一管理：同时驱动 antd design token 与手写 CSS 变量
+  const primaryItems = items.filter((item) => item.section !== "more");
+  const moreItems = items.filter((item) => item.section === "more");
   const { mode: theme, toggle, locale, setLocale, t } = useThemeMode();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const moreActive = moreItems.some((item) => location.pathname === item.to || location.pathname.startsWith(`${item.to}/`));
+
   return (
     <header className="chat-topbar">
       <div className="chat-topbar-brand">
@@ -74,39 +82,34 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
         <span className="chat-brand-name">Z-Torque</span>
         <span className="chat-brand-sub">极矩</span>
       </div>
-      <nav className="chat-topbar-nav">
-        {items.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }) => "chat-nav-link" + (isActive ? " active" : "")}
-          >
+      <nav className="chat-topbar-nav" aria-label="主导航">
+        {primaryItems.map((item) => (
+          <NavLink key={item.to} to={item.to} className={({ isActive }) => "chat-nav-link" + (isActive ? " active" : "")}>
             {item.labelKey ? t(item.labelKey) : item.label}
           </NavLink>
         ))}
+        {moreItems.length > 0 && (
+          <Dropdown
+            trigger={["click"]}
+            menu={{
+              items: moreItems.map((item) => ({ key: item.to, label: item.labelKey ? t(item.labelKey) : item.label })),
+              onClick: ({ key }) => navigate(key),
+            }}
+          >
+            <button type="button" className={"chat-nav-link chat-nav-more" + (moreActive ? " active" : "")}>
+              {t("nav.manage")} <DownOutlined />
+            </button>
+          </Dropdown>
+        )}
       </nav>
       <div className="chat-topbar-user">
-        <button
-          type="button"
-          className="chat-theme-toggle chat-locale-toggle"
-          onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
-          title={t("top.language")}
-          aria-label={t("top.language")}
-        >
+        <button type="button" className="chat-theme-toggle chat-locale-toggle" onClick={() => setLocale(locale === "zh" ? "en" : "zh")} title={t("top.language")} aria-label={t("top.language")}>
           <span className="chat-locale-label">{locale === "zh" ? "中" : "EN"}</span>
         </button>
-        <button
-          type="button"
-          className="chat-theme-toggle"
-          onClick={toggle}
-          title={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
-          aria-label={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
-        >
+        <button type="button" className="chat-theme-toggle" onClick={toggle} title={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")} aria-label={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}>
           {theme === "dark" ? (
-            // 太阳：当前深色，点击切浅色
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41-1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></svg>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41-1.41M2 12h2M20 12h2M4.93 19.07l-1.41-1.41M17.66 6.34l-1.41-1.41" /></svg>
           ) : (
-            // 月亮：当前浅色，点击切深色
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" /></svg>
           )}
         </button>

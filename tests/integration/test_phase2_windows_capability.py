@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -76,7 +77,9 @@ async def test_capabilities_sandbox_keeps_structure_when_unassembled(monkeypatch
 
 @pytest.mark.asyncio
 async def test_windows_untrusted_skill_is_rejected(monkeypatch):
-    monkeypatch.setattr("app.kernel.md_skill_runtime.os.name", "nt")
+    import app.kernel.md_skill_runtime as runtime_module
+
+    monkeypatch.setattr(runtime_module, "os", SimpleNamespace(name="nt"))
     runtime = MdSkillRuntime(root=_ROOT, enabled=True, windows_process_enabled=True)
     with pytest.raises(ApiError) as exc:
         await runtime.execute(_manifest(windows_trusted=False), {})

@@ -41,3 +41,18 @@ def compare_type(_context, _inspected_column, _metadata_column, inspected_type, 
     if is_uuid_like(inspected_type) and is_uuid_like(metadata_type):
         return False
     return None
+
+
+
+def include_object(object_, name, type_, reflected, compare_to):
+    """排除不属于 ORM metadata 的 SQLite/PG 知识库辅助索引表。
+
+    zr_knowledge_fts 由 Alembic raw SQL + knowledge 插件管理，不映射 ORM；
+    PostgreSQL 使用普通表承载兼容结构，SQLite 使用 FTS5 虚表及其影子表。
+    两者都不应被 autogenerate 当成需要删除的 ORM 漂移。
+    """
+    if type_ == "table" and name == "zr_knowledge_fts":
+        return False
+    if type_ == "index" and getattr(getattr(object_, "table", None), "name", None) == "zr_knowledge_fts":
+        return False
+    return True

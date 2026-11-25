@@ -15,7 +15,16 @@ def _database_url() -> str:
     return url
 
 
-engine = create_engine(_database_url(), future=True, pool_pre_ping=True)
+_ENGINE_URL = _database_url()
+_ENGINE_IS_SQLITE = _ENGINE_URL.startswith("sqlite:")
+engine = create_engine(
+    _ENGINE_URL,
+    future=True,
+    pool_pre_ping=True,
+    # SQLite 的默认 busy timeout 很短；单机任务执行期间存在读写交错，
+    # 给 WAL writer 一个有界等待窗口，避免瞬时竞争直接变成 database is locked。
+    connect_args={"timeout": 5.0} if _ENGINE_IS_SQLITE else {},
+)
 
 
 def _ensure_sqlite_columns() -> None:
@@ -90,16 +99,45 @@ def _normalize_uuid_formats(conn: sqlite3.Connection) -> None:
 _ensure_sqlite_columns()
 
 
-@event.listens_for(engine, "connect")
-def _sqlite_pragmas(dbapi_connection, _connection_record):
-    # 只在 SQLite 连接上执行 PRAGMA：PostgreSQL/MySQL 连接执行会直接语法错误，
-    # 使引擎在首次取连接时就失败（等于该方言完全不可用）。
+def _apply_sqlite_pragmas(dbapi_connection) -> None:
+    # 只在 SQLite 连接上执行 PRAGMA：PostgreSQL/MySQL 连接执行会直接语法错误。
     if not isinstance(dbapi_connection, sqlite3.Connection):
         return
+    # 连接池归还前若遗留事务，PRAGMA foreign_keys/synchronous 在事务内无法切换。
+    # checkout 时先回滚池化连接上的残留事务，再应用连接级设置。
+    if dbapi_connection.in_transaction:
+        dbapi_connection.rollback()
     cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.close()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA wal_autocheckpoint=1000")
+    finally:
+        cursor.close()
+
+
+@event.listens_for(engine, "connect")
+def _sqlite_pragmas_on_connect(dbapi_connection, _connection_record):
+    _apply_sqlite_pragmas(dbapi_connection)
+
+
+@event.listens_for(engine, "checkout")
+def _sqlite_pragmas_on_checkout(dbapi_connection, _connection_record, _connection_proxy):
+    # 连接池会复用连接；在 checkout 时再次设置连接级 PRAGMA，抵御迁移/外部代码曾关闭外键的情况。
+    _apply_sqlite_pragmas(dbapi_connection)
+
+
+def _configure_sqlite_journal() -> None:
+    """为文件型 SQLite 启用 WAL；journal_mode 是数据库级设置，不应在每次取连接时争锁。"""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+        connection.commit()
+
+
+_configure_sqlite_journal()
 
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)

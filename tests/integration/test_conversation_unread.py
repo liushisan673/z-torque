@@ -14,19 +14,17 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
-from app.db.session import SessionLocal
 from app.main import app
 from app.models import Agent, AgentVersion, Conversation, Message, Role, Tenant, User
 from app.security.passwords import hash_password
-from tests.support.ddl import fk_off, fk_on
+from tests.support.db_cleanup import cleanup_session
 
 CONVERSATIONS = "/api/z-torque/conversations"
 
 
 @pytest.fixture(autouse=True)
 def baseline():
-    with SessionLocal.begin() as db:
-        fk_off(db)
+    with cleanup_session() as db:
         db.execute(delete(Message))
         db.execute(delete(Conversation))
         db.execute(delete(AgentVersion))
@@ -34,7 +32,6 @@ def baseline():
         db.execute(delete(User))
         db.execute(delete(Role))
         db.execute(delete(Tenant))
-        fk_on(db)
 
         tenant = Tenant(name="conversation-unread")
         db.add(tenant)

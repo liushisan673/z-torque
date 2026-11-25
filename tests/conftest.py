@@ -29,9 +29,15 @@ def _test_database():
     # FTS 虚表不在 ORM metadata 中，需显式删除，避免上一次运行的旧结构残留
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE IF EXISTS zr_knowledge_fts"))
-        try:
-            connection.execute(text("CREATE VIRTUAL TABLE zr_knowledge_fts USING fts5(tenant_id, chunk_id, text, tokenize='unicode61')"))
-        except Exception:  # noqa: BLE001 - 无 FTS5 的 sqlite3 走同构普通表（LIKE 降级）
+        if engine.dialect.name == "sqlite":
+            try:
+                connection.execute(text("CREATE VIRTUAL TABLE zr_knowledge_fts USING fts5(tenant_id, chunk_id, text, tokenize='unicode61')"))
+            except Exception:  # noqa: BLE001 - 无 FTS5 的 sqlite3 走同构普通表（LIKE 降级）
+                connection.execute(text("CREATE TABLE zr_knowledge_fts (tenant_id VARCHAR(36), chunk_id VARCHAR(36), text TEXT)"))
+        else:
+            # PostgreSQL 不支持 SQLite FTS5；测试用普通同构表覆盖非 FTS 路径。
+            # 不要在 PostgreSQL 事务中故意执行非法 CREATE VIRTUAL TABLE 再捕获异常：
+            # PG 会把整个事务标记为 aborted。
             connection.execute(text("CREATE TABLE zr_knowledge_fts (tenant_id VARCHAR(36), chunk_id VARCHAR(36), text TEXT)"))
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
@@ -39,7 +45,7 @@ def _test_database():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _assembled_app_state():
+def _assembled_app_state(_test_database):
     """ASGITransport 不触发 lifespan：为经 API 层的测试装配 Port 注册表。
 
     仅做装配（deps 依赖 identity.provider 等 Port）；不启动 TaskRuntime /

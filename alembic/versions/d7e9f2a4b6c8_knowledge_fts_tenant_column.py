@@ -48,8 +48,15 @@ def _rebuild(*, with_tenant: bool) -> None:
             columns.insert(0, sa.Column("tenant_id", sa.String(36), nullable=False))
         op.create_table(_FTS, *columns)
         op.create_index(f"ix_{_FTS}_text", _FTS, ["text"])
-    columns = "c.rowid, c.tenant_id, c.id, c.text" if with_tenant else "c.rowid, c.id, c.text"
-    target = f"{_FTS}(rowid, tenant_id, chunk_id, text)" if with_tenant else f"{_FTS}(rowid, chunk_id, text)"
+    # rowid 是 SQLite 的隐式列，PostgreSQL 普通表没有该列。
+    # SQLite FTS5/普通 fallback 保留 rowid 以兼容本地双写；其他方言只复制
+    # 业务列，运行时也只从 zr_knowledge_chunk 检索，不依赖这张辅助表。
+    if op.get_bind().dialect.name == "sqlite":
+        columns = "c.rowid, c.tenant_id, c.id, c.text" if with_tenant else "c.rowid, c.id, c.text"
+        target = f"{_FTS}(rowid, tenant_id, chunk_id, text)" if with_tenant else f"{_FTS}(rowid, chunk_id, text)"
+    else:
+        columns = "c.tenant_id, c.id, c.text" if with_tenant else "c.id, c.text"
+        target = f"{_FTS}(tenant_id, chunk_id, text)" if with_tenant else f"{_FTS}(chunk_id, text)"
     op.execute(f"INSERT INTO {target} SELECT {columns} FROM zr_knowledge_chunk c")
 
 

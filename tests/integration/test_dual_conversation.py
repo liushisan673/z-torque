@@ -12,7 +12,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
-from app.db.session import SessionLocal
 from app.main import app
 from app.models import (
     Agent,
@@ -27,11 +26,12 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture
 def two_conversations():
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         for model in (TaskEvent, Task, Message, Conversation, AgentVersion, Agent, AuthSession, User, Role, Tenant):
             db.execute(delete(model))
         tenant = Tenant(name=f"dual-{uuid4()}")
@@ -74,7 +74,7 @@ def two_conversations():
             conversations.append(str(conversation.id))
         data = {"username": owner.username, "conversation_ids": conversations}
     yield data
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         for model in (TaskEvent, Task, Message, Conversation, AgentVersion, Agent, AuthSession, User, Role, Tenant):
             db.execute(delete(model))
 

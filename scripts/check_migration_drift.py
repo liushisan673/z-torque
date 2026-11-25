@@ -25,7 +25,7 @@ from sqlalchemy import create_engine  # noqa: E402
 import app.builtin_plugins.audit_export_archive.models  # noqa: E402, F401
 import app.models  # noqa: E402, F401
 from app.config import get_settings  # noqa: E402
-from app.db.alembic_support import compare_type  # noqa: E402
+from app.db.alembic_support import compare_type, include_object  # noqa: E402
 from app.db.base import Base  # noqa: E402
 
 
@@ -34,7 +34,7 @@ def main() -> int:
     engine = create_engine(url)
     try:
         with engine.connect() as conn:
-            context = MigrationContext.configure(conn, opts={"compare_type": compare_type})
+            context = MigrationContext.configure(conn, opts={"compare_type": compare_type, "include_object": include_object})
             diff = compare_metadata(context, Base.metadata)
     finally:
         engine.dispose()

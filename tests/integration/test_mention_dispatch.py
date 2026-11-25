@@ -21,11 +21,12 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture
 def mention_env():
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         for model in (Task, Message, Conversation, AuthSession, User, AgentVersion, Agent, Tenant):
             db.execute(delete(model))
         tenant = Tenant(name=f"mention-{uuid4()}")

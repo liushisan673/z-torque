@@ -21,6 +21,7 @@ TASK_ERROR_CODES = {
     "AI_TASK_ALREADY_TERMINAL",
     "AI_TASK_NOT_CANCELABLE",
     "AI_TASK_DUPLICATE_IDEMPOTENCY",
+    "AI_TASK_RECOVERY_UNCERTAIN",
 }
 
 # 密钥引用解析（Phase 2 §四）：错误码先登记再由测试断言，避免散落字面量。

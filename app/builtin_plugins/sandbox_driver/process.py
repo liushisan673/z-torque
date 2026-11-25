@@ -37,8 +37,8 @@ from app.plugin_sdk.observability import emit_event
 class ProcessSandboxDriver(FilePatchMixin, SandboxDriver):
     """sandbox.driver 的进程内实现：独立解释器 -I + 最小环境变量 + cwd 白名单 + rlimit。
 
-    平台降级：Windows 无 rlimit 与进程组语义，超时仅 process.kill()（子进程可能残留，
-    v1 明确不承诺强隔离），由 MdSkillRuntime 在 Windows 上直接拒绝脚本执行。
+    平台降级：Windows 无 POSIX rlimit；超时使用 taskkill /T 清理进程树，但仍不是强安全隔离，
+    由 MdSkillRuntime 仅允许显式可信且经过确认的脚本执行。
     """
 
     def __init__(
@@ -130,19 +130,29 @@ async def _wait_exit(process: asyncio.subprocess.Process, *, timeout: float = 2.
 
 
 async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
-    """超时清理：POSIX 杀整个进程组，Windows 仅杀直接子进程（v1 平台降级）。"""
-    if process.returncode is not None:
-        return
+    """超时清理：POSIX 杀独立进程组；Windows 使用 taskkill /T 清理进程树。"""
     if os.name != "nt":
         import signal
 
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):  # pragma: no cover - 进程已退出
-            process.kill()
+            # 即使父进程已退出，也尝试清理仍留在同一 session/process group 的后代。
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            if process.returncode is None:
+                process.kill()
     else:
-        # Windows 无可靠进程组终止：process.kill() 不保证孙进程退出，属已声明的平台限制
-        process.kill()
+        taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                str(taskkill) if taskkill.is_file() else "taskkill",
+                "/PID", str(process.pid), "/T", "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(killer.wait(), timeout=5.0)
+        except (OSError, asyncio.TimeoutError):
+            if process.returncode is None:
+                process.kill()
     _force_stream_eof(process)
     await _wait_exit(process)
 
@@ -309,6 +319,11 @@ async def run_isolated_process(
     """受控执行单脚本：stdin 传 JSON 参数、stdout 收 JSON 结果（sandbox.driver 实现核心）。"""
     enforce_cwd_policy(cwd, list(allowed_roots or []))
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONNOUSERSITE": "1", "PYTHONIOENCODING": "utf-8"}
+    if os.name == "nt":
+        # Frozen Windows worker 仍需系统目录和临时目录变量才能加载运行时 DLL。
+        for key in ("SystemRoot", "WINDIR", "TEMP", "TMP"):
+            if os.environ.get(key):
+                env[key] = os.environ[key]
     spawn_kwargs: dict[str, Any] = {}
     if os.name != "nt":
         spawn_kwargs["start_new_session"] = True
@@ -320,7 +335,13 @@ async def run_isolated_process(
                 max_processes=max_processes,
             )
     started = time.monotonic()
-    process = await asyncio.create_subprocess_exec(sys.executable, "-I", str(script_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd), env=env, **spawn_kwargs)
+    if getattr(sys, "frozen", False):
+        # PyInstaller 下 sys.executable 是应用本身而不是 python.exe。
+        # 桌面启动器提供轻量 worker 入口，使用同一打包运行时执行已授权脚本。
+        command = [sys.executable, "--zt-sandbox-worker", str(script_path)]
+    else:
+        command = [sys.executable, "-I", str(script_path)]
+    process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd), env=env, **spawn_kwargs)
     stdout, stderr, output_exceeded, timed_out = await _communicate_capped(
         process=process,
         payload=json.dumps(arguments).encode(),

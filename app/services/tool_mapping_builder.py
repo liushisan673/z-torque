@@ -4,6 +4,7 @@
 保证两条链路暴露给模型的工具集合完全一致。
 """
 import hashlib
+import json
 from uuid import UUID
 
 from sqlalchemy import select
@@ -139,28 +140,107 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             mappings[alias] = ToolMapping(alias, child_ver_id, None, schema, child_agent_version_id=child_ver_id)
             desc = f"委派给子智能体「{child_agent.name}」独立处理任务：{(child_agent.description or '').strip()}".rstrip("：")[:512]
             tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
-    # 站内 A2A：被标记为用户默认的智能体作为系统智能体，把所有已发布智能体暴露为派发工具。
-    # 只对系统智能体生效，普通智能体（含默认父）的工具集合完全不变。
+    # 站内 A2A：仅系统默认父智能体可发现并派发专业 Agent。
+    # 只暴露 Agent 当前发布版本，历史 PUBLISHED 版本继续保留给旧任务快照，
+    # 但不得作为新请求的路由候选，避免同一 Agent 重复出现在工具目录。
     system_agent = db.get(Agent, agent_version.agent_id)
-    # 系统自带智能体（is_default_parent）才有派发能力；用户 is_default 仅表示个人默认智能体，
-    # 不应获得跨智能体调度权限，避免普通智能体被误当成系统智能体。
     if system_agent is not None and system_agent.is_default_parent and not exclude_requires_confirmation:
-        candidates = db.query(AgentVersion).filter(
-            AgentVersion.tenant_id == tenant_id,
-            AgentVersion.status == "PUBLISHED",
-            AgentVersion.id != agent_version.id,
-        ).all()
+        candidate_query = (
+            select(AgentVersion)
+            .join(Agent, Agent.id == AgentVersion.agent_id)
+            .where(
+                AgentVersion.tenant_id == tenant_id,
+                AgentVersion.status == "PUBLISHED",
+                Agent.current_published_version_id == AgentVersion.id,
+                Agent.status == "ACTIVE",
+                Agent.id != system_agent.id,
+            )
+        )
+        # 用户可见性与任务/会话入口保持一致：本人、官方、管理员创建。
+        # 无用户上下文的内核调用仅允许发现官方 Agent，默认拒绝暴露用户私有资源。
+        if user_id is not None:
+            candidate_query = candidate_query.where(visible_owner_clause(Agent, tenant_id, user_id))
+        else:
+            candidate_query = candidate_query.where(Agent.source_type == "OFFICIAL")
+        candidates = db.scalars(candidate_query.order_by(Agent.name, Agent.id).limit(15)).all()
+        route_options: list[dict[str, str]] = []
+        candidate_ids: list[UUID] = []
         for target in candidates:
             target_agent = db.get(Agent, target.agent_id)
-            if target_agent is None or target_agent.status != "ACTIVE":
+            if target_agent is None:
                 continue
-            alias = f"call_agent_{hashlib.md5(str(target.id).encode('utf-8')).hexdigest()[:12]}"
-            if alias in mappings:
-                continue
-            schema = {"type": "object", "properties": {"task": {"type": "string", "description": f"交给「{target_agent.name}」完整处理的任务描述，需包含该智能体所需的全部上下文"}}, "required": ["task"]}
-            mappings[alias] = ToolMapping(alias, target.id, None, schema, dispatch_agent_version_id=target.id)
-            desc = f"调用智能体「{target_agent.name}」处理任务：{(target_agent.description or '').strip()}".rstrip("：")[:512]
-            tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
+            # 路由描述除 Agent 自身介绍外，补充其当前版本绑定且当前用户可见的 Skill 能力。
+            capability_labels: list[str] = []
+            capability_links = db.query(AgentVersionSkill).filter(
+                AgentVersionSkill.tenant_id == tenant_id,
+                AgentVersionSkill.agent_version_id == target.id,
+            ).all()
+            for capability_link in capability_links:
+                capability_version = db.get(SkillVersion, capability_link.skill_version_id)
+                capability_skill = db.get(Skill, capability_version.skill_id) if capability_version else None
+                if (
+                    capability_version is None
+                    or capability_version.status != "PUBLISHED"
+                    or capability_skill is None
+                    or capability_skill.status != "ACTIVE"
+                    or (visible_skill_ids is not None and capability_skill.id not in visible_skill_ids)
+                    or (user_id is None and capability_skill.official is not True)
+                ):
+                    continue
+                label = capability_skill.name
+                if capability_skill.description:
+                    label += f"：{capability_skill.description.strip()[:100]}"
+                if label not in capability_labels:
+                    capability_labels.append(label)
+            capability_text = "；".join(capability_labels[:8])
+            candidate_ids.append(target.id)
+            route_options.append({
+                "id": str(target.id),
+                "name": target_agent.name[:80],
+                "description": (target_agent.description or "").strip()[:80],
+                "skills": capability_text[:120],
+            })
+        # 不把 N 个 Agent 暴露成 N 个独立执行工具。模型只看到一个结构化路由入口，
+        # 并且 agent_version_id 使用服务端候选 ID 枚举约束，执行侧还会再次校验成员资格。
+        if route_options:
+            route_description = "从下列当前用户可访问的专业 Agent 中选择最匹配的一位。"
+            route_description += "候选能力：" + json.dumps(route_options, ensure_ascii=False)[:7000]
+            schema = {
+                "type": "object",
+                "properties": {
+                    "agent_version_id": {
+                        "type": "string",
+                        "enum": [item["id"] for item in route_options],
+                        "description": "必须选择候选列表中的一个 AgentVersion ID",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "交给所选 Agent 的完整任务，包含目标、约束、必要上下文和期望输出",
+                    },
+                },
+                "required": ["agent_version_id", "task"],
+                "additionalProperties": False,
+            }
+            alias = "route_specialist"
+            suffix = 2
+            while alias in mappings:
+                alias = f"route_specialist_{suffix}"
+                suffix += 1
+            mappings[alias] = ToolMapping(
+                alias,
+                None,
+                None,
+                schema,
+                dispatch_candidate_ids=tuple(candidate_ids),
+            )
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": alias,
+                    "description": route_description[:8000],
+                    "parameters": schema,
+                },
+            })
     # §2.4 稳定前缀：工具目录按 name 排序，保证同一会话内 prompt 只追加不改写。
     tools.sort(key=lambda item: item["function"]["name"])
     return mappings, tools

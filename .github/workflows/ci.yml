@@ -259,3 +259,39 @@ jobs:
       # case runs instead) and the PG clean-database migration check (no PG here).
       - name: pytest tests (full suite)
         run: python -m pytest tests -q -rs -p no:cacheprovider
+
+  desktop-build-windows:
+    name: desktop EXE (windows + sqlite)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: Build Console assets
+        working-directory: console
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Install project and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pyinstaller==6.11.1
+      - name: Build onedir EXE
+        run: python -m PyInstaller --noconfirm --clean desktop/ZTorque.spec
+      - name: Smoke test packaged EXE
+        run: dist\ZTorque\ZTorque.exe --self-check
+      - name: Upload Windows desktop package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZTorque-Windows-x64
+          path: dist/ZTorque/
+          if-no-files-found: error

@@ -14,7 +14,9 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, select, text
 
+from app.builtin_plugins.knowledge.plugin import SqliteKnowledgeProvider
 from app.db.session import SessionLocal
+from app.kernel.ports.knowledge_provider import ParsedBlock, ParsedFile
 from app.main import app
 from app.models import (
     Agent,
@@ -30,6 +32,7 @@ from app.models import (
 )
 from app.security.passwords import hash_password
 from app.services.knowledge_service import _DEGRADED_AUDITED
+from tests.support.db_cleanup import cleanup_session
 
 _GOLDEN = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "knowledge_golden.json").read_text(encoding="utf-8"))
 
@@ -37,7 +40,7 @@ _GOLDEN = json.loads((Path(__file__).resolve().parents[1] / "fixtures" / "knowle
 @pytest.fixture(autouse=True)
 def cleanup():
     yield
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         # FTS 表由应用侧双写（无 SQL 触发器），测试清理需显式清空，避免跨用例污染
         db.execute(text("DELETE FROM zr_knowledge_fts"))
         for model in (Message, KnowledgeChunk, KnowledgeDoc, File, AuditLog, AuthSession, Conversation, Agent, User, Tenant):
@@ -132,6 +135,74 @@ async def test_golden_set_pdf_upload_search_returns_chunk_with_page_coordinate()
         row = db.get(KnowledgeChunk, UUID(hit["chunk_id"]))
         assert row is not None and row.page_no == 1
         assert db.scalar(select(KnowledgeDoc).where(KnowledgeDoc.file_id == file_id)) is not None
+
+
+def test_chinese_full_sentence_query_falls_back_to_topic_ngrams(tmp_path):
+    tenant_id, _ = _bootstrap()
+    provider = SqliteKnowledgeProvider()
+    owner_path = str((tmp_path / "sales-report.md").resolve())
+    with SessionLocal.begin() as db:
+        provider.index_file(
+            db,
+            tenant_id=tenant_id,
+            file_id=uuid4(),
+            path=owner_path,
+            sha256="c" * 64,
+            parsed=ParsedFile(
+                "2025年销售额趋势：全年销售额持续增长。",
+                (ParsedBlock("2025年销售额趋势：全年销售额持续增长。", line_start=1, line_end=1),),
+                False,
+            ),
+            size_bytes=64,
+        )
+        results = provider.search_db(
+            db,
+            tenant_id=tenant_id,
+            query="帮我分析一下2025年销售额趋势",
+            top_k=3,
+            filters={"allowed_paths": [owner_path]},
+        )
+
+    assert results
+    assert any("销售额趋势" in item.content for item in results)
+
+
+def test_document_search_applies_owner_scope_before_top_k(tmp_path):
+    """无权文件不能先占满 top_k；授权文件仍应被检索到。"""
+    tenant_id, _ = _bootstrap()
+
+    provider = SqliteKnowledgeProvider()
+    private_path = str((tmp_path / "private.md").resolve())
+    owner_path = str((tmp_path / "owner.md").resolve())
+    with SessionLocal.begin() as db:
+        provider.index_file(
+            db,
+            tenant_id=tenant_id,
+            file_id=uuid4(),
+            path=private_path,
+            sha256="a" * 64,
+            parsed=ParsedFile("scopeprobe scopeprobe scopeprobe", (ParsedBlock("scopeprobe scopeprobe scopeprobe"),), False),
+            size_bytes=32,
+        )
+        provider.index_file(
+            db,
+            tenant_id=tenant_id,
+            file_id=uuid4(),
+            path=owner_path,
+            sha256="b" * 64,
+            parsed=ParsedFile("scopeprobe", (ParsedBlock("scopeprobe"),), False),
+            size_bytes=10,
+        )
+        results = provider.search_db(
+            db,
+            tenant_id=tenant_id,
+            query="scopeprobe",
+            top_k=1,
+            filters={"allowed_paths": [owner_path]},
+        )
+
+    assert results
+    assert results[0].source == owner_path
 
 
 @pytest.mark.asyncio

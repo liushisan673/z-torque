@@ -20,6 +20,7 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 
 
 def _ctx(tenant_id, user_id):
@@ -29,7 +30,7 @@ def _ctx(tenant_id, user_id):
 @pytest.fixture(autouse=True)
 def cleanup():
     yield
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         for model in (Message, Conversation, TaskEvent, Outbox, Task, AgentVersion, Agent, AuthSession, User, Tenant):
             db.execute(delete(model))
 

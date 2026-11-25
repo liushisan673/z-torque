@@ -22,15 +22,14 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
-from tests.support.ddl import fk_off, fk_on
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture(autouse=True)
 def baseline():
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         # 别的用例会留下审计行，其 actor_user_id 仍指向这里的 User；
         # 清理前统一关外键，避免 PG 上因残留引用报 23503
-        fk_off(db)
         # 子表→父表顺序：Message.task_id 为 RESTRICT，必须先于 Task 删除
         db.execute(delete(Message))
         db.execute(delete(Conversation))
@@ -42,7 +41,6 @@ def baseline():
         db.execute(delete(User))
         db.execute(delete(Role))
         db.execute(delete(Tenant))
-        fk_on(db)
 
         tenant = Tenant(name=f"stage11-{uuid4()}")
         db.add(tenant)
@@ -113,7 +111,7 @@ def baseline():
 
     yield data
 
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         db.execute(delete(TaskEvent))
         db.execute(delete(Task))
         db.execute(delete(Message))

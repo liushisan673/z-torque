@@ -180,28 +180,66 @@ class DbLongTermMemoryStore(LongTermMemoryStore):
         tenant_id: UUID, user_id: UUID, agent_id: UUID | None,
         conversation_id: UUID | None = None,
     ) -> dict[str, str]:
-        rows = db.scalars(
-            select(LongMemory).where(
+        """按作用域限量读取最近记忆，并限制总注入字符数。
+
+        不再 SELECT 用户全部 5,000 条记忆后在 Python 过滤；
+        每个作用域单独走索引查询，避免单机端在构造 prompt 时产生大对象。
+        conversation_id 缺失时严格不返回任何会话级记忆，防止跨会话上下文混入。
+        """
+        settings = get_settings()
+        per_scope_limit = settings.memory_long_context_max_items_per_scope
+        remaining_chars = settings.memory_long_context_max_chars
+        base = (
+            select(LongMemory)
+            .where(
                 LongMemory.tenant_id == tenant_id,
                 LongMemory.user_id == user_id,
                 LongMemory.status == "ACTIVE",
             )
-        ).all()
+            .order_by(LongMemory.updated_at.desc(), LongMemory.created_at.desc())
+        )
+        scoped_queries = [
+            (
+                LongTermMemoryStore.SCOPE_AGENT,
+                base.where(
+                    LongMemory.scope == LongTermMemoryStore.SCOPE_AGENT,
+                    LongMemory.agent_id == agent_id,
+                ) if agent_id is not None else None,
+            ),
+            (
+                LongTermMemoryStore.SCOPE_USER,
+                base.where(
+                    LongMemory.scope == LongTermMemoryStore.SCOPE_USER,
+                    LongMemory.agent_id.is_(None),
+                ),
+            ),
+            (
+                LongTermMemoryStore.SCOPE_CONVERSATION,
+                base.where(
+                    LongMemory.scope == LongTermMemoryStore.SCOPE_CONVERSATION,
+                    LongMemory.key.like(f"conversation:{conversation_id}:%"),
+                    or_(LongMemory.agent_id.is_(None), LongMemory.agent_id == agent_id) if agent_id is not None else LongMemory.agent_id.is_(None),
+                ) if conversation_id is not None else None,
+            ),
+        ]
         bundle: dict[str, str] = {}
-        for row in rows:
-            if row.scope == LongTermMemoryStore.SCOPE_USER:
-                if row.agent_id is not None:
+        for _scope, query in scoped_queries:
+            if query is None or remaining_chars <= 0:
+                continue
+            rows = db.scalars(query.limit(per_scope_limit)).all()
+            for row in rows:
+                if remaining_chars <= 0:
+                    break
+                value = row.value or ""
+                if not value:
                     continue
-            elif row.scope == LongTermMemoryStore.SCOPE_AGENT:
-                if row.agent_id != agent_id:
-                    continue
-            else:
-                # CONVERSATION：边界是 key 里的 conversation_id，agent_id 可为空
-                if row.agent_id is not None and row.agent_id != agent_id:
-                    continue
-                if conversation_id is not None and not row.key.startswith(f"conversation:{conversation_id}:"):
-                    continue
-            bundle[f"{row.scope}:{row.key}"] = row.value
+                key = f"{row.scope}:{row.key}"
+                if len(value) > remaining_chars:
+                    bundle[key] = value[:max(0, remaining_chars - 1)] + "…"
+                    remaining_chars = 0
+                    break
+                bundle[key] = value
+                remaining_chars -= len(value)
         return bundle
 
     def forget_scoped(

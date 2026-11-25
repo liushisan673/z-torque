@@ -137,3 +137,29 @@ async def test_streamable_http_rejects_host_not_in_whitelist():
     with pytest.raises(McpTransportError, match="whitelist"):
         await connector.negotiate()
     await connector.close()
+
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_caps_response_while_streaming():
+    class LargeTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            payload = json.loads(request.content)
+            if payload["method"] == "notifications/initialized":
+                return httpx.Response(202, request=request)
+            if payload["method"] == "initialize":
+                body = {"jsonrpc": "2.0", "id": payload["id"], "result": {"protocolVersion": "2025-06-18"}}
+            else:
+                body = {"jsonrpc": "2.0", "id": payload["id"], "result": {"text": "x" * 4096}}
+            return httpx.Response(200, json=body, request=request)
+
+    connector = StreamableHttpMcpConnector(
+        "https://mcp.example.test",
+        allowed_hosts=["mcp.example.test"],
+        transport=LargeTransport(),
+        max_response_bytes=256,
+    )
+    await connector.negotiate()
+    with pytest.raises(McpTransportError, match="exceeds configured limit"):
+        await connector.call_tool("large", {})
+    await connector.close()

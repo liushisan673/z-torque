@@ -27,7 +27,7 @@ async def test_gateway_retries_transient_failure_with_bound():
     executor = FlakyExecutor()
     result = await gateway._execute_with_retry(
         executor,
-        {},
+        {"idempotent": True},
         {},
         timeout_seconds=1,
         max_retries=2,

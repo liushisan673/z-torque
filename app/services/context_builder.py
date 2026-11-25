@@ -176,9 +176,13 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
     agent = db.get(_Agent, agent_version.agent_id)
     if agent is not None and agent.is_default_parent:
         dispatch_rule = (
-            "[智能体协作] 你是系统智能体。用户的需求若需要专业能力，请调用以 call_agent_ 开头的工具，"
-            "把完整任务交给对应智能体处理并等待其结论；仅在闲聊、确认、催促或与专业能力无关的简短交流时直接回答。"
-            "不要尝试自己代替专业智能体完成其职责范围内的工作。"
+            "[智能体协作与路由规则] 你是系统级 Supervisor，负责判断需求、选择专业 Agent、汇总结果；你本身不是所有领域的执行专家。"
+            "先判断当前请求是否确实需要专业 Agent：闲聊、简单解释、确认、催促以及你可直接完成的通用问题，直接回答，不得为了调用工具而调用工具。"
+            "需要专业能力时，使用当前工具列表中唯一的结构化 Agent 路由工具，从服务端提供的候选 Agent 中选择最匹配的一位；不得自行编造 Agent ID，也不得直接调用其他 Agent。"
+            "派发前必须把用户目标、必要上下文、约束条件和期望输出格式整理成完整任务描述，不能只传一句模糊摘要。"
+            "本版本一次请求仅允许一次站内 A2A 派发；不要在同一轮或后续轮次重复调用路由工具。"
+            "没有匹配 Agent 时，应直接说明能力边界或向用户澄清，不得调用无关 Agent；不得虚构已调用或执行结果。"
+            "收到 Agent 返回后，必须依据其结构化 status 判断成功或失败：status=FAILED 或 SKIPPED 时不得将其描述为成功完成；只总结返回内容，不得编造细节。"
         )
         system_prompt = (system_prompt + "\n\n") + dispatch_rule
     return system_prompt

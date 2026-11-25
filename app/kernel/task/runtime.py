@@ -691,21 +691,77 @@ class TaskRuntime:
             pending = db.query(Task).filter(Task.status.in_([TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.WAITING_HUMAN, TaskStatus.CANCELING])).all()
             for task in pending:
                 if task.status == TaskStatus.RUNNING:
-                    transition_task(
-                        db,
-                        task,
-                        TaskStatus.QUEUED,
-                        "TASK_RECOVERED",
-                        sanitize_summary("task re-queued after process restart"),
+                    # 模型推理阶段没有外部副作用，可以安全重新入队；
+                    # 一旦进入工具/A2A 执行阶段，崩溃可能发生在远端副作用完成后、
+                    # 本地结果提交前。此时自动重放可能重复发消息、写数据或触发业务动作。
+                    latest_started_seq = db.scalar(
+                        select(TaskEvent.seq)
+                        .where(TaskEvent.task_id == task.id, TaskEvent.event_type == "TASK_STARTED")
+                        .order_by(TaskEvent.seq.desc())
+                        .limit(1)
+                    ) or 0
+                    tool_started = db.scalar(
+                        select(TaskEvent.id)
+                        .where(
+                            TaskEvent.task_id == task.id,
+                            TaskEvent.event_type == "TASK_TOOL_CALL",
+                            TaskEvent.seq > latest_started_seq,
+                        )
+                        .limit(1)
                     )
-                    db.add(Outbox(
-                        id=new_uuid7(),
-                        tenant_id=task.tenant_id,
-                        aggregate_type="TASK",
-                        aggregate_id=task.id,
-                        event_type="TASK_READY",
-                        payload={"task_id": str(task.id), "recovered": True},
-                    ))
+                    has_checkpoint = db.scalar(
+                        select(TaskCheckpoint.id).where(TaskCheckpoint.task_id == task.id).limit(1)
+                    )
+                    has_execution_log = db.scalar(
+                        select(SkillExecutionLog.id)
+                        .where(
+                            SkillExecutionLog.task_id == task.id,
+                            SkillExecutionLog.created_at >= task.started_at,
+                        )
+                        .limit(1)
+                    ) if task.started_at is not None else None
+                    if tool_started is not None or has_checkpoint is not None or has_execution_log is not None:
+                        recovery_message = (
+                            "进程在工具执行阶段中断。为避免重复执行外部副作用，系统未自动重放；"
+                            "请先检查外部系统的实际状态，再决定是否重新发起任务。"
+                        )
+                        task.error_code = "AI_TASK_RECOVERY_UNCERTAIN"
+                        task.error_message = recovery_message
+                        transition_task(
+                            db,
+                            task,
+                            TaskStatus.FAILED,
+                            "TASK_RECOVERY_UNCERTAIN",
+                            sanitize_summary(recovery_message),
+                            expected_epoch=task.attempt_epoch,
+                        )
+                        record_audit(
+                            db,
+                            tenant_id=task.tenant_id,
+                            actor_user_id=task.owner_user_id,
+                            action="TASK_RECOVERY_UNCERTAIN",
+                            resource_type="TASK",
+                            resource_id=task.id,
+                            summary="task was not replayed because tool side effects may be uncertain",
+                            detail={"error_code": "AI_TASK_RECOVERY_UNCERTAIN"},
+                            trace_id=str(task.id),
+                        )
+                    else:
+                        transition_task(
+                            db,
+                            task,
+                            TaskStatus.QUEUED,
+                            "TASK_RECOVERED",
+                            sanitize_summary("task re-queued after process restart"),
+                        )
+                        db.add(Outbox(
+                            id=new_uuid7(),
+                            tenant_id=task.tenant_id,
+                            aggregate_type="TASK",
+                            aggregate_id=task.id,
+                            event_type="TASK_READY",
+                            payload={"task_id": str(task.id), "recovered": True},
+                        ))
                 elif task.status in (TaskStatus.PENDING, TaskStatus.QUEUED):
                     # 进程内队列随进程重启清空，已 SENT 的 Outbox 不会重投；
                     # 必须补一条待派发记录，否则任务永久停留 PENDING/QUEUED（不变量 2）。

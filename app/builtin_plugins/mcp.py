@@ -8,6 +8,8 @@ app/kernel/mcp_connectors.py（Stdio 三件套）整体迁移，逻辑保持不�
 import asyncio
 import json
 import os
+import signal
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -107,25 +109,32 @@ class StreamableHttpMcpConnector:
         if include_session and self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         try:
-            response = await self.client.post(self.endpoint, headers=headers, json=payload)
-            if response.status_code >= 400:
-                raise McpTransportError(f"MCP HTTP status {response.status_code}")
-            session_id = response.headers.get("Mcp-Session-Id")
-            if session_id:
-                self.session_id = session_id
-            if not expect_response:
-                return {}
-            if len(response.content) > self.max_response_bytes:
-                raise McpTransportError("MCP response exceeds configured limit")
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-            if content_type == "application/json":
-                return response.json()
-            if content_type == "text/event-stream":
-                return self._parse_sse(response.text)
-            raise McpTransportError("unsupported MCP response content type")
+            # client.post() 会先把完整响应读入内存，再检查长度；流式读取才能真正限制峰值内存。
+            async with self.client.stream("POST", self.endpoint, headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    raise McpTransportError(f"MCP HTTP status {response.status_code}")
+                session_id = response.headers.get("Mcp-Session-Id")
+                if session_id:
+                    self.session_id = session_id
+                if not expect_response:
+                    return {}
+                content_length = response.headers.get("content-length", "")
+                if content_length.isdigit() and int(content_length) > self.max_response_bytes:
+                    raise McpTransportError("MCP response exceeds configured limit")
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    if len(body) + len(chunk) > self.max_response_bytes:
+                        raise McpTransportError("MCP response exceeds configured limit")
+                    body.extend(chunk)
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                if content_type == "application/json":
+                    return json.loads(body)
+                if content_type == "text/event-stream":
+                    return self._parse_sse(body.decode("utf-8"))
+                raise McpTransportError("unsupported MCP response content type")
         except asyncio.CancelledError:
             raise
-        except (httpx.TimeoutException, httpx.HTTPError, json.JSONDecodeError) as exc:
+        except (httpx.TimeoutException, httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise McpTransportError(str(exc)) from exc
 
     @staticmethod
@@ -206,6 +215,9 @@ class StdioMcpConnector:
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
+        if self.max_output_bytes < 1:
+            raise ValueError("MCP stdio max_output_bytes must be positive")
+        self._request_lock = asyncio.Lock()
         self.process: asyncio.subprocess.Process | None = None
         self._request_id = 0
 
@@ -213,7 +225,17 @@ class StdioMcpConnector:
         # 两次 stat 属启动期一次性校验（微秒级）；改 to_thread 只是把同步调用搬到线程池，收益为零
         if not os.path.isabs(self.executable) or not os.path.isfile(self.executable):  # noqa: ASYNC240
             raise McpTransportError("MCP stdio executable is not registered")
-        self.process = await asyncio.create_subprocess_exec(self.executable, *self.arguments, cwd=self.cwd, env=self.allowed_environment, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        spawn_options: dict[str, Any] = {}
+        if os.name == "nt":
+            spawn_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            spawn_options["start_new_session"] = True
+        self.process = await asyncio.create_subprocess_exec(
+            self.executable, *self.arguments, cwd=self.cwd, env=self.allowed_environment,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, limit=self.max_output_bytes + 1,
+            **spawn_options,
+        )
         stderr_task = asyncio.create_task(self._drain_stderr())
         self._stderr_task = stderr_task
         try:
@@ -229,23 +251,59 @@ class StdioMcpConnector:
         return await self._request("tools/call", {"name": name, "arguments": arguments})
 
     async def close(self) -> None:
-        if self.process is None:
+        process = self.process
+        if process is None:
             return
-        if self.process.stdin:
-            self.process.stdin.close()
+        if process.stdin:
+            process.stdin.close()
+        # 先给 MCP server 一个短暂的优雅退出窗口；无论父进程是否先退出，
+        # 随后都清理本次启动的进程组/进程树，避免它派生的子进程成为孤儿。
         try:
-            await asyncio.wait_for(self.process.wait(), timeout=self.timeout_seconds)
+            await asyncio.wait_for(process.wait(), timeout=min(self.timeout_seconds, 2.0))
         except asyncio.TimeoutError:
-            self.process.terminate()
+            pass
+        if os.name == "nt":
+            taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
             try:
-                await asyncio.wait_for(self.process.wait(), timeout=self.timeout_seconds)
+                killer = await asyncio.create_subprocess_exec(
+                    str(taskkill) if taskkill.is_file() else "taskkill",
+                    "/PID", str(process.pid), "/T", "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(killer.wait(), timeout=5.0)
+            except (OSError, asyncio.TimeoutError):
+                if process.returncode is None:
+                    process.kill()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), timeout=0.5)
             except asyncio.TimeoutError:
-                self.process.kill()
-                await self.process.wait()
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
         stderr_task = getattr(self, "_stderr_task", None)
         if stderr_task:
-            stderr_task.cancel()
+            if not stderr_task.done():
+                stderr_task.cancel()
             await asyncio.gather(stderr_task, return_exceptions=True)
+        # Process.wait() 只确认子进程退出，不会自动关闭尚未读完的 stdout/stderr pipe。
+        # 显式关闭 BaseSubprocessTransport，避免事件循环关闭后其 __del__ 再调度 pipe callback。
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            transport.close()
         self.process = None
 
     async def _request(self, method: str, params: dict) -> dict:
@@ -253,32 +311,37 @@ class StdioMcpConnector:
         return await self._send({"jsonrpc": "2.0", "id": self._request_id, "method": method, "params": params}, expect_response=True, expected_id=self._request_id)
 
     async def _send(self, payload: dict, *, expect_response: bool, expected_id: int | None = None) -> dict:
-        if not self.process or not self.process.stdin or not self.process.stdout:
-            raise McpTransportError("MCP stdio process is unavailable")
-        self.process.stdin.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
-        await self.process.stdin.drain()
-        if not expect_response:
-            return {}
-        try:
-            line = await asyncio.wait_for(self.process.stdout.readline(), timeout=self.timeout_seconds)
-        except asyncio.TimeoutError as exc:
-            raise McpTransportError("MCP stdio request timed out") from exc
-        if len(line) > self.max_output_bytes:
-            raise McpTransportError("MCP stdio response exceeds configured limit")
-        if not line:
-            raise McpTransportError("MCP stdio process exited")
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise McpProtocolError("invalid MCP stdio JSON-RPC message") from exc
-        if message.get("id") != expected_id:
-            raise McpProtocolError("MCP stdio response id mismatch")
-        if "error" in message:
-            raise McpProtocolError(str(message["error"]))
-        return message.get("result", {})
+        # stdio 是按行请求/响应协议；同一连接器并发读写会串错 response id，必须串行化。
+        async with self._request_lock:
+            if not self.process or not self.process.stdin or not self.process.stdout:
+                raise McpTransportError("MCP stdio process is unavailable")
+            self.process.stdin.write((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+            await self.process.stdin.drain()
+            if not expect_response:
+                return {}
+            try:
+                line = await asyncio.wait_for(self.process.stdout.readline(), timeout=self.timeout_seconds)
+            except asyncio.TimeoutError as exc:
+                raise McpTransportError("MCP stdio request timed out") from exc
+            except ValueError as exc:
+                # StreamReader 的行长度上限在子进程创建时设为 max_output_bytes + 1。
+                raise McpTransportError("MCP stdio response exceeds configured limit") from exc
+            if len(line) > self.max_output_bytes:
+                raise McpTransportError("MCP stdio response exceeds configured limit")
+            if not line:
+                raise McpTransportError("MCP stdio process exited")
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise McpProtocolError("invalid MCP stdio JSON-RPC message") from exc
+            if message.get("id") != expected_id:
+                raise McpProtocolError("MCP stdio response id mismatch")
+            if "error" in message:
+                raise McpProtocolError(str(message["error"]))
+            return message.get("result", {})
 
     async def _drain_stderr(self) -> None:
         if not self.process or not self.process.stderr:
             return
-        while await self.process.stderr.readline():
+        while await self.process.stderr.read(64 * 1024):
             pass

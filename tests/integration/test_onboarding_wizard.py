@@ -30,11 +30,12 @@ from app.models import (
     user_role,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture(autouse=True)
 def _clean():
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         db.execute(delete(Message))
         db.execute(delete(Conversation))
         db.execute(delete(AgentVersion))

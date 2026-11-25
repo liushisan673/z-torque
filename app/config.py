@@ -115,6 +115,9 @@ class Settings(BaseSettings):
     # §2.2 写入约束：单条 value 硬上限 + 淘汰上限（防止长期记忆只增不减）
     memory_long_max_value_chars: int = 20000
     memory_long_max_records: int = 5000
+    # 长期记忆注入上下文的预算；避免 recall_bundle 一次加载全部记录撑大 prompt。
+    memory_long_context_max_items_per_scope: int = 10
+    memory_long_context_max_chars: int = 6000
     file_max_extracted_text: int = 200000
     file_parse_timeout: float = 30.0
     # §2.1 本地知识库：chunk 上限 + 总入库字节上限（超限标 truncated 并审计，不静默）
@@ -335,6 +338,8 @@ class Settings(BaseSettings):
             jwt_secret = _plain_secret(self.jwt_secret_key)
             if len(jwt_secret) < _MIN_JWT_SECRET_LENGTH or len(set(jwt_secret)) < 8:
                 raise ValueError('JWT_SECRET_KEY must be at least 32 high-entropy characters in production')
+        if self.memory_long_context_max_items_per_scope < 1 or self.memory_long_context_max_chars < 1:
+            raise ValueError('memory long context limits must be positive')
         if self.md_skill_scan_interval < 1 or self.md_skill_script_timeout <= 0 or self.md_skill_script_max_output <= 0:
             raise ValueError('MD-Skill limits must be positive')
         if self.md_skill_zip_max_entries < 1 or self.md_skill_zip_max_total_mb < 1:

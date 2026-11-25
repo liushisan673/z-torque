@@ -24,15 +24,15 @@ from app.models import (
 )
 from app.security.passwords import hash_password
 from app.services.chat_application import ensure_conversation_title
+from tests.support.db_cleanup import cleanup_session
 from tests.support.fakes import handle_mock_chat
 
 
 @pytest.fixture(autouse=True)
 def cleanup():
-    """本文件历史上无清理夹具，向后续测试文件泄漏 Task/Message/User 残留
-    （阻塞其他文件的 DELETE FROM zr_user / zr_task）。按子表→父表顺序清理。"""
+    """清理测试数据；仅在清理连接上临时关闭 FK 检查。"""
     yield
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         for model in (
             Message,
             Conversation,
@@ -144,7 +144,8 @@ def test_child_agent_delegation_uses_mapping_builder(monkeypatch):
         child_agent_version_id=child_version.id, task_text="do it",
         delegation_depth=0, cancellation_event=None, deadline_at=None,
     ))
-    assert out == "child ok"
+    assert out["status"] == "SUCCEEDED"
+    assert out["content"] == "child ok"
     assert calls["version"] is child_version
     assert calls["exclude_requires_confirmation"] is True
 
@@ -199,7 +200,8 @@ def test_child_delegation_request_carries_snapshot_model_params(monkeypatch):
         child_agent_version_id=child_version.id, task_text="do it",
         delegation_depth=0, cancellation_event=None, deadline_at=None,
     ))
-    assert out == "child ok"
+    assert out["status"] == "SUCCEEDED"
+    assert out["content"] == "child ok"
     request = captured["request"]
     assert request.model == "global-model"  # 无绑定 → 全局默认
     assert request.temperature == 0.2  # 快照键优先

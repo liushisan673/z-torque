@@ -1,5 +1,6 @@
 import asyncio
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -94,3 +95,116 @@ async def test_stdio_fake_server_cancellation_cleans_process(tmp_path):
     assert connector.process is None
 
 
+
+
+
+@pytest.mark.asyncio
+async def test_stdio_response_line_is_bounded(tmp_path):
+    script = tmp_path / "large_response.py"
+    script.write_text(
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    result = {'protocolVersion': '2025-06-18'} if request.get('method') == 'initialize' else {'text': 'x' * 4096}\n"
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': request.get('id'), 'result': result}), flush=True)\n",
+        encoding="utf-8",
+    )
+    connector = StdioMcpConnector(
+        sys.executable,
+        [str(script)],
+        allowed_environment={},
+        cwd=str(tmp_path),
+        timeout_seconds=1,
+        max_output_bytes=256,
+    )
+    await connector.negotiate()
+    with pytest.raises(McpTransportError, match="exceeds configured limit"):
+        await connector.call_tool("large", {})
+    await connector.close()
+    assert connector.process is None
+
+
+@pytest.mark.asyncio
+async def test_stdio_concurrent_calls_are_serialized_and_correlated(tmp_path):
+    script = tmp_path / "echo_args.py"
+    script.write_text(
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    if request.get('method') == 'notifications/initialized': continue\n"
+        "    result = {'protocolVersion': '2025-06-18'} if request.get('method') == 'initialize' else {'value': request['params']['arguments']['value']}\n"
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': request.get('id'), 'result': result}), flush=True)\n",
+        encoding="utf-8",
+    )
+    connector = StdioMcpConnector(
+        sys.executable,
+        [str(script)],
+        allowed_environment={},
+        cwd=str(tmp_path),
+        timeout_seconds=1,
+    )
+    await connector.negotiate()
+    first, second = await asyncio.gather(
+        connector.call_tool("echo", {"value": "first"}),
+        connector.call_tool("echo", {"value": "second"}),
+    )
+    assert first["value"] == "first"
+    assert second["value"] == "second"
+    await connector.close()
+
+
+
+@pytest.mark.asyncio
+async def test_stdio_timeout_cleans_descendant_process(tmp_path):
+    import os
+    import subprocess
+
+    pid_file = tmp_path / "child.pid"
+    script = tmp_path / "spawn_child.py"
+    script.write_text(
+        "import json, subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w', encoding='utf-8').write(str(child.pid))\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    connector = StdioMcpConnector(
+        sys.executable,
+        [str(script)],
+        allowed_environment={},
+        cwd=str(tmp_path),
+        timeout_seconds=0.2,
+    )
+    with pytest.raises(McpTransportError, match="timed out"):
+        await connector.negotiate()
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
+
+    def child_is_alive():
+        if os.name == "nt":
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {child_pid}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            return str(child_pid) in result.stdout
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            return False
+        stat = Path(f"/proc/{child_pid}/stat")
+        if stat.exists():
+            try:
+                return stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0] != "Z"
+            except (OSError, IndexError):
+                pass
+        return True
+
+    for _ in range(30):
+        if not child_is_alive():
+            break
+        await asyncio.sleep(0.1)
+    assert not child_is_alive(), "closing a stdio MCP session must not leave its child process running"

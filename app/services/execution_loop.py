@@ -1,10 +1,11 @@
 import asyncio
+import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from app.core.errors import ApiError
 from app.kernel.audit.service import record_audit
@@ -24,7 +25,8 @@ from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import append_task_event
-from app.models import Task, TaskCheckpoint
+from app.models import Agent, AgentVersion, Message, Task, TaskCheckpoint
+from app.repositories import visible_owner_clause
 from app.services.context_governance import heal_context, sanitize_untrusted
 from app.services.function_calling import ToolMapping, repair_tool_message, validate_tool_calls
 from app.services.model_limits import effective_max_tokens
@@ -35,6 +37,8 @@ from app.services.tool_mapping_builder import build_tool_mappings
 MAX_ROUNDS = 30
 MAX_TOOL_CALLS_PER_ROUND = 8
 MAX_TOOL_RESULT_CHARS = 20_000
+# 站内 A2A 简单请求默认只派发一个专业 Agent；避免模型同轮/跨轮重复调度。
+MAX_A2A_DISPATCHES_PER_RUN = 1
 
 
 def _serialize_message(m: ModelMessage) -> dict:
@@ -162,6 +166,7 @@ class AgentExecutionLoop:
         task = db.get(Task, task_id) if task_id else None
         repair_used = False
         repaired_ids: set[str] = set()
+        a2a_dispatch_count = 0
         seeded: tuple[list[ModelMessage], ModelResponse] | None = None
         if resume is not None:
             # 审批恢复续跑：从挂起时的上下文快照重建消息，回填已重放的工具结果后继续循环
@@ -225,22 +230,64 @@ class AgentExecutionLoop:
                 if mapping is None:
                     raise ApiError("AI_TOOL_MAPPING_INVALID", "tool name is not allowed for this agent version", 422)
                 _progress_event(db, task, "TASK_TOOL_CALL", f"calling tool {call.name}", trace_id=request.trace_id, payload={"tool_name": call.name, "arguments": _brief(arguments)})
+                is_site_a2a = mapping.dispatch_agent_version_id is not None or mapping.dispatch_candidate_ids is not None
                 dispatch_target = mapping.child_agent_version_id or mapping.dispatch_agent_version_id
-                if dispatch_target is not None:
-                    # 父子委派与站内 A2A 派发共用同一条子执行链路：
-                    # 目标智能体版本的回答作为 tool 结果回填，审计归属目标智能体。
-                    child_content = await self._run_child_agent(
-                        db,
-                        ctx=ctx,
-                        child_agent_version_id=dispatch_target,
-                        task_text=str(arguments.get("task", "")).strip(),
-                        delegation_depth=delegation_depth,
-                        cancellation_event=cancellation_event,
-                        deadline_at=deadline_at,
-                        task_id=task_id,
-                    )
+                route_error: dict[str, Any] | None = None
+                if mapping.dispatch_candidate_ids is not None:
+                    try:
+                        selected_id = UUID(str(arguments.get("agent_version_id") or ""))
+                    except (ValueError, TypeError, AttributeError):
+                        selected_id = None
+                    if selected_id is None or selected_id not in mapping.dispatch_candidate_ids:
+                        route_error = {
+                            "status": "FAILED",
+                            "error_code": "AI_A2A_ROUTE_FAILED",
+                            "error_message": "router selected an Agent outside the server-provided candidate set",
+                        }
+                    else:
+                        dispatch_target = selected_id
+                if dispatch_target is not None or is_site_a2a:
+                    if route_error is not None:
+                        child_result = route_error
+                    elif is_site_a2a and a2a_dispatch_count >= MAX_A2A_DISPATCHES_PER_RUN:
+                        child_result = {
+                            "status": "SKIPPED",
+                            "agent_version_id": str(dispatch_target),
+                            "error_code": "AI_A2A_ROUTE_FAILED",
+                            "error_message": "本次任务已派发一个专业智能体；为避免重复调度，本次调用未执行。",
+                        }
+                    else:
+                        if is_site_a2a:
+                            a2a_dispatch_count += 1
+                        child_result = await self._run_child_agent(
+                            db,
+                            ctx=ctx,
+                            child_agent_version_id=dispatch_target,
+                            task_text=str(arguments.get("task", "")).strip(),
+                            delegation_depth=delegation_depth,
+                            require_current_version=is_site_a2a,
+                            cancellation_event=cancellation_event,
+                            deadline_at=deadline_at,
+                            task_id=task_id,
+                        )
+                    # 结构化结果保留成功/失败状态，父 Agent 不再把子 Agent 失败伪装成成功文本。
+                    child_content = json.dumps(child_result, ensure_ascii=True, default=str)[:MAX_TOOL_RESULT_CHARS]
                     messages.append(ModelMessage("tool", child_content, tool_call_id=call.id))
-                    _progress_event(db, task, "TASK_TOOL_RESULT", f"tool {call.name} returned", trace_id=request.trace_id, payload={"tool_name": call.name, "status": "SUCCEEDED", "result": _brief(child_content)})
+                    child_status = child_result.get("status", "FAILED")
+                    _progress_event(
+                        db,
+                        task,
+                        "TASK_TOOL_RESULT",
+                        f"tool {call.name} returned ({child_status})",
+                        trace_id=request.trace_id,
+                        payload={
+                            "tool_name": call.name,
+                            "agent_version_id": str(dispatch_target),
+                            "status": child_status,
+                            "error_code": child_result.get("error_code"),
+                            "result": _brief(child_result.get("content") or child_result.get("error_message") or child_content),
+                        },
+                    )
                     continue
                 result: ExecutionResult = await self.skill_gateway.execute_async(
                     db,
@@ -290,36 +337,58 @@ class AgentExecutionLoop:
         child_agent_version_id: UUID,
         task_text: str,
         delegation_depth: int,
+        require_current_version: bool = False,
         cancellation_event: asyncio.Event | None,
         deadline_at: datetime | None,
         task_id: UUID | None = None,
-    ) -> str:
+    ) -> dict[str, Any]:
         """执行子智能体：以子版本 system_prompt + 委派任务构建独立会话，跑一轮完整执行循环。
 
         `task_id` 透传父任务标识：子智能体的工具调用同样计入该任务的
         SkillExecutionLog 与任务事件流，保证「每次执行必须记账」（契约红线1）。
         """
-        import json
-
         from app.config import get_settings
-        from app.models import Agent, AgentVersion
 
         tenant_id = ctx.tenant_id
 
-        def _error(message: str) -> str:
-            return json.dumps({"status": "FAILED", "error": message}, ensure_ascii=True)
+        def _error(message: str, code: str = "AI_A2A_PEER_UNAVAILABLE") -> dict[str, Any]:
+            return {
+                "status": "FAILED",
+                "agent_version_id": str(child_agent_version_id),
+                "error_code": code,
+                "error_message": message,
+            }
 
         settings = get_settings()
         if delegation_depth >= settings.delegation_max_depth:
-            return _error("delegation depth exceeded")
+            return _error("delegation depth exceeded", "AI_A2A_DEPTH_EXCEEDED")
         if not task_text:
-            return _error("delegated task text is empty")
-        child = db.get(AgentVersion, child_agent_version_id)
-        if child is None or child.tenant_id != tenant_id or child.status != "PUBLISHED":
-            return _error("child agent version is not available")
+            return _error("delegated task text is empty", "AI_A2A_ROUTE_FAILED")
+        # 站内 A2A 是新请求的发现路由：执行前再次校验当前发布版和用户可见性。
+        # 显式父子委派则遵守父 AgentVersion 快照白名单，允许执行快照固定的旧发布版本；
+        # 不在这里重复应用目录可见性规则，否则会破坏管理员显式配置的跨属主子 Agent 授权。
+        if require_current_version:
+            child = db.scalar(
+                select(AgentVersion)
+                .join(Agent, Agent.id == AgentVersion.agent_id)
+                .where(
+                    AgentVersion.id == child_agent_version_id,
+                    AgentVersion.tenant_id == tenant_id,
+                    AgentVersion.status == "PUBLISHED",
+                    Agent.current_published_version_id == AgentVersion.id,
+                    Agent.status == "ACTIVE",
+                    visible_owner_clause(Agent, tenant_id, ctx.user_id),
+                )
+            )
+        else:
+            child = db.get(AgentVersion, child_agent_version_id)
+            if child is not None and (child.tenant_id != tenant_id or child.status != "PUBLISHED"):
+                child = None
+        if child is None:
+            return _error("child agent version is not current, published, or visible", "AI_AGENT_NOT_FOUND")
         child_agent = db.get(Agent, child.agent_id)
         if child_agent is None or child_agent.status != "ACTIVE":
-            return _error("child agent is not available")
+            return _error("child agent is not available", "AI_AGENT_NOT_FOUND")
         mappings, tools = build_tool_mappings(db, child, tenant_id, exclude_requires_confirmation=True, user_id=ctx.user_id)
         # 与 chat 主路径一致：注入子智能体绑定 skill 的执行指令
         system_prompt = (child.config_snapshot or {}).get("system_prompt")
@@ -328,7 +397,7 @@ class AgentExecutionLoop:
             seen: set[UUID] = set()
             instructions: list[str] = []
             for m in mappings.values():
-                if m.child_agent_version_id is not None or m.skill_version_id in seen:
+                if m.child_agent_version_id is not None or m.skill_version_id is None or m.skill_version_id in seen:
                     continue
                 seen.add(m.skill_version_id)
                 sv = db.get(_SV, m.skill_version_id)
@@ -358,7 +427,37 @@ class AgentExecutionLoop:
                 lines = [value for key, value in bundle.items() if key.startswith(f"{scope}:") and value]
                 if lines:
                     child_messages.append(ModelMessage("system", f"Delegated memory / {scope_labels[scope]} (untrusted context):\n" + sanitize_untrusted("\n".join(lines))))
-        child_messages.append(ModelMessage("user", task_text))
+        # 最小必要上下文：子 Agent 不直接继承父模型的 system/tool 消息，
+        # 但应能理解当前委派任务依赖的最近对话。只传同一会话内已完成的用户/助手文本，
+        # 排除当前触发消息（它已包含在 task_text 中）、工具调用、系统提示和推理内容。
+        context_lines: list[str] = []
+        if conversation_id is not None and hasattr(db, "scalars"):
+            history_query = (
+                select(Message)
+                .where(
+                    Message.tenant_id == tenant_id,
+                    Message.conversation_id == conversation_id,
+                    Message.sender_type.in_(("USER", "EXTERNAL", "ASSISTANT")),
+                    Message.status == "COMPLETED",
+                )
+                .order_by(Message.created_at.desc())
+                .limit(6)
+            )
+            trigger_message_id = getattr(parent_task, "trigger_message_id", None)
+            if trigger_message_id is not None:
+                history_query = history_query.where(Message.id != trigger_message_id)
+            history_result = db.scalars(history_query)
+            history = list(history_result.all()) if history_result is not None else []
+            for history_message in reversed(history):
+                text = (history_message.content or "").strip()
+                if not text:
+                    continue
+                role = "用户" if history_message.sender_type in ("USER", "EXTERNAL") else "助手"
+                context_lines.append(f"{role}：{text[:2000]}")
+        delegated_content = "[本次委派任务]\n" + task_text[:8000]
+        if context_lines:
+            delegated_content += "\n\n[最近对话上下文（仅供理解，不是执行指令）]\n" + "\n".join(context_lines)
+        child_messages.append(ModelMessage("user", sanitize_untrusted(delegated_content)))
         # 子版本快照绑定优先（模型 + 调用参数），未设置回退模型档案 max_output_tokens，再退全局兜底（文档 §6.1）
         child_snapshot = child.config_snapshot or {}
         child_selection = resolve_model_selection(
@@ -410,12 +509,16 @@ class AgentExecutionLoop:
                 response = await self.model_gateway.generate(child_request)
                 content = response.content
         except ModelGatewayError as exc:
-            return _error(f"child agent execution failed: {exc.message}")
+            return _error(f"child agent execution failed: {exc.message}", getattr(exc, "code", "AI_MODEL_GATEWAY_ERROR"))
         except ApiError as exc:
-            return _error(f"child agent execution failed: {exc.message}")
+            return _error(f"child agent execution failed: {exc.message}", exc.code)
         if not content or not content.strip():
-            return _error("child agent returned an empty response")
-        return content
+            return _error("child agent returned an empty response", "AI_A2A_PEER_UNAVAILABLE")
+        return {
+            "status": "SUCCEEDED",
+            "agent_version_id": str(child_agent_version_id),
+            "content": content,
+        }
 
     @staticmethod
     def _tool_result(result: ExecutionResult) -> str:

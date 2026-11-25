@@ -57,7 +57,8 @@ def test_child_agent_inherits_scoped_memory(monkeypatch):
         cancellation_event=None, deadline_at=None, task_id=uuid4(),
     ))
 
-    assert result == "child ok"
+    assert result["status"] == "SUCCEEDED"
+    assert result["content"] == "child ok"
     assert captured["memory_kwargs"]["user_id"] == user_id
     assert captured["memory_kwargs"]["agent_id"] == child_version.agent_id
     assert captured["memory_kwargs"]["conversation_id"] == conversation_id
