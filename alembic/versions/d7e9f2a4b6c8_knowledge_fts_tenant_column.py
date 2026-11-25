@@ -50,7 +50,7 @@ def _rebuild(*, with_tenant: bool) -> None:
         op.create_table(_FTS, *columns)
         op.create_index(f"ix_{_FTS}_text", _FTS, ["text"])
     target_columns = "tenant_id, chunk_id, text" if with_tenant else "chunk_id, text"
-    source_columns = "c.tenant_id, c.id, c.text" if with_tenant else "c.id, c.text"
+    source_columns = "CAST(c.tenant_id AS VARCHAR(36)), CAST(c.id AS VARCHAR(36)), c.text" if with_tenant else "CAST(c.id AS VARCHAR(36)), c.text"
     op.execute(f"INSERT INTO {_FTS}({target_columns}) SELECT {source_columns} FROM zr_knowledge_chunk c")
 
 
