@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
-from app.api.routes.a2a import _a2a_task, _a2a_task_state
+from app.api.routes.a2a import _a2a_task, _task_state
 from app.kernel.task.states import TaskStatus
 
 
@@ -33,7 +33,7 @@ def test_a2a_task_state_mapping_covers_task_lifecycle():
     }
     for status, state in expected.items():
         task = _task(status)
-        assert _a2a_task_state(task) == state
+        assert _task_state(task) == state
         assert _a2a_task(task)["status"]["state"] == state
 
 

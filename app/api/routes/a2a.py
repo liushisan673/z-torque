@@ -147,13 +147,17 @@ def _rpc_error(request_id, code: int, message: str) -> dict:
     return jsonrpc_error(request_id, code=code, message=message)
 
 
-def _standard_principal(request: Request, gateway):
+def _inbound_principal(request: Request, gateway):
     value = request.headers.get("authorization", "")
     scheme, _, token = value.partition(" ")
-    principal = gateway.identity.authenticate(
+    return gateway.identity.authenticate(
         token.strip() if scheme.lower() == "bearer" and token.strip() else None,
         trace_id=_inbound_trace_id(request),
     )
+
+
+def _standard_principal(request: Request, gateway):
+    principal = _inbound_principal(request, gateway)
     # Task.owner_user_id is a mandatory FK. Do not invent an owner for a peer principal.
     if principal.ctx.user_id is None:
         raise ApiError("AI_A2A_DENIED", "federated Task operations require an explicitly mapped local service account", 403)
@@ -161,14 +165,14 @@ def _standard_principal(request: Request, gateway):
 
 
 @well_known_router.get("/.well-known/agent-card.json", include_in_schema=False)
-async def standard_agent_card(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def standard_agent_card(request: Request):
     gateway = _gateway(request)
-    permissions = list_user_permissions(db, tenant_id=user.tenant_id, user_id=user.id)
-    if "a2a.invoke" not in permissions:
-        raise ApiError("AI_A2A_DENIED", "missing permission: a2a.invoke", 403)
+    # Local JWT and configured federated peer credentials may discover the explicitly
+    # mapped workspace. Federated identity is accepted here only for read-only discovery.
+    principal = _inbound_principal(request, gateway)
     if not gateway.is_local_discovery_enabled():
         raise ApiError("AI_A2A_DISABLED", "A2A local discovery is disabled", 503)
-    agents = gateway.discovery.list_agents(tenant_id=user.tenant_id, limit=200)
+    agents = gateway.discovery.list_agents(tenant_id=principal.ctx.tenant_id, limit=200)
     skills = [{
         "id": str(item["agent_id"]),
         "name": str(item.get("name") or "Agent"),
