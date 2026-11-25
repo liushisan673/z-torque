@@ -29,6 +29,7 @@ from app.services.context_builder import (
 from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens, model_capabilities
 from app.services.tool_mapping_builder import build_tool_mappings
+from app.services.execution_loop import serialize_seed
 
 logger = logging.getLogger("z_torque.chat")
 
@@ -187,30 +188,37 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             if agent is not None and agent.current_published_version_id is not None:
                 agent_version = db.get(AgentVersion, agent.current_published_version_id)
         mappings, tools = build_tool_mappings(db, agent_version, tenant_id, user_id=ctx.user_id)
-        if mappings and skill_gateway is not None and agent_version is not None:
-            # 工具型会话：只创建任务并入队（Outbox TASK_READY），执行由 worker 完成；
-            # POST /chat 立即返回 task_id，前端订阅任务事件流获得实时执行过程。
-            chat_task = create_chat_task(db, ctx=ctx, conversation=conversation, user_message=user_message, idempotency_key=idempotency_key, trace_id=trace_id)
-            return ChatResult(user_message=user_message, assistant_message=None, task_id=chat_task.id, mocked=False)
         if agent_version is not None:
-            # 无工具智能体：同步直答（不建任务），回复随响应返回
+            # 先让模型在同一轮里决定是普通聊天还是需要执行工具。
+            # 仅仅“存在可用工具”不等于用户这条消息需要创建 Task。
             system_prompt = build_agent_system_prompt(db, agent_version)
             settings = get_settings()
-            # 调用参数：版本快照键优先（快照语义），未设置回退模型档案 max_output_tokens，再退全局兜底
-            temperature, max_tokens = snapshot_model_params(agent_version.config_snapshot, default_temperature=settings.model_temperature, default_max_tokens=settings.model_max_tokens)
-            # 无工具直答同样使用智能体版本绑定的模型；未绑定且无全局模型时显式报错
+            temperature, max_tokens = snapshot_model_params(
+                agent_version.config_snapshot,
+                default_temperature=settings.model_temperature,
+                default_max_tokens=settings.model_max_tokens,
+            )
             model_name = resolve_chat_model_name(
                 snapshot_model=(agent_version.config_snapshot or {}).get("model"),
                 gateway=model_gateway,
             )
-            max_tokens = effective_max_tokens(db, tenant_id=tenant_id, model_identifier=model_name, snapshot_max_tokens=(agent_version.config_snapshot or {}).get("max_tokens"), default_max_tokens=settings.model_max_tokens)
+            max_tokens = effective_max_tokens(
+                db,
+                tenant_id=tenant_id,
+                model_identifier=model_name,
+                snapshot_max_tokens=(agent_version.config_snapshot or {}).get("max_tokens"),
+                default_max_tokens=settings.model_max_tokens,
+            )
             temperature, max_tokens = apply_generation_preset(generation_preset, temperature, max_tokens)
             capabilities = model_capabilities(db, tenant_id=tenant_id, model_identifier=model_name)
+            can_execute_tools = bool(mappings and skill_gateway is not None)
             request = ModelRequest(
-                trace_id=trace_id or str(user_message.id), conversation_id=conversation.id,
+                trace_id=trace_id or str(user_message.id),
+                conversation_id=conversation.id,
                 tenant_id=tenant_id,
                 model=model_name,
-                temperature=temperature, max_tokens=max_tokens,
+                temperature=temperature,
+                max_tokens=max_tokens,
                 messages=build_context(
                     db,
                     conversation,
@@ -221,24 +229,68 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
                     model=model_name,
                     trace_id=trace_id,
                 ),
-                tools=[], timeout_seconds=settings.model_timeout_seconds,
+                tools=tools if can_execute_tools else [],
+                timeout_seconds=settings.model_timeout_seconds,
             )
             try:
-                # 入站回调等后台链路先落库用户消息再调模型：避免 SQLite 写事务
-                # 跨模型网络调用持有写锁，阻塞控制台等其他写请求。
+                # 入站回调等后台链路先落库用户消息再调模型，避免 SQLite 写事务跨网络调用。
                 if commit_before_generate:
                     db.commit()
                 response = await model_gateway.generate(request)
             except ModelGatewayError as exc:
                 user_message.status = "FAILED"
                 raise ApiError(exc.code, exc.message, 502) from exc
-            reply = response.content or ""
-            assistant = Message(tenant_id=tenant_id, conversation_id=conversation.id, sender_type="ASSISTANT", source=source, content=reply, content_parts=assistant_reasoning_parts(response.reasoning_content), status="COMPLETED")
+
+            if response.tool_calls:
+                if not can_execute_tools:
+                    user_message.status = "FAILED"
+                    raise ApiError("AI_TOOL_MAPPING_INVALID", "model requested tools but no executable tool mapping is available", 502)
+                # 非流式链路也复用流式链路的首轮推理种子：worker 直接执行工具，
+                # 不重复调用模型；普通文本回复则仍然是 Message，不创建 Task。
+                seed = serialize_seed(messages=list(request.messages), response=response)
+                chat_task = create_chat_task(
+                    db,
+                    ctx=ctx,
+                    conversation=conversation,
+                    user_message=user_message,
+                    idempotency_key=idempotency_key,
+                    trace_id=trace_id,
+                    seed=seed,
+                )
+                user_message.status = "COMPLETED"
+                return ChatResult(user_message=user_message, assistant_message=None, task_id=chat_task.id, mocked=False)
+
+            reply = (response.content or "").strip()
+            if not reply:
+                user_message.status = "FAILED"
+                raise ApiError("AI_MODEL_RESPONSE_INVALID", "model returned an empty response", 502)
+            assistant = Message(
+                tenant_id=tenant_id,
+                conversation_id=conversation.id,
+                sender_type="ASSISTANT",
+                source=source,
+                content=reply,
+                content_parts=assistant_reasoning_parts(response.reasoning_content),
+                status="COMPLETED",
+            )
             db.add(assistant)
             db.flush()
             user_message.status = "COMPLETED"
-            await _maybe_summarize(db, conversation=conversation, user_id=user_id, trace_id=trace_id, model_gateway=model_gateway, user_message_id=str(user_message.id), short_memory=short_memory)
-            return ChatResult(user_message=user_message, assistant_message=assistant, mocked=False, response_content=reply)
+            await _maybe_summarize(
+                db,
+                conversation=conversation,
+                user_id=user_id,
+                trace_id=trace_id,
+                model_gateway=model_gateway,
+                user_message_id=str(user_message.id),
+                short_memory=short_memory,
+            )
+            return ChatResult(
+                user_message=user_message,
+                assistant_message=assistant,
+                mocked=False,
+                response_content=reply,
+            )
     task = create_task(db, ctx=ctx, agent_id=conversation.agent_id, agent_version_id=_version_id(db, conversation.agent_id), idempotency_key=idempotency_key, request_summary=content, conversation_id=conversation.id, trigger_message_id=user_message.id, trace_id=trace_id)
     user_message.status = "COMPLETED"
     return ChatResult(user_message=user_message, assistant_message=None, task_id=task.id, mocked=False)

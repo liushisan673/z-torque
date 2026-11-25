@@ -124,8 +124,9 @@ async def test_unmentioned_message_keeps_default_parent_behavior(mention_env):
             json={"agent_id": None, "conversation_id": None, "message": "随便聊聊", "content_parts": None, "stream": False},
         )
     assert response.status_code == 200, response.text
-    # 系统自带智能体有派发工具，/chat（非流式）一律创建任务，由执行循环 deciding 是否调用工具
-    assert response.json()["data"]["response_type"] == "TASK"
+    # 模型返回普通文本时，即使 Agent 可用 A2A 工具，也保持普通 CHAT，不创建 Task。
+    assert response.json()["data"]["response_type"] == "CHAT"
+    assert response.json()["data"]["task_id"] is None
 
 
 @pytest.mark.asyncio
