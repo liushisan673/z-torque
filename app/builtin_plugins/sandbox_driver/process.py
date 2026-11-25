@@ -342,7 +342,7 @@ async def run_isolated_process(
                 max_processes=max_processes,
             )
     executable = str(python_executable or sys.executable)
-    if not Path(executable).is_file():
+    if not await asyncio.to_thread(Path(executable).is_file):
         raise ApiError("AI_CAPABILITY_UNAVAILABLE", "isolated Python interpreter is unavailable", 503)
     started = time.monotonic()
     process = await asyncio.create_subprocess_exec(executable, "-I", str(script_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd), env=env, **spawn_kwargs)
