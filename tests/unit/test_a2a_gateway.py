@@ -29,6 +29,7 @@ from app.builtin_plugins.a2a_gateway.discovery import AgentDiscovery
 from app.builtin_plugins.a2a_gateway.federated import FederatedPrincipalRegistry
 from app.builtin_plugins.a2a_gateway.gateway import A2AGateway
 from app.builtin_plugins.a2a_gateway.identity import InboundIdentity
+from app.builtin_plugins.a2a_gateway.jsonrpc import validate_agent_card
 from app.builtin_plugins.a2a_gateway.peers import (
     A2A_DIRECTION_OUTBOUND,
     A2A_OUTBOUND_EVENT,
@@ -1136,3 +1137,90 @@ def test_mtls_material_decrypt_failure_is_peer_unavailable():
 
     assert excinfo.value.code == "AI_A2A_PEER_UNAVAILABLE"
     assert client.calls == []
+
+
+# ---------------------------------------------------------------- A2A v1.0 JSON-RPC peer binding
+
+
+@pytest.mark.asyncio
+async def test_peer_registry_posts_standard_jsonrpc_to_agent_card_interface_url():
+    response_body = {
+        "jsonrpc": "2.0",
+        "id": "rpc-17",
+        "result": {"task": {"id": "remote-task", "status": {"state": "TASK_STATE_WORKING"}}},
+    }
+    client = _Client(response=_Response(200, json.dumps(response_body).encode()))
+    registry = _peer_registry(_config(), client=client)
+    peer = PeerConfig(peer_id="beta", base_url="https://peer.test")
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "rpc-17",
+        "method": "SendMessage",
+        "params": {
+            "message": {
+                "messageId": "message-1",
+                "role": "ROLE_USER",
+                "parts": [{"text": "Prepare the report"}],
+            }
+        },
+    }
+
+    result = await registry.invoke_jsonrpc(
+        peer,
+        payload,
+        endpoint_url="https://peer.test/a2a/jsonrpc",
+        depth=1,
+    )
+
+    assert result == response_body
+    assert client.calls[0]["url"] == "https://peer.test/a2a/jsonrpc"
+    assert client.calls[0]["json"] == payload
+    assert client.calls[0]["headers"]["Content-Type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_peer_registry_rejects_jsonrpc_endpoint_outside_configured_peer_origin():
+    client = _Client(response=_Response(200, b'{"jsonrpc":"2.0","id":"x","result":{}}'))
+    registry = _peer_registry(_config(), client=client)
+    peer = PeerConfig(peer_id="beta", base_url="https://peer.test")
+
+    with pytest.raises(ApiError) as excinfo:
+        await registry.invoke_jsonrpc(
+            peer,
+            {"jsonrpc": "2.0", "id": "x", "method": "GetTask", "params": {"id": "task-1"}},
+            endpoint_url="https://attacker.test/a2a",
+        )
+
+    assert excinfo.value.code == "AI_A2A_PEER_UNAVAILABLE"
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_peer_registry_rejects_mismatched_jsonrpc_response_id():
+    client = _Client(response=_Response(200, b'{"jsonrpc":"2.0","id":"other","result":{}}'))
+    registry = _peer_registry(_config(), client=client)
+    peer = PeerConfig(peer_id="beta", base_url="https://peer.test")
+
+    with pytest.raises(ApiError) as excinfo:
+        await registry.invoke_jsonrpc(
+            peer,
+            {"jsonrpc": "2.0", "id": "expected", "method": "GetTask", "params": {"id": "task-1"}},
+            endpoint_url="https://peer.test/a2a",
+        )
+
+    assert excinfo.value.code == "AI_A2A_PEER_UNAVAILABLE"
+
+
+def test_agent_card_selects_only_declared_a2a_v1_jsonrpc_interfaces():
+    card = validate_agent_card(
+        {
+            "name": "Reporting Agent",
+            "protocolVersion": "1.0",
+            "supportedInterfaces": [
+                {"url": "https://peer.test/rest", "protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"},
+                {"url": "https://peer.test/a2a", "protocolBinding": "JSONRPC", "protocolVersion": "1.0"},
+                {"url": "https://peer.test/old", "protocolBinding": "JSONRPC", "protocolVersion": "0.3"},
+            ],
+        }
+    )
+    assert [item["url"] for item in card["supportedInterfaces"]] == ["https://peer.test/a2a"]
