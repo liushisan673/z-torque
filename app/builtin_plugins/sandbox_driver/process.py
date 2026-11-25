@@ -48,6 +48,7 @@ class ProcessSandboxDriver(FilePatchMixin, SandboxDriver):
         rlimit_enabled: bool = False,
         max_processes: int = 64,
         max_file_bytes: int = 16 * 1024 * 1024,
+        python_executable: str | None = None,
     ) -> None:
         # rlimit 默认关闭以保持直构/单元测试语义不变；装配期由本插件按
         # SANDBOX_RLIMIT_ENABLED 显式开启
@@ -55,6 +56,7 @@ class ProcessSandboxDriver(FilePatchMixin, SandboxDriver):
         self.rlimit_enabled = rlimit_enabled
         self.max_processes = max_processes
         self.max_file_bytes = max_file_bytes
+        self.python_executable = python_executable or sys.executable
 
     async def run(self, *, script_path: Path, arguments: dict[str, Any], cwd: Path, timeout_seconds: float, max_output_bytes: int) -> dict[str, Any]:
         return await run_isolated_process(
@@ -67,6 +69,7 @@ class ProcessSandboxDriver(FilePatchMixin, SandboxDriver):
             rlimit_enabled=self.rlimit_enabled,
             max_processes=self.max_processes,
             max_file_bytes=self.max_file_bytes,
+            python_executable=self.python_executable,
         )
 
 
@@ -130,7 +133,7 @@ async def _wait_exit(process: asyncio.subprocess.Process, *, timeout: float = 2.
 
 
 async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
-    """超时清理：POSIX 杀整个进程组，Windows 仅杀直接子进程（v1 平台降级）。"""
+    """超时清理：POSIX 杀整个进程组；Windows 用 taskkill /T 清理整棵子进程树。"""
     if process.returncode is not None:
         return
     if os.name != "nt":
@@ -141,8 +144,20 @@ async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
         except (ProcessLookupError, PermissionError, OSError):  # pragma: no cover - 进程已退出
             process.kill()
     else:
-        # Windows 无可靠进程组终止：process.kill() 不保证孙进程退出，属已声明的平台限制
-        process.kill()
+        # Windows 的 asyncio.Process.kill() 只终止直接子进程；MD-Skill 可能再 spawn 子进程，
+        # 因此先调用系统 taskkill /T /F 清理进程树，再对直接子进程做兜底。
+        try:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/PID", str(process.pid), "/T", "/F",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(killer.wait(), timeout=3)
+        except (FileNotFoundError, asyncio.TimeoutError, OSError):
+            if process.returncode is None:
+                process.kill()
+        if process.returncode is None:
+            process.kill()
     _force_stream_eof(process)
     await _wait_exit(process)
 
@@ -304,11 +319,17 @@ async def run_isolated_process(
     rlimit_enabled: bool = False,
     max_processes: int = 64,
     max_file_bytes: int = 16 * 1024 * 1024,
+    python_executable: str | None = None,
     emit: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """受控执行单脚本：stdin 传 JSON 参数、stdout 收 JSON 结果（sandbox.driver 实现核心）。"""
     enforce_cwd_policy(cwd, list(allowed_roots or []))
     env = {"PATH": os.environ.get("PATH", ""), "PYTHONNOUSERSITE": "1", "PYTHONIOENCODING": "utf-8"}
+    if os.name == "nt":
+        # Windows 创建子进程时保留系统 DLL 搜索与临时目录所需的最小环境变量。
+        for key in ("SYSTEMROOT", "WINDIR", "TEMP", "TMP"):
+            if os.environ.get(key):
+                env[key] = os.environ[key]
     spawn_kwargs: dict[str, Any] = {}
     if os.name != "nt":
         spawn_kwargs["start_new_session"] = True
@@ -319,8 +340,11 @@ async def run_isolated_process(
                 max_file_bytes=max_file_bytes,
                 max_processes=max_processes,
             )
+    executable = str(python_executable or sys.executable)
+    if not Path(executable).is_file():
+        raise ApiError("AI_CAPABILITY_UNAVAILABLE", "isolated Python interpreter is unavailable", 503)
     started = time.monotonic()
-    process = await asyncio.create_subprocess_exec(sys.executable, "-I", str(script_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd), env=env, **spawn_kwargs)
+    process = await asyncio.create_subprocess_exec(executable, "-I", str(script_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(cwd), env=env, **spawn_kwargs)
     stdout, stderr, output_exceeded, timed_out = await _communicate_capped(
         process=process,
         payload=json.dumps(arguments).encode(),
