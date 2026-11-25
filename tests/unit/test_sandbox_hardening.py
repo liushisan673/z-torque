@@ -14,6 +14,7 @@ Windows 上 rlimit 与进程组语义不存在，相关用例 skip 并显式说�
 from __future__ import annotations
 
 import os
+import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
@@ -124,10 +125,29 @@ async def test_success_returns_script_json(tmp_path):
     script = _script(root, "echo.py", _ECHO)
 
     result = await run_isolated_process(
-        script_path=script, arguments={"q": 1}, cwd=root, timeout_seconds=10, max_output_bytes=4096, allowed_roots=[str(root)]
+        script_path=script, arguments={"q": 1}, cwd=root, timeout_seconds=10, max_output_bytes=4096, allowed_roots=[str(root)], python_executable=sys.executable
     )
 
     assert result == {"echo": {"q": 1}}
+
+
+
+@pytest.mark.asyncio
+async def test_missing_isolated_interpreter_fails_closed(tmp_path):
+    root = tmp_path / "skill"
+    root.mkdir()
+    script = _script(root, "echo.py", _ECHO)
+    with pytest.raises(ApiError) as excinfo:
+        await run_isolated_process(
+            script_path=script,
+            arguments={},
+            cwd=root,
+            timeout_seconds=5,
+            max_output_bytes=4096,
+            allowed_roots=[str(root)],
+            python_executable=str(tmp_path / "missing-python.exe"),
+        )
+    assert excinfo.value.code == "AI_CAPABILITY_UNAVAILABLE"
 
 
 @pytest.mark.asyncio
