@@ -9,6 +9,7 @@ from app.models.conversation import Conversation
 from app.models.file import File
 from app.models.identity import Permission, Role, Tenant, User, role_permission, user_role
 from app.models.knowledge import KnowledgeChunk, KnowledgeDoc
+from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseDocument
 from app.models.memory import ShortTermMemory
 from app.models.memory_long import LongMemory, LongMemoryVersion
 from app.models.message import Message, message_file
@@ -44,6 +45,8 @@ __all__ = [
     "File",
     "InboundWebhook",
     "InboundWebhookEvent",
+    "KnowledgeBase",
+    "KnowledgeBaseDocument",
     "KnowledgeChunk",
     "KnowledgeDoc",
     "LongMemory",

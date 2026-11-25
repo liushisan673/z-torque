@@ -14,6 +14,7 @@ from app.api.routes.connectors import router as connectors_router
 from app.api.routes.conversations import router as conversations_router
 from app.api.routes.files import router as files_router
 from app.api.routes.knowledge import router as knowledge_router
+from app.api.routes.knowledge_bases import router as knowledge_bases_router
 from app.api.routes.md_skills import router as md_skills_router
 from app.api.routes.memory import router as memory_router
 from app.api.routes.messages import router as messages_router
@@ -47,6 +48,7 @@ router.include_router(memory_router)
 router.include_router(onboarding_router)
 router.include_router(files_router)
 router.include_router(knowledge_router)
+router.include_router(knowledge_bases_router)
 router.include_router(audit_router)
 router.include_router(audit_exports_router)
 router.include_router(audit_archive_router)
