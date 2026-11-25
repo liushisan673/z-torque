@@ -230,8 +230,8 @@ class AgentExecutionLoop:
                 if mapping is None:
                     raise ApiError("AI_TOOL_MAPPING_INVALID", "tool name is not allowed for this agent version", 422)
                 _progress_event(db, task, "TASK_TOOL_CALL", f"calling tool {call.name}", trace_id=request.trace_id, payload={"tool_name": call.name, "arguments": _brief(arguments)})
-                is_site_a2a = mapping.dispatch_agent_version_id is not None or mapping.dispatch_candidate_ids is not None
-                dispatch_target = mapping.child_agent_version_id or mapping.dispatch_agent_version_id
+                is_site_a2a = mapping.dispatch_candidate_ids is not None
+                dispatch_target = None
                 route_error: dict[str, Any] | None = None
                 if mapping.dispatch_candidate_ids is not None:
                     try:
@@ -246,7 +246,7 @@ class AgentExecutionLoop:
                         }
                     else:
                         dispatch_target = selected_id
-                if dispatch_target is not None or is_site_a2a:
+                if is_site_a2a:
                     if route_error is not None:
                         child_result = route_error
                     elif is_site_a2a and a2a_dispatch_count >= MAX_A2A_DISPATCHES_PER_RUN:
@@ -265,7 +265,7 @@ class AgentExecutionLoop:
                             child_agent_version_id=dispatch_target,
                             task_text=str(arguments.get("task", "")).strip(),
                             delegation_depth=delegation_depth,
-                            require_current_version=is_site_a2a,
+                            require_current_version=True,
                             cancellation_event=cancellation_event,
                             deadline_at=deadline_at,
                             task_id=task_id,
@@ -364,9 +364,15 @@ class AgentExecutionLoop:
             return _error("delegation depth exceeded", "AI_A2A_DEPTH_EXCEEDED")
         if not task_text:
             return _error("delegated task text is empty", "AI_A2A_ROUTE_FAILED")
+        # A2A 调用权限与 Discovery 可见性分开校验：能发现目标不代表有权调用。
+        if require_current_version:
+            from app.security.permissions import list_user_permissions
+
+            if ctx.user_id is None or "a2a.invoke" not in list_user_permissions(
+                db, tenant_id=tenant_id, user_id=ctx.user_id
+            ):
+                return _error("user is not authorized to invoke A2A agents", "AI_A2A_DENIED")
         # 站内 A2A 是新请求的发现路由：执行前再次校验当前发布版和用户可见性。
-        # 显式父子委派则遵守父 AgentVersion 快照白名单，允许执行快照固定的旧发布版本；
-        # 不在这里重复应用目录可见性规则，否则会破坏管理员显式配置的跨属主子 Agent 授权。
         if require_current_version:
             child = db.scalar(
                 select(AgentVersion)

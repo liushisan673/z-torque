@@ -56,8 +56,7 @@ function skillMode(scriptSource: string | null) {
 const ARCHIVE_BLOCK_TEXT: Record<string, string> = {
   AI_AGENT_VERSION_IS_CURRENT: "当前发布版本不可归档，请先发布其他版本",
   AI_AGENT_VERSION_IN_USE: "该版本仍有任务在执行，请等待结束或取消后再归档",
-  AI_AGENT_VERSION_REFERENCED: "该版本仍被其他已发布版本的委派白名单引用",
-};
+  };
 
 function archiveBlockText(reason: { code: string; message: string }): string {
   return ARCHIVE_BLOCK_TEXT[reason.code] ?? reason.message;
@@ -128,22 +127,12 @@ export function AgentsPage() {
   const [skillPicks, setSkillPicks] = useState<{ group: SelectableSkillGroup; version: SelectableSkillVersion }[]>([]);
   const [bindingSkills, setBindingSkills] = useState(false);
   const [unbindingSkillId, setUnbindingSkillId] = useState<string | null>(null);
-  // 委派设置编辑（存于 AgentVersion 独立列，随版本草稿一并保存）
-  const [editDelegation, setEditDelegation] = useState(false);
-  const [editMaxChild, setEditMaxChild] = useState("");
-  const [editChildAgents, setEditChildAgents] = useState<string[]>([]);
-  const [childOptions, setChildOptions] = useState<{ version_id: string; label: string }[]>([]);
-  // 子智能体选择器：与技能页「绑定工具」同款弹窗式勾选（确定后随版本草稿一并保存）
-  const [childPickerOpen, setChildPickerOpen] = useState(false);
-  const [childPicks, setChildPicks] = useState<string[]>([]);
-  const [childQuery, setChildQuery] = useState("");
-  // 委派白名单只读展示用：version_id → 「智能体名 · vN」可读标签
-  const [childLabels, setChildLabels] = useState<Record<string, string>>({});
   const { push: toast } = useToast();
   // 危险操作（归档 / 级联删除 / 版本归档）统一走 ConfirmDialog，避免 window.confirm
   const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
   const [confirmVersionArchive, setConfirmVersionArchive] = useState<{ agentId: string; versionId: string; versionLabel: string; warnings: string[] } | null>(null);
+  const [confirmRollback, setConfirmRollback] = useState<{ agentId: string; versionId: string; label: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -226,12 +215,7 @@ export function AgentsPage() {
   // M12 后列表统一分页：前端切片 + 公共分页条（新建弹窗与绑定技能弹窗各自独立分页，均对分组数组每页 10 组）
   const createSkillPager = usePager(filteredSkillGroups, 10);
   const bindSkillPager = usePager(filteredSkillGroups, 10);
-  // 子智能体候选列表：筛选逻辑与原弹窗内一致（按名称或版本搜索），先筛后分页
-  const filteredChildOptions = useMemo(() => {
-    const kw = childQuery.trim().toLowerCase();
-    return kw ? childOptions.filter((o) => o.label.toLowerCase().includes(kw)) : childOptions;
-  }, [childOptions, childQuery]);
-  const childPager = usePager(filteredChildOptions, 10);
+
 
   // 已绑定技能的工具数合计（按技能计；去重后的最终校验在发布时执行）
   const boundToolTotal = useMemo(() => {
@@ -470,7 +454,7 @@ export function AgentsPage() {
     }
   }
 
-  // 版本归档：先预检（运行中任务 / 当前发布版本 / 委派引用）→ 阻断则顶部提示，通过则确认后归档
+  // 版本归档：先预检（运行中任务 / 当前发布版本）→ 阻断则顶部提示，通过则确认后归档
   async function archiveVersion(agentId: string, versionId: string) {
     setBusy(true);
     setError(null);
@@ -481,7 +465,7 @@ export function AgentsPage() {
         return;
       }
       const warnings = check.warnings.map((w) => w.message);
-      const versionLabel = `v${check.referenced_by?.[0]?.version_number ?? ""}`;
+      const versionLabel = "历史版本";
       setConfirmVersionArchive({ agentId, versionId, versionLabel, warnings });
     } catch (err) {
       setError(errorText(err, "归档版本预检失败"));
@@ -505,6 +489,23 @@ export function AgentsPage() {
     } finally {
       setBusy(false);
       setConfirmVersionArchive(null);
+    }
+  }
+
+  async function confirmRollbackVersion() {
+    if (!confirmRollback) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/agents/${confirmRollback.agentId}/versions/${confirmRollback.versionId}/rollback`, { method: "POST" });
+      toast("success", `已切换到 ${confirmRollback.label}`);
+      if (selected) await openDetail(selected);
+      await load();
+    } catch (err) {
+      setError(errorText(err, "版本回滚失败"));
+    } finally {
+      setBusy(false);
+      setConfirmRollback(null);
     }
   }
 
@@ -539,46 +540,6 @@ export function AgentsPage() {
     }
   }
 
-  // 委派白名单候选：其他 Agent 的已发布版本（排除自身）
-  async function loadChildOptions(currentAgentId: string) {
-    try {
-      const list = await request<Agent[]>("/api/z-torque/agents");
-      const result: { version_id: string; label: string }[] = [];
-      for (const a of list) {
-        if (a.id === currentAgentId) continue;
-        try {
-          const vs = await request<AgentVersion[]>(`/api/z-torque/agents/${a.id}/versions`);
-          for (const v of vs) {
-            if (v.status === "PUBLISHED") {
-              result.push({ version_id: v.id, label: `${a.name} · v${v.version_number}` });
-            }
-          }
-        } catch {
-          /* 单个 Agent 加载失败则跳过 */
-        }
-      }
-      setChildOptions(result);
-      setChildLabels(Object.fromEntries(result.map((o) => [o.version_id, o.label])));
-    } catch {
-      setChildOptions([]);
-    }
-  }
-
-  function openChildPicker() {
-    setChildPicks(editChildAgents);
-    setChildQuery("");
-    setChildPickerOpen(true);
-  }
-
-  function toggleChildPick(versionId: string) {
-    setChildPicks((prev) => (prev.includes(versionId) ? prev.filter((id) => id !== versionId) : [...prev, versionId]));
-  }
-
-  function applyChildPicks() {
-    setEditChildAgents(childPicks);
-    setChildPickerOpen(false);
-  }
-
   async function openEditor(agentId: string, version: AgentVersion) {
     setError(null);
     setEditing({ agentId, version });
@@ -590,17 +551,9 @@ export function AgentsPage() {
     setSkillPicks([]);
     setSkillQuery("");
     setSkillSource("all");
-    setEditDelegation(Boolean(version.delegation_enabled));
-    setEditMaxChild(
-      version.child_necessity_policy && typeof version.child_necessity_policy.max_child === "number"
-        ? String(version.child_necessity_policy.max_child)
-        : "",
-    );
-    setEditChildAgents(Array.isArray(version.allowed_child_agent_versions) ? version.allowed_child_agent_versions : []);
     try {
       await loadSelectableSkills();
       await loadBoundSkills(agentId, version.id);
-      void loadChildOptions(agentId);
     } catch (err) {
       setError(errorText(err, "加载技能失败"));
       setSkillGroups([]);
@@ -620,9 +573,6 @@ export function AgentsPage() {
         method: "PATCH",
         body: {
           config_snapshot: snapshot,
-          delegation_enabled: editDelegation,
-          allowed_child_agent_versions: editDelegation ? editChildAgents : [],
-          child_necessity_policy: editDelegation && editMaxChild.trim() ? { max_child: Number(editMaxChild) } : null,
         },
       });
       setEditing({ agentId: editing.agentId, version: v });
@@ -1015,20 +965,6 @@ export function AgentsPage() {
                           <input type="text" value={`${boundSkills.length} 个`} disabled />
                         </div>
                         <div className="agent-field">
-                          <label>委派</label>
-                          <input
-                            type="text"
-                            value={
-                              currentPublishedVersion
-                                ? currentPublishedVersion.delegation_enabled
-                                  ? `已开启${currentPublishedVersion.allowed_child_agent_versions?.length ? " · 子智能体 " + currentPublishedVersion.allowed_child_agent_versions.length : ""}`
-                                  : "未开启"
-                                : "—"
-                            }
-                            disabled
-                          />
-                        </div>
-                        <div className="agent-field">
                           <label>最近使用</label>
                           <input
                             type="text"
@@ -1111,69 +1047,12 @@ export function AgentsPage() {
                     </div>
 
                     <div className="agent-section">
-                      <h3>
-                        委派设置
-                        <span className="hint">{editing ? "仅草稿可改；子智能体须为已发布版本" : "单层父子，子任务不得再委派"}</span>
-                      </h3>
-                      <div className="agent-form-grid">
-                        <div className="agent-field">
-                          <label>启用委派</label>
-                          <select
-                            value={editing ? (editDelegation ? "yes" : "no") : viewVersion?.delegation_enabled ? "yes" : "no"}
-                            onChange={(e) => setEditDelegation(e.target.value === "yes")}
-                            disabled={!editing || busy}
-                          >
-                            <option value="yes">是</option>
-                            <option value="no">否</option>
-                          </select>
-                        </div>
-                        <div className="agent-field">
-                          <label>单根最大子任务数</label>
-                          <input
-                            type="number"
-                            value={
-                              editing
-                                ? editMaxChild
-                                : viewVersion?.child_necessity_policy && typeof viewVersion.child_necessity_policy.max_child === "number"
-                                  ? Number(viewVersion.child_necessity_policy.max_child)
-                                  : ""
-                            }
-                            onChange={(e) => setEditMaxChild(e.target.value)}
-                            disabled={!editing || busy || !editDelegation}
-                            placeholder="例如：3"
-                          />
-                        </div>
-                        <div className="agent-field full">
-                          <label>允许的子智能体</label>
-                          <p className="hint" style={{ margin: "0 0 8px", lineHeight: 1.6 }}>
-                            这里配置的是当前 Agent 版本可委派的子 Agent 范围，不是用户授权。每次执行仍会按发起用户的身份、资源范围和操作权限校验；子 Agent 不会因为被加入白名单而获得额外权限。
-                          </p>
-                          {editing ? (
-                            <>
-                              <div className="agent-skill-actions" style={{ marginBottom: 8 }}>
-                                <button className="btn btn-primary btn-sm" disabled={busy || !editDelegation} onClick={openChildPicker}>
-                                  选择子智能体
-                                </button>
-                                <span className="hint">已选 {editChildAgents.length} 个</span>
-                              </div>
-                              <input
-                                type="text"
-                                value={editChildAgents.map((id) => childLabels[id] ?? id).join("、") || "—"}
-                                disabled
-                              />
-                            </>
-                          ) : (
-                            <input
-                              type="text"
-                              value={
-                                (viewVersion?.allowed_child_agent_versions ?? [])
-                                  .map((id) => childLabels[id] ?? id)
-                                  .join("、") || "—"
-                              }
-                              disabled
-                            />
-                          )}
-                        </div>
+                      <h3>A2A 智能体协作</h3>
+                      <div className="agent-alert agent-alert-info">
+                        <span>
+                          智能体通过统一 A2A 发现与委派机制动态协作，无需在创建或发布版本时预先配置父子关系或子智能体白名单。
+                          每次调用都会重新校验当前用户对目标智能体及其资源、操作的访问权限。
+                        </span>
                       </div>
                     </div>
 
@@ -1318,6 +1197,15 @@ export function AgentsPage() {
                                     ) : (
                                       <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void archiveVersion(selected.id, v.id)}>归档</button>
                                     )
+                                  )}
+                                  {!readOnly && !isCurrent && (v.status === "PUBLISHED" || archived) && (
+                                    <button
+                                      className="btn btn-secondary btn-sm"
+                                      disabled={busy}
+                                      onClick={() => setConfirmRollback({ agentId: selected.id, versionId: v.id, label: `v${v.version_number}` })}
+                                    >
+                                      回滚至此版本
+                                    </button>
                                   )}
                                 </div>
                               </div>
@@ -1608,66 +1496,16 @@ export function AgentsPage() {
         )}
       </Modal>
 
-      {/* 子智能体选择器：与技能页「绑定工具」同款弹窗式勾选，确定后随版本草稿保存 */}
-      <Modal
-        open={childPickerOpen}
-        title="选择子智能体（已发布版本）"
-        onClose={() => setChildPickerOpen(false)}
-        width={640}
-        footer={
-          <>
-            <span className="skill-bind-count">已选 {childPicks.length} 个</span>
-            <button className="btn btn-secondary" onClick={() => setChildPickerOpen(false)}>取消</button>
-            <button className="btn btn-primary" onClick={applyChildPicks}>确定</button>
-          </>
-        }
+      <ConfirmDialog
+        open={confirmRollback !== null}
+        title="回滚 Agent 版本？"
+        confirmText="确认回滚"
+        busy={busy}
+        onCancel={() => setConfirmRollback(null)}
+        onConfirm={() => void confirmRollbackVersion()}
       >
-        <div className="skill-bind-toolbar">
-          <input
-            className="input"
-            value={childQuery}
-            onChange={(e) => setChildQuery(e.target.value)}
-            placeholder="搜索智能体名称或版本"
-            aria-label="搜索子智能体"
-          />
-        </div>
-        {(() => {
-          // M12 后列表统一分页：筛选逻辑原样保留（filteredChildOptions 由 useMemo 提供），前端切片（每页 10）
-          if (childOptions.length === 0) {
-            return <div className="agent-readonly-banner">暂无其他智能体的已发布版本。</div>;
-          }
-          if (filteredChildOptions.length === 0) {
-            return <div className="agent-readonly-banner">没有匹配的子智能体版本。</div>;
-          }
-          return (
-            <>
-            <div className="skill-bind-list">
-              {childPager.paged.map((o) => {
-                const picked = childPicks.includes(o.version_id);
-                return (
-                  <label key={o.version_id} className={`skill-tool-picker-item${picked ? " selected" : ""}`}>
-                    <input type="checkbox" checked={picked} onChange={() => toggleChildPick(o.version_id)} />
-                    <div className="t-main">
-                      <div className="t-row">
-                        <span className="t-name">{o.label}</span>
-                        {picked && <span className="t-bound">已选</span>}
-                      </div>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
-            {/* M12 后列表统一分页：前端切片 + 公共分页条（放在弹窗候选列表下方） */}
-            <Pagination
-              total={childPager.total}
-              page={childPager.page}
-              pageSize={childPager.pageSize}
-              onChange={childPager.onChange}
-            />
-            </>
-          );
-        })()}
-      </Modal>
+        <p>将当前发布指针切换到 {confirmRollback?.label ?? "所选版本"}。版本配置快照不会被修改，正在执行的任务也不会切换版本。</p>
+      </ConfirmDialog>
 
       {/* 危险操作三连：归档 / 级联删除 / 版本归档（含告警） */}
       <ConfirmDialog

@@ -23,6 +23,7 @@ from app.kernel.agent.version_service import (
     archive_version,
     create_version,
     publish_version,
+    rollback_version,
     update_draft,
 )
 from app.models import Agent, AgentVersion, AgentVersionSkill, Skill, SkillVersion, User
@@ -142,10 +143,18 @@ async def get_ver(agent_id: UUID, version_id: UUID, request: Request, user: User
 @router.patch("/{agent_id}/versions/{version_id}", summary="更新草稿版本")
 async def edit_ver(agent_id: UUID, version_id: UUID, payload: VersionCreate, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     get_agent(db, user, agent_id)
-    # exclude_unset：config_snapshot / 委派字段均「未提供=不修改」
+    # 仅更新草稿配置快照；旧客户端提交的静态父子配置不再参与调度。
     values = payload.model_dump(exclude_unset=True)
-    snapshot = values.pop("config_snapshot", None)
-    item = update_draft(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id, snapshot=snapshot, delegation_updates=values)
+    snapshot = values.get("config_snapshot")
+    item = update_draft(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id, snapshot=snapshot)
+    db.commit(); db.refresh(item)
+    return out(request, AgentVersionResponse.model_validate(item).model_dump(mode="json"))
+
+
+@router.post("/{agent_id}/versions/{version_id}/rollback", summary="回滚当前发布版本")
+async def rollback(agent_id: UUID, version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    get_agent(db, user, agent_id)
+    item = rollback_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id)
     db.commit(); db.refresh(item)
     return out(request, AgentVersionResponse.model_validate(item).model_dump(mode="json"))
 

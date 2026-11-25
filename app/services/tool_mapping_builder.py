@@ -3,7 +3,6 @@
 供 TaskRuntime（worker 执行链路）与流式聊天分流（/chat/stream 初始模型判断）共用，
 保证两条链路暴露给模型的工具集合完全一致。
 """
-import hashlib
 import json
 from uuid import UUID
 
@@ -120,31 +119,11 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             # 流程指令属于 system prompt，塞进单个工具描述会误导模型把该函数当作流程中的其他工具
             desc = f"{name}：{(tool.description or '').strip()}".rstrip("：")[:512]
             tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
-    # 委派：delegation_enabled 时把允许的子智能体发布版暴露为委派工具（仅一层，深度由配置约束）
-    if agent_version.delegation_enabled:
-        for child_id in agent_version.allowed_child_agent_versions or []:
-            try:
-                child_ver_id = UUID(str(child_id))
-            except (ValueError, AttributeError):
-                continue
-            child = db.get(AgentVersion, child_ver_id)
-            if child is None or child.tenant_id != tenant_id or child.status != "PUBLISHED":
-                continue
-            child_agent = db.get(Agent, child.agent_id)
-            if child_agent is None or child_agent.status != "ACTIVE":
-                continue
-            alias = f"delegate_{hashlib.md5(str(child_ver_id).encode('utf-8')).hexdigest()[:12]}"
-            if alias in mappings:
-                continue
-            schema = {"type": "object", "properties": {"task": {"type": "string", "description": f"要委派给「{child_agent.name}」处理的完整任务描述，需包含该智能体所需的全部上下文"}}, "required": ["task"]}
-            mappings[alias] = ToolMapping(alias, child_ver_id, None, schema, child_agent_version_id=child_ver_id)
-            desc = f"委派给子智能体「{child_agent.name}」独立处理任务：{(child_agent.description or '').strip()}".rstrip("：")[:512]
-            tools.append({"type": "function", "function": {"name": alias, "description": desc, "parameters": schema}})
-    # 站内 A2A：仅系统默认父智能体可发现并派发专业 Agent。
+    # 站内 A2A：所有 Agent 使用同一动态发现与派发入口；递归深度由运行时策略限制。
     # 只暴露 Agent 当前发布版本，历史 PUBLISHED 版本继续保留给旧任务快照，
     # 但不得作为新请求的路由候选，避免同一 Agent 重复出现在工具目录。
     system_agent = db.get(Agent, agent_version.agent_id)
-    if system_agent is not None and system_agent.is_default_parent and not exclude_requires_confirmation:
+    if system_agent is not None:
         candidate_query = (
             select(AgentVersion)
             .join(Agent, Agent.id == AgentVersion.agent_id)

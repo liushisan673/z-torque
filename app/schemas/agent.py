@@ -19,10 +19,10 @@ class AgentUpdate(BaseModel):
 
 class VersionCreate(BaseModel):
     config_snapshot: dict = Field(default_factory=dict)
-    # 委派配置存于 AgentVersion 独立列；PATCH 按 exclude_unset 语义处理（未提供=不修改）
-    delegation_enabled: bool | None = None
-    allowed_child_agent_versions: list[str] | None = None
-    child_necessity_policy: dict | None = None
+    # Deprecated compatibility fields: accepted from older clients but ignored by the service.
+    delegation_enabled: bool | None = Field(default=None, deprecated=True, description="已废弃：Agent 委派统一使用 A2A Discovery")
+    allowed_child_agent_versions: list[str] | None = Field(default=None, deprecated=True, description="已废弃：不再配置静态父子 Agent 白名单")
+    child_necessity_policy: dict | None = Field(default=None, deprecated=True, description="已废弃：委派限制由统一调度策略管理")
 
 class AgentVersionArchiveCheck(BaseModel):
     """版本归档预检结果（GET /agents/{id}/versions/{vid}/archive-check）。"""

@@ -45,10 +45,13 @@ def _agents(db, *, system_parent: bool, user_default: bool = False):
     return tenant.id, system_version, target_version
 
 
-def test_builtin_system_agent_exposes_dispatch_tool():
-    """系统自带智能体（默认父）暴露派发工具，普通智能体不暴露。"""
+def test_every_active_agent_exposes_the_same_a2a_dispatch_entry():
+    """不再通过 is_default_parent 或静态子 Agent 白名单决定是否可委派。"""
     with SessionLocal.begin() as db:
         tenant_id, system_version, target_version = _agents(db, system_parent=True)
+        # Historical static allowlist values must not create delegate_* model tools.
+        system_version.delegation_enabled = True
+        system_version.allowed_child_agent_versions = [str(target_version.id)]
         mappings, tools = build_tool_mappings(db, system_version, tenant_id, user_id=uuid4())
         dispatch = [mapping for mapping in mappings.values() if mapping.dispatch_candidate_ids is not None]
         assert len(dispatch) == 1
@@ -56,13 +59,17 @@ def test_builtin_system_agent_exposes_dispatch_tool():
         assert dispatch[0].skill_version_id is None
         assert len([tool for tool in tools if tool["function"]["name"] == dispatch[0].model_name]) == 1
         assert len([m for m in mappings.values() if m.dispatch_candidate_ids is not None]) == 1
+        assert not any(name.startswith("delegate_") for name in mappings)
+        assert dispatch[0].model_name == "route_specialist"
         assert dispatch[0].input_schema["required"] == ["agent_version_id", "task"]
         assert dispatch[0].input_schema["properties"]["agent_version_id"]["enum"] == [str(target_version.id)]
 
     with SessionLocal.begin() as db:
-        tenant_id, system_version, _ = _agents(db, system_parent=False)
-        mappings, _ = build_tool_mappings(db, system_version, tenant_id)
-        assert [m for m in mappings.values() if m.dispatch_candidate_ids is not None] == []
+        tenant_id, regular_version, target_version = _agents(db, system_parent=False)
+        mappings, _ = build_tool_mappings(db, regular_version, tenant_id, user_id=uuid4())
+        dispatch = [mapping for mapping in mappings.values() if mapping.dispatch_candidate_ids is not None]
+        assert len(dispatch) == 1
+        assert dispatch[0].dispatch_candidate_ids == (target_version.id,)
 
 
 def test_dispatch_candidates_only_include_current_published_version():
@@ -143,12 +150,12 @@ def test_dispatch_candidates_respect_agent_visibility():
         assert not any(private_version.id in (m.dispatch_candidate_ids or ()) for m in other_mappings.values())
 
 
-def test_user_default_agent_does_not_get_dispatch_tool():
-    """用户个人默认智能体不获得跨智能体调度能力，只有系统自带智能体可以。"""
+def test_user_default_agent_also_uses_unified_dispatch_tool():
+    """用户默认 Agent 与系统默认 Agent 使用同一 A2A 调度入口。"""
     with SessionLocal.begin() as db:
         tenant_id, system_version, _ = _agents(db, system_parent=False, user_default=True)
-        mappings, _ = build_tool_mappings(db, system_version, tenant_id)
-        assert [m for m in mappings.values() if m.dispatch_candidate_ids is not None] == []
+        mappings, _ = build_tool_mappings(db, system_version, tenant_id, user_id=uuid4())
+        assert len([m for m in mappings.values() if m.dispatch_candidate_ids is not None]) == 1
 
 
 def test_ensure_system_agent_is_idempotent_and_published():
