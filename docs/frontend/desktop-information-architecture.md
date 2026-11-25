@@ -127,3 +127,12 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 - The audit API enforces its own user scope. A regular user sees only their own audit events; users with the relevant global audit permission receive the broader scope from the backend.
 - Some failures rejected before the connector probe writes a `CONNECTOR_TESTED` audit event may not appear in this history. The UI describes the list as recorded audit events rather than claiming it is an exhaustive log of every attempted request.
 - No new endpoint, audit schema, connector test behavior or persistence table was introduced.
+
+## Direct task delegation and execution-detail pass (2026-11-25)
+
+- Task responses now expose the persisted `agent_id`, `parent_task_id` and `child_sequence` alongside the existing `root_task_id` and `delegation_depth`. These fields already existed on the Task model; this change makes the actual direct relationship available to clients without adding a new table or migration.
+- Workbench child-task loading now filters by `parent_task_id === currentTask.id` and orders by `child_sequence`. It no longer labels every task sharing a root ID as a direct child of whichever task happens to be open. A child task can navigate back to its direct parent.
+- Historical task timelines now render the existing sanitized tool-call/result summaries through the shared `toolCardOf` formatter, including compact tool names/results and collapsible arguments when the event payload contains them. Missing payload fields remain absent rather than being inferred.
+- Audit task inspection now shows Agent ID and the direct parent/child sequence fields returned by the task API. Existing owner-scoped task access remains unchanged.
+- Added an integration test for root/child Task API response fields and direct-parent relationship. This test has been committed but must still pass CI before the change is considered verified.
+- No task delegation policy, execution behavior, user SecurityContext, event schema, trace semantics or audit visibility rules were changed.
