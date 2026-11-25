@@ -20,10 +20,10 @@
 
 | 能力 | Linux / macOS（process） | Windows（process） | 容器（docker CLI） |
 |------|--------------------------|--------------------|--------------------|
-| `python -I` 独立解释器 | 有 | 有 | 有 |
-| 最小环境变量 / 输出上限 / 超时 kill | 有 | 有 | 有 |
-| `resource.setrlimit`（CPU/内存） | 可选（`sandbox_rlimit_enabled`） | **无**，不宣称 | 由 `--memory` / `--cpus` / `--pids-limit` 替代 |
-| 进程组 kill | 有 | **无**（仅 kill 进程树） | docker kill + 进程树确认 |
+| `python -I` 独立解释器 | 有 | 有（桌面包随附 embeddable `python.exe`） | 有 |
+| 最小环境变量 / 输出上限 / 超时 kill | 有 | 有（`taskkill /T /F` 尽可能清理进程树） | 有 |
+| `resource.setrlimit`（CPU/文件大小/进程数） | 可选（`sandbox_rlimit_enabled`） | **无**，不宣称 | 由 `--memory` / `--cpus` / `--pids-limit` 替代 |
+| 进程组 kill | 有（POSIX process group） | **无**（超时通过 `taskkill /T /F` 清理进程树，不等价于 Job Object/内核隔离） | docker kill + 进程树确认 |
 | cwd 白名单 + Scope 边界 | 有 | 有 | 有（挂载只暴露白名单根） |
 | `restricted` scope | 可用 | 可用 | 可用 |
 | `full` scope（不可信执行） | **不可用**（无容器） | **不可用**（无容器） | 可用 |
@@ -47,7 +47,7 @@
 
 补充说明：
 
-- `windows_trusted` 默认 `false`；未声明的技能在 Windows 上一律拒绝，不能靠"路径恰好在白名单里"绕过。
+- `windows_trusted` 默认 `false`；未声明的技能在 Windows 上一律拒绝，不能靠"路径恰好在白名单里"绕过。\n- 桌面冻结包通过 `sandbox_python_executable` 指向随包的 `runtime/python.exe`；不能使用 PyInstaller 主程序的 `sys.executable` 作为脚本解释器。缺少随包解释器时 fail-closed，返回 `AI_CAPABILITY_UNAVAILABLE`。
 - 审批 checkpoint 内冻结 `sandbox_scope`；恢复时在执行点二次校验，篡改即 `AI_SANDBOX_DENIED`（fail-closed，老 checkpoint 无 scope 一律拒绝）。
 - 所有平台统一使用显式 `SandboxScope` 对象贯穿，**禁止**用 `ContextVar` 或环境变量传递（异步 / 线程 / subprocess 均不继承线程内改动）。
 
@@ -111,7 +111,7 @@ diff 正文只写独立 artifact 表（TTL 24h）；审计只记 `artifact_id + 
 
 1. 禁止把 `process` 模式声明为"不可信执行可用"。
 2. 禁止在 Windows 上虚报 `rlimit` / `isolation_level=container`。
-3. 禁止绕过 `SkillGateway` 直接调用 sandbox driver / `subprocess.spawn`（CI 静态红线）。
+3. 禁止绕过 `SkillGateway` 直接调用 sandbox driver / `subprocess.spawn`（CI 静态红线）。\n4. Windows `taskkill /T /F` 仅用于超时资源回收，不得描述为强沙箱或完整进程隔离。
 4. 禁止用提示词警告代替结构性剔除：不可信内容在构建 prompt 前剔除。
 5. 禁止在 capabilities 中暴露绝对路径、出站白名单等敏感细节（仅管理员可见）。
 
