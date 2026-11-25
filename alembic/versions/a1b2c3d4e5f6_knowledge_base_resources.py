@@ -1,7 +1,7 @@
 """Add user-owned knowledge bases and file membership.
 
 Revision ID: a1b2c3d4e5f6
-Revises: f9a7b3c5d182
+Revises: c8f4d2a1b6e9
 """
 
 from typing import Sequence

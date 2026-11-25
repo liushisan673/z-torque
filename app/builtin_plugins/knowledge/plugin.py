@@ -17,6 +17,7 @@ from uuid import UUID
 from sqlalchemy import bindparam, delete, select, text
 from sqlalchemy.orm import Session
 
+from app.builtin_plugins.knowledge.vector_store import LocalVectorStore
 from app.builtin_plugins.manifest import PluginManifest
 from app.config import get_settings
 from app.core.errors import ApiError
@@ -367,8 +368,8 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
 class KnowledgePlugin:
     manifest = PluginManifest(
         name="knowledge",
-        description="本地知识库：SQLite FTS5 检索 + 结构化坐标 chunk（FTS5 不可用时 LIKE 降级）",
-        provides=("knowledge.provider",),
+        description="本地知识库：FTS5 全文检索 + 持久化本地向量存储",
+        provides=("knowledge.provider", "vector.store"),
         permissions=("file.read", "db.query"),
     )
 
@@ -380,3 +381,5 @@ class KnowledgePlugin:
         sdk.publish("knowledge.provider", provider)
         label = "builtin_sqlite_fts5" if fts5_available else "builtin_like_fallback"
         sdk.register_port("knowledge.provider", lambda: provider, label=label)
+        vector_store = LocalVectorStore(sdk.session)
+        sdk.register_port("vector.store", lambda: vector_store, label="builtin_local_exact_cosine")
