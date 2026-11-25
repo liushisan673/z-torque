@@ -153,3 +153,58 @@ async def test_generation_preset_actually_changes_model_request(mention_env, mon
     assert response.status_code == 200, response.text
     assert gateway.requests
     assert gateway.requests[0].temperature == 0.4
+
+
+@pytest.mark.asyncio
+async def test_non_stream_chat_creates_task_only_when_model_requests_a2a_dispatch(mention_env, monkeypatch):
+    from app.kernel.model_gateway.contracts import ModelResponse, ModelToolCall
+
+    class ToolCallingGateway:
+        default_model = "mock"
+
+        def __init__(self):
+            self.requests = []
+
+        async def generate(self, request):
+            self.requests.append(request)
+            assert any(tool["function"]["name"] == "route_specialist" for tool in request.tools)
+            return ModelResponse(
+                content=None,
+                tool_calls=[
+                    ModelToolCall(
+                        id="call-a2a-nonstream",
+                        name="route_specialist",
+                        arguments={
+                            "agent_version_id": mention_env["target_version_id"],
+                            "task": "写一份季度报告",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+
+    gateway = ToolCallingGateway()
+    monkeypatch.setattr(app.state, "model_gateway", gateway)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers = await _headers(client, mention_env["username"])
+        response = await client.post(
+            "/api/z-torque/chat",
+            headers={**headers, "Idempotency-Key": "a2a-tool-call"},
+            json={
+                "agent_id": None,
+                "conversation_id": None,
+                "message": "请委派给写作智能体完成季度报告",
+                "content_parts": None,
+                "stream": False,
+            },
+        )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["response_type"] == "TASK"
+    assert data["task_id"]
+    assert gateway.requests
+    with SessionLocal() as db:
+        task = db.get(Task, data["task_id"])
+        assert task is not None
+        assert task.parent_task_id is None
+        assert task.request_summary == "请委派给写作智能体完成季度报告"
