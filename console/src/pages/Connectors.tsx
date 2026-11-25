@@ -1462,7 +1462,7 @@ export function ConnectorsPage() {
                           <label>最近检查</label>
                           <input
                             type="text"
-                            value={lastTest ? `${fmtTime(lastTest.checked_at)} · 检查正常` : selectedTestFailure ? "最近一次检查异常" : "未检查"}
+                            value={lastTest ? `${fmtTime(lastTest.checked_at)} · ${lastTest.partial ? "部分检查完成" : "检查正常"}` : selectedTestFailure ? "最近一次检查异常" : "未检查"}
                             disabled
                           />
                         </div>
