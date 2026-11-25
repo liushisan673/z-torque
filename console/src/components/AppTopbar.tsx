@@ -1,5 +1,6 @@
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Dropdown } from "antd";
+import type { MenuProps } from "antd";
 import { DownOutlined } from "@ant-design/icons";
 import { useAuth } from "../stores/auth";
 import { useThemeMode } from "../theme/ThemeProvider";
@@ -15,6 +16,7 @@ export interface NavItem {
   /** 仅管理员可见（对应后端 require_admin） */
   adminOnly?: boolean;
   section?: "primary" | "more";
+  group?: "operations" | "configuration" | "account";
 }
 
 // 全站统一导航：仅包含已实现路由的入口；展示时按用户角色/权限过滤。
@@ -24,12 +26,12 @@ export const APP_NAV: NavItem[] = [
   { to: "/knowledge", label: "知识库", labelKey: "nav.knowledge", section: "primary" },
   { to: "/agents", label: "智能体", labelKey: "nav.agents", section: "primary" },
   { to: "/skills", label: "技能", labelKey: "nav.skills", section: "primary" },
-  { to: "/models", label: "模型接入", labelKey: "nav.models", adminOnly: true, section: "more" },
-  { to: "/connectors", label: "连接器", labelKey: "nav.connectors", adminOnly: true, section: "more" },
-  { to: "/webhooks", label: "Webhook", labelKey: "nav.webhooks", adminOnly: true, section: "more" },
-  { to: "/audit", label: "运行与审计", labelKey: "nav.audit", section: "more" },
-  { to: "/users", label: "用户与权限", labelKey: "nav.users", adminOnly: true, section: "more" },
-  { to: "/settings", label: "偏好设置", labelKey: "nav.settings", section: "more" },
+  { to: "/audit", label: "运行与审计", labelKey: "nav.audit", section: "more", group: "operations" },
+  { to: "/models", label: "模型接入", labelKey: "nav.models", adminOnly: true, section: "more", group: "configuration" },
+  { to: "/connectors", label: "连接器", labelKey: "nav.connectors", adminOnly: true, section: "more", group: "configuration" },
+  { to: "/webhooks", label: "Webhook", labelKey: "nav.webhooks", adminOnly: true, section: "more", group: "configuration" },
+  { to: "/users", label: "用户与权限", labelKey: "nav.users", adminOnly: true, section: "more", group: "account" },
+  { to: "/settings", label: "偏好设置", labelKey: "nav.settings", section: "more", group: "account" },
 ];
 
 /**
@@ -44,9 +46,9 @@ export function isAdminUser(user: UserInfo | null): boolean {
   return perms.some((p) => p.startsWith("user.") || p.startsWith("role.") || p.startsWith("system."));
 }
 
-/** 登录后的默认主页：管理员为模型配置（部署后第一件事），普通用户为会话 */
-export function homePath(user: UserInfo | null): string {
-  return isAdminUser(user) ? "/models" : "/chat";
+/** 登录后的默认入口统一为工作台；系统配置按需进入，不把管理员直接送进配置页。 */
+export function homePath(_user: UserInfo | null): string {
+  return "/chat";
 }
 
 /** 按导航元数据与用户权限过滤可见入口 */
@@ -73,7 +75,34 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
   const { mode: theme, toggle, locale, setLocale, t } = useThemeMode();
   const navigate = useNavigate();
   const location = useLocation();
-  const moreActive = moreItems.some((item) => location.pathname === item.to || location.pathname.startsWith(`${item.to}/`));
+  const activeMoreItem = moreItems.find((item) => location.pathname === item.to || location.pathname.startsWith(`${item.to}/`));
+  const moreActive = Boolean(activeMoreItem);
+  const moreMenuItems: MenuProps["items"] = [
+    {
+      type: "group",
+      label: t("nav.group.operations"),
+      children: moreItems.filter((item) => item.group === "operations").map((item) => ({
+        key: item.to,
+        label: item.labelKey ? t(item.labelKey) : item.label,
+      })),
+    },
+    {
+      type: "group",
+      label: t("nav.group.configuration"),
+      children: moreItems.filter((item) => item.group === "configuration").map((item) => ({
+        key: item.to,
+        label: item.labelKey ? t(item.labelKey) : item.label,
+      })),
+    },
+    {
+      type: "group",
+      label: t("nav.group.account"),
+      children: moreItems.filter((item) => item.group === "account").map((item) => ({
+        key: item.to,
+        label: item.labelKey ? t(item.labelKey) : item.label,
+      })),
+    },
+  ].filter((group) => (group.children?.length ?? 0) > 0);
 
   return (
     <header className="chat-topbar">
@@ -92,12 +121,13 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
           <Dropdown
             trigger={["click"]}
             menu={{
-              items: moreItems.map((item) => ({ key: item.to, label: item.labelKey ? t(item.labelKey) : item.label })),
+              items: moreMenuItems,
+              selectedKeys: activeMoreItem ? [activeMoreItem.to] : [],
               onClick: ({ key }) => navigate(key),
             }}
           >
             <button type="button" className={"chat-nav-link chat-nav-more" + (moreActive ? " active" : "")}>
-              {t("nav.manage")} <DownOutlined />
+              {t("nav.system")} <DownOutlined />
             </button>
           </Dropdown>
         )}

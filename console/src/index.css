@@ -6927,3 +6927,79 @@ html[data-embed-theme="dark"] .embed-shell {
   .knowledge-header > .ant-space .ant-btn { flex: 1; }
   .knowledge-result-meta { align-items: flex-start; flex-direction: column; }
 }
+
+
+/* ---- 桌面端控制台的窄屏收敛：导航保持可访问，内容区避免横向挤压 ---- */
+@media (max-width: 760px) {
+  .chat-topbar {
+    height: auto;
+    min-height: var(--topbar-h);
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 8px 14px;
+  }
+
+  .chat-topbar-nav {
+    order: 3;
+    flex: 1 1 100%;
+    width: 100%;
+    justify-content: flex-start;
+    padding-bottom: 2px;
+  }
+
+  .chat-topbar-user {
+    margin-left: auto;
+    gap: 7px;
+  }
+
+  .chat-user-name,
+  .chat-topbar-brand .chat-brand-sub {
+    display: none;
+  }
+
+  .content {
+    padding: 16px;
+  }
+
+  .knowledge-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .knowledge-header > .ant-space {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 480px) {
+  .chat-topbar {
+    padding: 8px 10px;
+  }
+
+  .chat-topbar-brand {
+    gap: 7px;
+  }
+
+  .chat-topbar-nav {
+    gap: 1px;
+  }
+
+  .chat-nav-link {
+    padding: 6px 9px;
+    font-size: 12px;
+  }
+
+  .chat-topbar-user {
+    gap: 5px;
+  }
+
+  .chat-btn-logout {
+    padding: 4px 7px;
+  }
+
+  .content {
+    padding: 12px;
+  }
+}

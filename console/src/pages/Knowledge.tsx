@@ -61,8 +61,8 @@ function knowledgeState(state: string): { label: string; color: string; descript
   switch (state.toUpperCase()) {
     case "AVAILABLE":
     case "READY": return { label: "检索可用", color: "success", description: "本地知识检索已就绪，上传的资料可用于知识检索。" };
-    case "DEGRADED": return { label: "检索降级", color: "warning", description: "资料仍可上传和解析，但本地检索能力不完整，请检查本机索引环境。" };
-    default: return { label: "检索不可用", color: "error", description: "文件管理仍可使用，但知识检索暂不可用；请检查本机知识库组件配置。" };
+    case "DEGRADED": return { label: "检索降级", color: "warning", description: "资料仍可上传和解析，但检索结果可能不完整。" };
+    default: return { label: "检索不可用", color: "error", description: "资料仍保留，文件管理可以继续使用，但当前无法检索。请检查本地运行状态。" };
   }
 }
 
@@ -267,7 +267,8 @@ export function KnowledgePage() {
           <div className="knowledge-stat"><span>资料总数</span><strong>{files.length}</strong></div>
           <div className="knowledge-stat"><span>解析成功</span><strong>{files.filter((file) => file.status === "PARSED").length}</strong></div>
           <div className="knowledge-stat"><span>解析失败</span><strong>{files.filter((file) => file.status === "PARSE_FAILED").length}</strong></div>
-          <div className="knowledge-summary-foot"><span>检索索引</span><Tag color={status?.fts5 ? "success" : "default"}>{status?.fts5 ? "SQLite FTS5" : "基础模式"}</Tag></div>
+          <div className="knowledge-stat"><span>来源引用校验</span><Tag color={status?.citation_enforcement ? "success" : "warning"}>{status?.citation_enforcement ? "已启用" : "未启用"}</Tag></div>
+          <div className="knowledge-summary-foot"><span>本地检索方式</span><Tag color={status?.fts5 ? "success" : "default"}>{status?.fts5 ? "全文索引" : "基础检索"}</Tag></div>
           <Button block icon={<ReloadOutlined />} loading={reindexing} disabled={status?.search === "UNAVAILABLE"} onClick={() => void rebuildIndex()}>检查并重建索引</Button>
         </Card>
       </div>
