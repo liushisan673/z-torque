@@ -3,19 +3,40 @@ from collections.abc import Generator
 from pathlib import Path
 
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 
 
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
+_SQLITE_CACHE_SIZE_KIB = 8_192
+
+
 def _database_url() -> str:
     url = get_settings().database_url
-    if url.startswith("sqlite:///"):
-        Path(url.removeprefix("sqlite:///" )).parent.mkdir(parents=True, exist_ok=True)
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite":
+        database = parsed.database
+        if database and database != ":memory:" and not database.startswith("file:"):
+            Path(database).expanduser().parent.mkdir(parents=True, exist_ok=True)
     return url
 
 
-engine = create_engine(_database_url(), future=True, pool_pre_ping=True)
+def _build_engine(url: str):
+    parsed = make_url(url)
+    connect_args = {}
+    if parsed.get_backend_name() == "sqlite":
+        # 显式固定线程与锁等待语义：SQLAlchemy 的默认值会随 URL 形态变化，
+        # 单机任务 worker 与 API 线程并发时必须允许连接跨线程使用，并给短写锁留出等待窗口。
+        connect_args = {
+            "check_same_thread": False,
+            "timeout": _SQLITE_BUSY_TIMEOUT_MS / 1000,
+        }
+    return create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
+
+
+engine = _build_engine(_database_url())
 
 
 def _ensure_sqlite_columns() -> None:
@@ -90,16 +111,34 @@ def _normalize_uuid_formats(conn: sqlite3.Connection) -> None:
 _ensure_sqlite_columns()
 
 
-@event.listens_for(engine, "connect")
-def _sqlite_pragmas(dbapi_connection, _connection_record):
-    # 只在 SQLite 连接上执行 PRAGMA：PostgreSQL/MySQL 连接执行会直接语法错误，
-    # 使引擎在首次取连接时就失败（等于该方言完全不可用）。
+def _sqlite_pragmas(dbapi_connection, _connection_record=None) -> None:
+    """每条 SQLite 连接的稳定运行参数；非 SQLite 连接绝不执行 PRAGMA。"""
     if not isinstance(dbapi_connection, sqlite3.Connection):
         return
     cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.close()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute(f"PRAGMA busy_timeout={_SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        cursor.execute(f"PRAGMA cache_size=-{_SQLITE_CACHE_SIZE_KIB}")
+    finally:
+        cursor.close()
+
+
+def _sqlite_wal_first_connect(dbapi_connection, _connection_record=None) -> None:
+    """WAL 是数据库级设置，只在首条连接建立时设置，避免每个连接重复切换 journal mode。"""
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+    finally:
+        cursor.close()
+
+
+event.listen(engine, "connect", _sqlite_pragmas)
+event.listen(engine, "first_connect", _sqlite_wal_first_connect)
 
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
