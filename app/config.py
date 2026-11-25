@@ -1,9 +1,14 @@
+import json
 import os
+import secrets
 from functools import lru_cache
 from pathlib import Path
 
+from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.runtime_paths import default_database_url, default_data_dir, default_env_file, default_user_path, is_frozen, resource_dir
 
 _WEAK_ADMIN_PASSWORDS = {'admin123', 'admin', 'password', 'password123', '123456', '12345678', 'changeme', 'admin888'}
 _MIN_ADMIN_PASSWORD_LENGTH = 12
@@ -35,35 +40,35 @@ def _plain_secret(value: SecretStr | str) -> str:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(Path(__file__).resolve().parents[1] / '.env'),
+        env_file=str(default_env_file()),
         env_file_encoding='utf-8',
         extra='ignore',
     )
 
     app_name: str = 'Z-Torque'
-    app_env: str = 'development'
+    app_env: str = Field(default_factory=lambda: 'production' if is_frozen() else 'development')
     app_host: str = '127.0.0.1'
     app_port: int = 8000
     app_debug: bool = False
     # 会话 Cookie 是否仅经 HTTPS 传输；生产默认开启（P2-17）
     cookie_secure: bool = False
-    database_url: str = 'sqlite:///./data/z_torque.db'
+    data_dir: Path = Field(default_factory=default_data_dir)\n    database_url: str = Field(default_factory=default_database_url)
     access_token_ttl_minutes: int = 60
     refresh_token_ttl_days: int = 7
     login_failure_limit: int = 5
     login_lock_minutes: int = 15
     jwt_secret_key: SecretStr = Field(default=..., validation_alias='JWT_SECRET_KEY')
     secret_store_key: SecretStr = Field(default=..., validation_alias='SECRET_STORE_KEY')
-    secret_store_dir: Path = Path('./data/secrets')
-    file_storage_dir: Path = Path('./data/files')
+    secret_store_dir: Path = Field(default_factory=lambda: default_user_path('secrets'))
+    file_storage_dir: Path = Field(default_factory=lambda: default_user_path('files'))
     max_upload_size_mb: int = 50
     # 控制台跨域来源（逗号分隔）：生产必须显式配置控制台域名，默认仅本地 vite dev
     cors_allow_origins: str = 'http://localhost:5174,http://127.0.0.1:5174'
     # 控制台静态托管（单端口交付）：开启后后端在同一源上直接提供 console/dist，
     # 前端与 API 同源即无需 CORS、也不需要 vite 第二个进程。默认关闭：
     # 开发期仍走 vite dev server，测试/CI 不会因为本机存在 dist 而改变路由行为。
-    serve_console: bool = False
-    console_dist_dir: Path = Path('./console/dist')
+    serve_console: bool = Field(default_factory=is_frozen)
+    console_dist_dir: Path = Field(default_factory=lambda: (resource_dir() / 'console' / 'dist') if is_frozen() else default_user_path('console/dist'))
     # 出站代理（如 http://127.0.0.1:7897）：设置后后端所有 httpx 出站请求走此代理；
     # 回环地址与 api.deepseek.com 保持在 NO_PROXY 直连
     proxy_url: str = ''
@@ -165,7 +170,7 @@ class Settings(BaseSettings):
     task_outbox_max_attempts: int = 10
     task_event_retention: int = 90
     task_human_confirm_timeout: int = 600
-    md_skills_dir: Path = Path('./md-skills')
+    md_skills_dir: Path = Field(default_factory=lambda: default_user_path('md-skills'))
     md_skill_watch_enabled: bool = True
     md_skill_scan_interval: float = 15.0
     # 单一系统（.exe 单机标准）：脚本能力默认开启；Windows 走「可信声明 + 用户确认 + 路径收口」
@@ -412,12 +417,80 @@ class Settings(BaseSettings):
                 raise ValueError('SANDBOX_DOCKER_BINARY is required in container mode')
 
 
+def _ensure_frozen_runtime_secrets() -> None:
+    """首次启动时为单机包生成并持久化密钥，避免要求用户手工配置环境变量。
+
+    密钥文件位于当前 Windows 用户的 LOCALAPPDATA 下；文件损坏时 fail closed，
+    绝不自动换钥，否则已加密的连接器凭据将无法解密。
+    """
+    if not is_frozen():
+        return
+    data_dir = default_data_dir()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    secret_file = data_dir / "runtime-secrets.json"
+    if secret_file.exists():
+        try:
+            stored = json.loads(secret_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"runtime secrets file is unreadable: {secret_file}") from exc
+        if not isinstance(stored, dict):
+            raise RuntimeError(f"runtime secrets file has an invalid shape: {secret_file}")
+    else:
+        stored = {}
+
+    try:
+        from dotenv import dotenv_values
+        file_values = dotenv_values(default_env_file()) if default_env_file().is_file() else {}
+    except Exception:  # noqa: BLE001 - dotenv is optional when no external .env exists
+        file_values = {}
+
+    generated_admin = False
+    values = {
+        "jwt_secret_key": ("JWT_SECRET_KEY", lambda: secrets.token_urlsafe(48)),
+        "secret_store_key": ("SECRET_STORE_KEY", lambda: Fernet.generate_key().decode("ascii")),
+        "admin_initial_password": ("ADMIN_INITIAL_PASSWORD", lambda: secrets.token_urlsafe(24)),
+    }
+    for key, (env_name, factory) in values.items():
+        selected = os.environ.get(env_name) or file_values.get(env_name) or stored.get(key)
+        if not selected:
+            selected = factory()
+            if key == "admin_initial_password":
+                generated_admin = True
+        stored[key] = str(selected)
+        os.environ.setdefault(env_name, str(selected))
+
+    temp_file = secret_file.with_suffix(".tmp")
+    temp_file.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp_file, secret_file)
+    try:
+        secret_file.chmod(0o600)
+    except OSError:
+        pass
+    if generated_admin:
+        username = os.getenv("ADMIN_INITIAL_USERNAME", "admin")
+        credentials = data_dir / "FIRST_RUN_CREDENTIALS.txt"
+        credentials.write_text(
+            "Z-Torque 初始管理员凭据\\n"
+            f"用户名：{username}\\n"
+            f"初始密码：{stored['admin_initial_password']}\\n\\n"
+            "首次登录后请立即修改密码，并删除本文件。\\n",
+            encoding="utf-8",
+        )
+        try:
+            credentials.chmod(0o600)
+        except OSError:
+            pass
+
+
 @lru_cache
 def get_settings() -> Settings:
+    _ensure_frozen_runtime_secrets()
     settings = Settings()
     settings.validate_runtime()
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.secret_store_dir.mkdir(parents=True, exist_ok=True)
     settings.file_storage_dir.mkdir(parents=True, exist_ok=True)
+    settings.md_skills_dir.mkdir(parents=True, exist_ok=True)
     # 出站代理：httpx 默认 trust_env，读 os.environ；在 Settings 装配时同步写入进程环境，
     # 保证 MCP/REST 连接器等后续创建的客户端统一走代理（无需逐处传 proxy 参数）
     if settings.proxy_url.strip():
