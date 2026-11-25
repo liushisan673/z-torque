@@ -110,3 +110,11 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 - Connector health distinguishes a complete successful check, a partial check, a failed check, and a connector that has not been checked in the current session. Partial results are not presented as fully healthy.
 - Audit event rows can be opened with keyboard focus plus Enter/Space, matching their existing click behavior. Trace ID copy remains a separate action and does not open the event row.
 - These changes are presentation/state-scoping improvements; no connector test API, audit API, backend health persistence, or authorization rules were changed. Connector test results remain session-local in the current UI.
+
+## Task and audit cross-inspection pass (2026-11-25)
+
+- Audit events whose resource type is `TASK` now attempt to load the corresponding task detail and ordered task-event stream in the event drawer, using the existing `GET /tasks/{task_id}` and `GET /tasks/{task_id}/events` endpoints.
+- The task panel displays the persisted task status, task/root-task identifiers, delegation depth, timestamps, task-level error information and ordered event summaries/state transitions. Failure emphasis is derived only from the returned event type/state; it does not invent a model/tool/agent failure stage when the event stream does not identify one.
+- The task API is owner-scoped. The UI only requests task detail when the audit event actor matches the current user; global audit visibility does not grant permission to inspect another user's task. Other users' task payloads are intentionally not fetched or exposed.
+- The task event sequence is presented as the task's own execution history. The existing audit `by-trace` view remains explicitly labelled “同 Trace”; it is correlation by trace ID, not proof of parent/child causality. Task root ID and delegation depth are shown as returned by the task API; no parent-task relationship is fabricated.
+- No backend route, schema, permission, audit retention or task lifecycle behavior was changed.
