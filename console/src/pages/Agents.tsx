@@ -882,7 +882,16 @@ export function AgentsPage() {
                   <div
                     key={a.id}
                     className={`agent-card${isActive ? " active" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={isActive}
                     onClick={() => void openDetail(a)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        void openDetail(a);
+                      }
+                    }}
                   >
                     <div className="row1">
                       <span className="name">{a.name}{a.is_default_parent && " · 默认父"}{!a.is_default_parent && a.is_default && " · 默认"}</span>
