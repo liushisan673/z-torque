@@ -26,10 +26,10 @@ from app.services.context_builder import (
     build_agent_system_prompt,
     build_context,
 )
+from app.services.execution_loop import serialize_seed
 from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens, model_capabilities
 from app.services.tool_mapping_builder import build_tool_mappings
-from app.services.execution_loop import serialize_seed
 
 logger = logging.getLogger("z_torque.chat")
 
