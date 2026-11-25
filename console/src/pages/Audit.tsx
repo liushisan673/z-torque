@@ -1068,7 +1068,15 @@ export function AuditPage() {
                       <tr
                         key={e.id}
                         className={detail?.id === e.id ? "active" : ""}
+                        tabIndex={0}
+                        aria-label={`查看审计事件：${summaryLabel(e.summary)}`}
                         onClick={() => void openDetail(e)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === "Enter" || ev.key === " ") {
+                            ev.preventDefault();
+                            void openDetail(e);
+                          }
+                        }}
                       >
                         <td className="time" title={fmtTime(e.created_at)}>{fmtListTime(e.created_at)}</td>
                         <td><span className={`audit-tag ${tg.cls}`}>{tg.label}</span></td>
