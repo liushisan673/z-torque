@@ -94,3 +94,11 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 - The approval panel explains the checkpoint behavior: the current task pauses and releases its execution slot while awaiting confirmation; approval resumes from the checkpoint. The UI explicitly tells users to switch conversations to continue other work, then return to approve/reject.
 - Task history includes a direct detail action, and terminal task labels distinguish success, failure, timeout and cancellation.
 - Keep the workbench centered on conversation and task progress; do not surface sandbox/runtime infrastructure as a peer navigation destination.
+
+
+## Agent and Skill onboarding clarity pass (2026-11-25)
+
+- The Agent creation dialog now explains the minimum first-publish path: name, model and system rules; skill binding is optional, while delegation and runtime strategy can be configured in a later draft version.
+- Agent delegation configuration explicitly distinguishes the parent AgentVersion's child-agent allowlist from user authorization. The allowlist narrows which child versions this parent version may delegate to; every execution still checks the initiating user's identity, resource scope and operation permissions. Being allowlisted does not grant a child Agent additional user permissions.
+- The Skill creation dialog distinguishes Standard Skill authoring from MD-Skill file import and explains that script mode is an implementation characteristic of a version. Users are reminded to review version content and tool bindings before publishing.
+- These are explanatory UI changes only: no API payloads, publication rules, version snapshots, delegation enforcement or authorization behavior were changed.
