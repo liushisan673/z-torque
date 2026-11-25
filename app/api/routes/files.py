@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request, UploadFile
 from fastapi import File as UploadFileParam
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -42,8 +43,10 @@ def owned_file(db: Session, user: User, file_id: UUID) -> File:
 
 
 def _signature_matches(path: Path, suffix: str) -> bool:
-    # 与媒体落库共用同一套魔术字节判定，避免两处规则漂移
-    return signature_matches(suffix, path.read_bytes()[:16])
+    # 只读取文件头；read_bytes()[:16] 会先把整个大文件载入内存再切片。
+    with path.open("rb") as handle:
+        header = handle.read(16)
+    return signature_matches(suffix, header)
 
 
 def metadata(item: File) -> dict:
@@ -64,7 +67,10 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
     file_id = new_uuid7()
     store = _object_store(request)
     # 流式写入经 object.store Port（大小上限 + sha256 + 路径逃逸防护由实现承载）
-    result = store.put(str(file_id), upload.file, max_bytes=settings.max_upload_size_mb * 1024 * 1024)
+    result = await run_in_threadpool(
+        store.put, str(file_id), upload.file,
+        max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+    )
     target = store.local_path(str(file_id))
     size, digest = result.size_bytes, result.sha256
     if not _signature_matches(target, suffix):
@@ -72,7 +78,8 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         raise ApiError("AI_FILE_TYPE_UNSUPPORTED", "file content does not match its type", 415)
     item = File(id=file_id, tenant_id=user.tenant_id, owner_user_id=user.id, conversation_id=conversation_id, original_name=Path(upload.filename or "file").name[:255], media_type=upload.content_type or "application/octet-stream", size_bytes=size, sha256=digest, storage_key=str(file_id), status="UPLOADED")
     try:
-        parsed = parse_file_structured(
+        parsed = await run_in_threadpool(
+            parse_file_structured,
             target, suffix, settings.file_max_extracted_text,
             max_blocks=settings.knowledge_max_chunks_per_file,
             max_block_chars=settings.knowledge_chunk_max_chars,
@@ -82,11 +89,14 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         provider = knowledge_service.get_provider(request)
         if provider is not None:
             try:
-                knowledge_service.index_uploaded_file(
-                    db, provider=provider,
-                    ctx=SecurityContext(tenant_id=user.tenant_id, user_id=user.id, trace_id=request.state.trace_id),
-                    file_id=file_id, path=str(target), sha256=digest, parsed=parsed, size_bytes=size,
-                )
+                # 索引失败必须回滚到保存点：否则 SQLAlchemy Session 可能进入 failed
+                # transaction，导致文件元数据与上传审计也无法提交。
+                with db.begin_nested():
+                    knowledge_service.index_uploaded_file(
+                        db, provider=provider,
+                        ctx=SecurityContext(tenant_id=user.tenant_id, user_id=user.id, trace_id=request.state.trace_id),
+                        file_id=file_id, path=str(target), sha256=digest, parsed=parsed, size_bytes=size,
+                    )
             except Exception as exc:  # noqa: BLE001 - chunk 入库失败不阻断上传，但检索能力降级必须审计
                 logger.warning("knowledge index failed: id=%s err=%s", file_id, exc, exc_info=True)
                 record_audit_detached(
@@ -100,7 +110,16 @@ async def upload(request: Request, upload: UploadFile = UploadFileParam(...), co
         item.parse_error = str(exc)[:500]
     db.add(item)
     record_audit(db, tenant_id=user.tenant_id, actor_user_id=user.id, action="FILE_UPLOADED", resource_type="FILE", resource_id=item.id, summary="file uploaded", trace_id=request.state.trace_id)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        # 文件系统与 SQLite 事务不能原子提交；数据库提交失败时清理刚写入的对象，避免孤儿文件。
+        try:
+            await run_in_threadpool(store.delete, str(file_id))
+        except Exception:
+            logger.exception("failed to clean uploaded object after database commit failure file_id=%s", file_id)
+        raise
     db.refresh(item)
     return success_response(request, metadata(item))
 
