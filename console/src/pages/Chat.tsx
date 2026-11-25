@@ -1492,7 +1492,7 @@ export function ChatPage() {
         </aside>
 
         {/* 左右分栏拖拽把手（会话列表折叠时不显示） */}
-        {!sidebarCollapsed && <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />}
+        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
 
         {/* 中间对话区：分栏时左侧保留当前会话，右侧是可独立收发的另一会话 */}
         <section className={`chat-main${splitOpen ? " chat-main-split" : ""}`} style={splitPane.style}>
@@ -1504,24 +1504,10 @@ export function ChatPage() {
                 className="chat-sidebar-toggle"
                 type="button"
                 onClick={() => setSidebarOpen(true)}
-                aria-label="打开会话与智能体列表"
-                title="会话与智能体"
+                aria-label="打开会话列表"
+                title="会话列表"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
-              </button>
-              {/* 宽屏会话列表折叠开关：点击隐藏/展开左侧会话列表（窄屏由抽屉 toggle 接管） */}
-              <button
-                className="chat-sidebar-collapse-toggle"
-                type="button"
-                onClick={() => setSidebarCollapsed((v) => !v)}
-                aria-label={sidebarCollapsed ? "展开会话列表" : "隐藏会话列表"}
-                title={sidebarCollapsed ? "展开会话列表" : "隐藏会话列表"}
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  {sidebarCollapsed
-                    ? <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /><path d="M15 9l3 3-3 3" /></>
-                    : <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /><path d="M15 9l-3 3 3 3" /></>}
-                </svg>
               </button>
               <span className="chat-header-title">{currentConversation?.title ?? "新会话"}</span>
               {currentAgent && <span className="chat-agent-chip">{currentAgent.name}</span>}
