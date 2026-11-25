@@ -35,7 +35,7 @@ def test_parser_enforces_total_character_limit_incrementally(tmp_path, monkeypat
     assert result.text == "12345\n6"
     assert len(result.text) <= 7
     assert result.truncated is True
-    assert consumed == [0, 1]
+    assert consumed == [0, 1, 2]  # 仅探测一个后续块确认截断
 
 
 def test_text_parser_streams_and_preserves_line_coordinates(tmp_path):
