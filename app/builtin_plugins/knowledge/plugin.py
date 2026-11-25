@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -35,7 +37,7 @@ def ensure_schema(bind: Any) -> bool:
         return False
     with bind.begin() as connection:
         connection.exec_driver_sql(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS zr_knowledge_fts USING fts5(tenant_id, chunk_id, text, tokenize='unicode61')"
+            "CREATE VIRTUAL TABLE IF NOT EXISTS zr_knowledge_fts USING fts5(tenant_id, chunk_id, text, tokenize='trigram')"
         )
     return True
 
@@ -45,7 +47,7 @@ def probe_fts5() -> bool:
     try:
         connection = sqlite3.connect(":memory:")
         try:
-            connection.execute("CREATE VIRTUAL TABLE _probe USING fts5(text)")
+            connection.execute("CREATE VIRTUAL TABLE _probe USING fts5(text, tokenize='trigram')")
             connection.execute("DROP TABLE _probe")
         finally:
             connection.close()
@@ -64,9 +66,27 @@ def _path_allowed(path: str, allowed_paths: list[str] | None) -> bool:
     )
 
 
+_CJK_RUN = re.compile(r"[\\u3400-\\u9fff\\uf900-\\ufaff]+")
+_WORD = re.compile(r"[A-Za-z0-9_]{2,}")
+
+
+def _query_terms(query: str, *, limit: int = 24) -> list[str]:
+    """为 FTS5 trigram 构造跨中英文的候选词；中文无空格句子拆为重叠三元组。"""
+    normalized = unicodedata.normalize("NFKC", query).strip()
+    terms: list[str] = []
+    for run in _CJK_RUN.findall(normalized):
+        if len(run) < 3:
+            terms.append(run)
+        else:
+            terms.extend(run[index:index + 3] for index in range(len(run) - 2))
+    terms.extend(word.lower() for word in _WORD.findall(normalized))
+    # 保留出现顺序，去重后限制 MATCH 表达式大小，避免长提示词生成超大查询。
+    return list(dict.fromkeys(term for term in terms if term))[:limit]
+
+
 def _fts_query(query: str) -> str:
-    terms = [term for term in query.split() if term]
-    return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms) or '""'
+    terms = [term for term in _query_terms(query) if len(term) >= 3]
+    return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in terms)
 
 
 class SqliteKnowledgeProvider(KnowledgeProvider):
@@ -100,29 +120,40 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
         )
         db.add(doc)
         db.flush()
-        for seq, block in enumerate(kept):
-            chunk = ChunkRow(
+        chunks = [
+            ChunkRow(
                 tenant_id=tenant_id, doc_id=doc.id, seq=seq, text=block.text,
                 page_no=block.page_no, sheet=block.sheet, row_no=block.row_no, col_no=block.col_no,
                 line_start=block.line_start, line_end=block.line_end,
                 token_count=max(1, len(block.text) // 2),
             )
-            db.add(chunk)
+            for seq, block in enumerate(kept)
+        ]
+        if chunks:
+            # 一次批量 flush + 一条 INSERT..SELECT，避免每个 chunk 两次 DB 往返；
+            # FTS rowid 由索引表自行分配，chunk_id 是跨 SQLite/PostgreSQL 的稳定关联键。
+            db.add_all(chunks)
             db.flush()
-            rowid = db.execute(text("SELECT rowid FROM zr_knowledge_chunk WHERE id = :id"), {"id": str(chunk.id)}).scalar()
             db.execute(
-                text("INSERT INTO zr_knowledge_fts(rowid, tenant_id, chunk_id, text) VALUES (:rowid, :tenant, :cid, :text)"),
-                {"rowid": rowid, "tenant": str(tenant_id), "cid": str(chunk.id), "text": block.text},
+                text(
+                    "INSERT INTO zr_knowledge_fts(tenant_id, chunk_id, text) "
+                    "SELECT tenant_id, id, text FROM zr_knowledge_chunk WHERE doc_id = :doc_id"
+                ),
+                {"doc_id": str(doc.id)},
             )
         return {"doc_id": str(doc.id), "chunks": len(kept), "truncated": truncated, "mode": self.mode()}
 
     def _delete_doc(self, db: Session, doc: DocRow) -> None:
         # 应用侧双写：FTS 与 chunk 同生共死（FTS5/普通表都按 rowid 删除）
-        chunks = db.scalars(select(ChunkRow).where(ChunkRow.doc_id == doc.id)).all()
-        for chunk in chunks:
-            rowid = db.execute(text("SELECT rowid FROM zr_knowledge_chunk WHERE id = :id"), {"id": str(chunk.id)}).scalar()
-            if rowid is not None:
-                db.execute(text("DELETE FROM zr_knowledge_fts WHERE rowid = :rowid"), {"rowid": rowid})
+        # 按稳定 chunk_id 批量删除，避免逐 chunk SELECT rowid + DELETE 两次往返；
+        # SQLite FTS5 与普通回退表、PostgreSQL 普通表均支持该键。
+        db.execute(
+            text(
+                "DELETE FROM zr_knowledge_fts "
+                "WHERE chunk_id IN (SELECT id FROM zr_knowledge_chunk WHERE doc_id = :doc_id)"
+            ),
+            {"doc_id": str(doc.id)},
+        )
         db.execute(delete(ChunkRow).where(ChunkRow.doc_id == doc.id))
         db.delete(doc)
         db.flush()
@@ -147,8 +178,10 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                 skipped += 1
                 continue
             try:
-                parsed = parse_file_structured(path, Path(item.original_name).suffix, settings.file_max_extracted_text, max_blocks=settings.knowledge_max_chunks_per_file, max_block_chars=settings.knowledge_chunk_max_chars)
-                self.index_file(db, tenant_id=tenant_id, file_id=item.id, path=str(path), sha256=item.sha256, parsed=parsed, size_bytes=item.size_bytes)
+                # 单文件保存点：一个坏文件回滚自身写入，不把 Session 留在 failed transaction 状态。
+                with db.begin_nested():
+                    parsed = parse_file_structured(path, Path(item.original_name).suffix, settings.file_max_extracted_text, max_blocks=settings.knowledge_max_chunks_per_file, max_block_chars=settings.knowledge_chunk_max_chars)
+                    self.index_file(db, tenant_id=tenant_id, file_id=item.id, path=str(path), sha256=item.sha256, parsed=parsed, size_bytes=item.size_bytes)
                 indexed += 1
             except Exception:  # noqa: BLE001 - 单个存量文件失败不影响整体回填
                 skipped += 1
@@ -160,41 +193,92 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
         return self.search_db(db, tenant_id=tenant_id, query=query, top_k=top_k, filters=filters)
 
     def search_db(self, db: Session, *, tenant_id: UUID, query: str, top_k: int = 5, filters: dict | None = None) -> list[KnowledgeChunk]:
-        """真实检索入口：FTS5 MATCH（bm25 排序）或 LIKE 降级，强制 allowed_paths。"""
-        allowed = list((filters or {}).get("allowed_paths") or [])
-        if not query.strip() or not allowed:
+        """真实检索入口：trigram FTS5 + BM25，或带命中计分的 LIKE 降级。
+
+        owner_user_id 在 SQL 层与文件表联接后过滤，避免先 LIMIT 再做 Python 白名单过滤
+        导致相关文档被其他用户的高排名文档挤出候选集。
+        """
+        options = filters or {}
+        owner_user_id = options.get("owner_user_id")
+        allowed = list(options.get("allowed_paths") or [])
+        if not query.strip() or (owner_user_id is None and not allowed):
             return []
         limit = max(1, min(int(top_k), 50))
-        if self.fts5:
+        params: dict[str, Any] = {"tenant_id": str(tenant_id), "limit": limit}
+        joins = " JOIN zr_knowledge_chunk c ON c.id = zr_knowledge_fts.chunk_id JOIN zr_knowledge_doc d ON d.id = c.doc_id"
+        clauses = [
+            "zr_knowledge_fts.tenant_id = :tenant_id",
+            "d.tenant_id = :tenant_id",
+            "d.status = 'ACTIVE'",
+        ]
+        if owner_user_id is not None:
+            joins += " JOIN zr_file scoped_file ON scoped_file.id = d.file_id AND scoped_file.tenant_id = d.tenant_id"
+            clauses.extend([
+                "scoped_file.owner_user_id = :owner_user_id",
+                "scoped_file.status = 'PARSED'",
+            ])
+            params["owner_user_id"] = str(owner_user_id)
+        else:
+            path_params: list[str] = []
+            for index, path in enumerate(allowed):
+                key = f"path_{index}"
+                params[key] = str(Path(path).expanduser().resolve())
+                path_params.append(f":{key}")
+            if not path_params:
+                return []
+            clauses.append(f"d.path IN ({', '.join(path_params)})")
+
+        file_id = options.get("file_id")
+        if file_id is not None:
+            clauses.append("d.file_id = :file_id")
+            params["file_id"] = str(file_id)
+        excluded = [str(item) for item in (options.get("exclude_file_ids") or [])]
+        if excluded:
+            names: list[str] = []
+            for index, value in enumerate(excluded):
+                key = f"exclude_{index}"
+                params[key] = value
+                names.append(f":{key}")
+            clauses.append(f"d.file_id NOT IN ({', '.join(names)})")
+
+        where = " AND ".join(clauses)
+        fts_expression = _fts_query(query)
+        if self.fts5 and fts_expression:
+            params["query"] = fts_expression
             rows = db.execute(
                 text(
                     "SELECT c.id, c.text, c.page_no, c.sheet, c.row_no, c.col_no, c.line_start, c.line_end, "
                     "d.path AS path, d.file_id AS file_id, bm25(zr_knowledge_fts) AS score "
-                    "FROM zr_knowledge_fts JOIN zr_knowledge_chunk c ON c.id = zr_knowledge_fts.chunk_id "
-                    "JOIN zr_knowledge_doc d ON d.id = c.doc_id "
-                    "WHERE zr_knowledge_fts MATCH :query AND zr_knowledge_fts.tenant_id = :tenant_id "
-                    "AND d.tenant_id = :tenant_id AND d.status = 'ACTIVE' "
+                    f"FROM zr_knowledge_fts{joins} WHERE zr_knowledge_fts MATCH :query AND {where} "
                     "ORDER BY score LIMIT :limit"
                 ),
-                {"query": _fts_query(query), "tenant_id": str(tenant_id), "limit": limit},
+                params,
             ).mappings().all()
         else:
-            pattern = f"%{query.strip()}%"
+            terms = _query_terms(query) or [query.strip()]
+            like_clauses: list[str] = []
+            score_terms: list[str] = []
+            for index, term in enumerate(terms):
+                key = f"term_{index}"
+                escaped = term.replace("\\\\", "\\\\\\\\").replace("%", "\\\\%").replace("_", "\\\\_")
+                params[key] = f"%{escaped}%"
+                like_clauses.append(f"zr_knowledge_fts.text LIKE :{key} ESCAPE '\\\\'")
+                score_terms.append(f"(CASE WHEN zr_knowledge_fts.text LIKE :{key} ESCAPE '\\\\' THEN 1 ELSE 0 END)")
+            score = " + ".join(score_terms)
             rows = db.execute(
                 text(
                     "SELECT c.id, c.text, c.page_no, c.sheet, c.row_no, c.col_no, c.line_start, c.line_end, "
-                    "d.path AS path, d.file_id AS file_id, 0.0 AS score "
-                    "FROM zr_knowledge_fts f JOIN zr_knowledge_chunk c ON c.id = f.chunk_id "
-                    "JOIN zr_knowledge_doc d ON d.id = c.doc_id "
-                    "WHERE f.tenant_id = :tenant_id AND f.text LIKE :pattern "
-                    "AND d.tenant_id = :tenant_id AND d.status = 'ACTIVE' "
-                    "ORDER BY c.seq LIMIT :limit"
+                    f"d.path AS path, d.file_id AS file_id, -({score}) AS score "
+                    f"FROM zr_knowledge_fts{joins} WHERE {' OR '.join(like_clauses)} AND {where} "
+                    "ORDER BY score, c.seq LIMIT :limit"
                 ),
-                {"pattern": pattern, "tenant_id": str(tenant_id), "limit": limit},
+                params,
             ).mappings().all()
+
         results: list[KnowledgeChunk] = []
         for row in rows:
-            if not _path_allowed(row["path"], allowed):
+            # owner_user_id 已在 SQL 层校验；无用户上下文的内部调用仍必须逐条检查路径白名单。
+            if owner_user_id is None and not _path_allowed(row["path"], allowed):
                 continue
             results.append(
                 KnowledgeChunk(
@@ -252,13 +336,15 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
 class KnowledgePlugin:
     manifest = PluginManifest(
         name="knowledge",
-        description="本地知识库：SQLite FTS5 检索 + 结构化坐标 chunk（FTS5 不可用时 LIKE 降级）",
+        description="本地知识库：SQLite FTS5 trigram 检索 + BM25 排序（不可用时 LIKE 降级）",
         provides=("knowledge.provider",),
         permissions=("file.read", "db.query"),
     )
 
     def contribute(self, sdk: Any) -> None:
-        provider = SqliteKnowledgeProvider()
-        ensure_schema(sdk.engine)
+        # 检索模式必须与实际数据库方言/FTS tokenizer 一致；不能按宿主 Python 的 sqlite3
+        # 能力误判 PostgreSQL 目标库也支持 FTS5。
+        fts5 = ensure_schema(sdk.engine)
+        provider = SqliteKnowledgeProvider(fts5=fts5)
         sdk.publish("knowledge.provider", provider)
         sdk.register_port("knowledge.provider", lambda: provider, label="builtin_sqlite_fts5" if provider.fts5 else "builtin_sqlite_like_degraded")
