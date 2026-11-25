@@ -911,6 +911,18 @@ export function AuditPage() {
 
   return (
     <div className="audit-page" style={listPane.style}>
+      <header className="audit-page-header">
+        <div>
+          <h1>运行与审计</h1>
+          <p>查看任务执行记录、工具调用事件与审计详情，定位失败原因并追踪完整执行链路。</p>
+        </div>
+        <div className="audit-page-count" aria-live="polite">
+          <strong>{total.toLocaleString()}</strong>
+          <span>条记录</span>
+          <span className="audit-page-scope">{scope === "all" ? "全局范围" : "仅本人"}</span>
+        </div>
+      </header>
+
       {/* 范围提示 */}
 
       {/* 筛选栏 */}
