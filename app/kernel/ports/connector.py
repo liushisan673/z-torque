@@ -13,7 +13,11 @@ class McpTransportError(Exception):
 
 
 class McpProtocolError(Exception):
-    """MCP 协议层失败（握手版本不匹配、JSON-RPC error、响应不合法）。"""
+    """MCP 协议层失败（握手版本不匹配、响应不合法）。"""
+
+
+class McpRemoteError(McpProtocolError):
+    """MCP Server 返回的 JSON-RPC error；请求失败但连接会话通常仍可复用。"""
 
 
 @runtime_checkable
