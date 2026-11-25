@@ -46,10 +46,8 @@ def copy_agent(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID) -
         from app.kernel.agent.version_service import create_version
         copied = create_version(db, tenant_id=tenant_id, user_id=user_id, agent_id=agent.id, snapshot=dict(version.config_snapshot))
         copied.config_schema_version = version.config_schema_version
-        copied.delegation_enabled = version.delegation_enabled
-        copied.allowed_child_agent_versions = list(version.allowed_child_agent_versions or [])
-        copied.child_necessity_policy = dict(version.child_necessity_policy or {})
-        copied.delegation_capability_version = version.delegation_capability_version
+        # Static parent/child delegation is deprecated. A copied Agent starts without
+        # inheriting legacy delegation policy; runtime A2A discovery/authorization owns routing.
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="AGENT_COPIED", resource_type="AGENT", resource_id=agent.id, summary="agent copied", detail={"source_agent_id": str(source.id)})
     return agent
 
