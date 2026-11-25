@@ -1,4 +1,4 @@
-"""A2A 受控 API（v1.3 §6.3 / §6.5）。
+"""历史 a2a.invoke 兼容 API；尚非官方 A2A v1.0 JSON-RPC endpoint。
 
 - `POST /a2a/invoke`：入站 A2A 调用。**不**走 `get_current_user`：入站凭据由
   `identity.py` 用本域 JWT 自行认证并校验 `a2a.invoke`（v1 仅方案 A），

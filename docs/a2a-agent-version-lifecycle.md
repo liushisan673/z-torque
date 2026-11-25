@@ -62,3 +62,18 @@ Z-Torque 使用 A2A 作为 Agent-to-Agent 发现与委派的唯一入口，不�
 - Parent Task 取消会级联取消未终态后代；超时与进程恢复路径也识别 `WAITING_CHILD`。
 - 委派深度默认 3 层，可配置为 1–5 层；单个模型执行轮次仍限制一次 A2A 派发，避免重复委派。
 - A2A Invocation 在 Child Task 创建时再次授权，Discovery 候选列表不构成授权。
+
+
+## Remote A2A wire protocol target
+
+The remote interoperability target is the official A2A v1.0 JSON-RPC 2.0 binding over HTTPS, not the repository's historical `a2a.invoke` envelope.
+
+- Publish an Agent Card at the well-known Agent Card URI. The card declares the Agent's `supportedInterfaces`, including interface URL, protocol binding and protocol version, plus supported capabilities and skills.
+- Use the standard JSON-RPC methods `SendMessage`, `GetTask`, `CancelTask` and `SubscribeToTask`; use `SendStreamingMessage` when streaming is advertised.
+- Send standard A2A Message/Part objects and return exactly one of a Message or Task from SendMessage. Long-running calls must expose Task state and Artifacts rather than inventing a proprietary response envelope.
+- Discover the peer's Agent Card and choose a declared interface; do not hardcode `/api/z-torque/a2a/invoke` as the remote protocol endpoint.
+- Validate JSON-RPC request IDs, method names, params, payload size, response size, timeouts, cancellation and Task state transitions.
+- Authentication must follow the peer's declared security schemes and configured trust. Never trust a naked `X-User-Id` header as identity, and never forward a user's bearer token to a peer unless the trust relationship explicitly authorizes that exact token audience.
+- Keep the current custom `a2a.invoke` envelope only as a legacy compatibility adapter during migration. It must not be described as A2A v1.0 JSON-RPC interoperability and should be removed after supported peers have migrated.
+
+The local in-process adapter and remote JSON-RPC adapter must expose the same internal delegation contract: target identity, original caller context, child-task lifecycle, deadline, cancellation, structured result, and audit correlation.

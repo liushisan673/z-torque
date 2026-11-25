@@ -1,6 +1,6 @@
-"""A2A 网关：深度/扇出/熔断与路由编排（v1.3 §6.6）。
+"""历史 a2a.invoke 兼容网关：深度/扇出/熔断与路由编排。
 
-职责边界（v1.3 §6.2）：
+职责边界：
 - 本模块**不触 DB**（身份在 identity.py、发现信息在 discovery.py）；
 - 本地路由只委托 `skill.executor`（SkillGateway），不写父子 Task 字段、不建 Task；
 - 远端路由经 peers.py 出站（不复用 connector）。
