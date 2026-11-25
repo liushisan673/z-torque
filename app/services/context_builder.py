@@ -1,7 +1,7 @@
 import base64
 import json
-import time
 import logging
+import time
 from dataclasses import asdict
 from typing import Any
 from uuid import UUID
@@ -23,6 +23,7 @@ from app.models import (
     ShortTermMemory,
     Skill,
 )
+from app.plugin_sdk.observability import emit_event
 from app.services.context_governance import (
     context_tokens,
     extractive_summary,
