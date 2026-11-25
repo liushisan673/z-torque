@@ -272,6 +272,7 @@ class PeerRegistry:
 
         from app.builtin_plugins.a2a_gateway.jsonrpc import parse_jsonrpc_request, validate_jsonrpc_response
 
+        peer = self.resolve(peer.peer_id)
         request = parse_jsonrpc_request(payload)
         base = urlparse(peer.base_url)
         target = urlparse(endpoint_url)

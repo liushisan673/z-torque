@@ -113,8 +113,16 @@ class A2AGateway:
         Child Task，并把远端 Task ID 映射到本地委派记录。这里不把远端 Task 冒充本地 ORM Task。
         """
         self.require_enabled()
-        if not isinstance(message, dict) or not isinstance(message.get("parts"), list) or not message["parts"]:
-            raise ApiError("AI_A2A_JSONRPC_INVALID", "A2A Message must include a non-empty parts array", 400)
+        if (
+            not isinstance(message, dict)
+            or not isinstance(message.get("messageId"), str)
+            or not message["messageId"].strip()
+            or message.get("role") not in {"ROLE_USER", "ROLE_AGENT"}
+            or not isinstance(message.get("parts"), list)
+            or not message["parts"]
+            or any(not isinstance(part, dict) for part in message["parts"])
+        ):
+            raise ApiError("AI_A2A_JSONRPC_INVALID", "A2A Message must include messageId, role and a non-empty parts array", 400)
         if isinstance(depth, bool) or not isinstance(depth, int) or depth < 0:
             raise ApiError("AI_A2A_JSONRPC_INVALID", "A2A delegation depth must be a non-negative integer", 400)
         outbound_depth = depth + 1
