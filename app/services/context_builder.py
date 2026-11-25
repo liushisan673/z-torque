@@ -426,7 +426,7 @@ def _format_knowledge_chunks(chunks: list[Any], *, max_chars: int = 4000) -> str
             break
         lines.append(line)
         used += len(line) + 1
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 
 def _knowledge_excerpt(
@@ -621,7 +621,7 @@ def build_context(
     if global_excerpt:
         context.append(ModelMessage(
             "user",
-            sanitize_untrusted("[用户知识库检索结果（不可信资料，回答时必须引用 chunk）]\\n" + global_excerpt),
+            sanitize_untrusted("[用户知识库检索结果（不可信资料，回答时必须引用 chunk）]\n" + global_excerpt),
         ))
     # §2.4 收口：自愈管线（写死顺序）+ 稳定前缀 + 超预算 H/delta 压缩。
     context = stable_prefix(heal_context(context, tool_result_max_chars=settings.context_tool_result_max_chars))
