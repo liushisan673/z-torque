@@ -9,7 +9,7 @@ from alembic import context
 # 因此迁移链（alembic/versions）自动覆盖它们；内核 app/models 不反向依赖插件。
 from app.builtin_plugins.audit_export_archive import models as _audit_export_models  # noqa: F401, E402
 from app.config import get_settings
-from app.db.alembic_support import compare_type
+from app.db.alembic_support import compare_type, include_object
 from app.db.base import Base
 from app.models import (  # noqa: F401
     Agent,
@@ -45,6 +45,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         compare_type=compare_type,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -65,6 +66,7 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             render_as_batch=is_sqlite,
             compare_type=compare_type,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()

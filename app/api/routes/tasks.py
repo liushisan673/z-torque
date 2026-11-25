@@ -15,7 +15,7 @@ from app.kernel.security_context import SecurityContext
 from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.runtime import write_task_cancel_notice
 from app.kernel.task.service import assert_agent_version_visible, create_task, transition_task
-from app.kernel.task.states import TaskStatus
+from app.kernel.task.states import TERMINAL_STATES, TaskStatus
 from app.models import Task, TaskEvent, User
 from app.schemas.task import TaskCreateRequest, TaskEventResponse, TaskResponse
 from app.services.task_stream import task_event_stream
@@ -93,6 +93,35 @@ async def cancel(task_id: str, request: Request, user: User = Depends(get_curren
         task.error_code = "AI_TASK_CANCELLED"
         task.error_message = "已按用户要求取消"
         transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled while waiting for approval", request.state.trace_id, expected_epoch=task.attempt_epoch)
+        write_task_cancel_notice(db, task)
+    elif task.status == TaskStatus.WAITING_CHILD:
+        runtime = getattr(request.app.state, "task_runtime", None)
+
+        def cancel_descendants(parent_id: UUID) -> None:
+            children = db.scalars(select(Task).where(
+                Task.tenant_id == user.tenant_id,
+                Task.parent_task_id == parent_id,
+                Task.status.notin_([str(status) for status in TERMINAL_STATES]),
+            )).all()
+            for child in children:
+                cancel_descendants(child.id)
+                checkpoint = latest_checkpoint(db, child.id)
+                if checkpoint is not None and checkpoint.status in {"WAITING_APPROVAL", "APPROVED", "WAITING_CHILD", "CHILD_COMPLETED"}:
+                    checkpoint.status = "EXPIRED"
+                if child.status == TaskStatus.RUNNING:
+                    child.cancel_requested_at = datetime.now(timezone.utc)
+                    transition_task(db, child, TaskStatus.CANCELING, "TASK_CANCEL_REQUESTED", "parent task cancellation requested", request.state.trace_id)
+                    if runtime is not None:
+                        runtime.request_cancellation(child.id)
+                elif child.status not in {TaskStatus.CANCELING, TaskStatus.CANCELLED, TaskStatus.SUCCESS, TaskStatus.FAILED, TaskStatus.TIMEOUT}:
+                    child.error_code = "AI_TASK_CANCELLED"
+                    child.error_message = "parent task cancelled"
+                    transition_task(db, child, TaskStatus.CANCELLED, "TASK_CANCELLED", "parent task cancelled", request.state.trace_id)
+
+        cancel_descendants(task.id)
+        task.error_code = "AI_TASK_CANCELLED"
+        task.error_message = "已按用户要求取消"
+        transition_task(db, task, TaskStatus.CANCELLED, "TASK_CANCELLED", "task cancelled while waiting for child task", request.state.trace_id, expected_epoch=task.attempt_epoch)
         write_task_cancel_notice(db, task)
     elif task.status == TaskStatus.RUNNING:
         task.cancel_requested_at = datetime.now(timezone.utc)

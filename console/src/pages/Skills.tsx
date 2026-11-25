@@ -1129,7 +1129,16 @@ export function SkillsPage() {
                   <div
                     key={s.id}
                     className={`skill-card${isActive ? " active" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={isActive}
                     onClick={() => void openDetail(s)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        void openDetail(s);
+                      }
+                    }}
                   >
                     <div className="row1">
                       <span className="name">{s.name}</span>
@@ -1747,6 +1756,9 @@ export function SkillsPage() {
             <span>{error}</span>
           </div>
         )}
+        <div className="skill-alert skill-alert-info">
+          <span>标准 Skill 用于在平台内编写指令并绑定已发布工具；MD-Skill 从 SKILL.md 或 zip 导入，内容由文件维护；脚本模式表示该技能版本包含脚本实现。创建后请检查版本内容与工具绑定，再发布供 Agent 使用。</span>
+        </div>
         {/* 类型放首位：先决定创建方式，再填写对应字段 */}
         <div className="form-field">
           <label>类型</label>

@@ -586,6 +586,7 @@ class SkillGateway:
             if gated is not None:
                 return gated
         result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="tool execution failed")
+        retry_safe = self._retry_safe(executor, config)
         for attempt in range(max_retries + 1):
             try:
                 if hasattr(executor, "execute_async"):
@@ -599,7 +600,7 @@ class SkillGateway:
             except Exception:  # noqa: BLE001 - 执行器异常统一降级为失败结果并记账
                 logger.exception("unexpected tool executor failure")
                 result = ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message=_TOOL_FAILURE_MESSAGE)
-            if result.status == "SUCCEEDED" or attempt == max_retries or not self._is_retryable(result):
+            if result.status == "SUCCEEDED" or attempt == max_retries or not retry_safe or not self._is_retryable(result):
                 break
             await asyncio.sleep(min(backoff_seconds * (2 ** attempt), 30))
         if guard_key is not None:
@@ -627,6 +628,18 @@ class SkillGateway:
             self._guard.record(f"executor.{key}", succeeded=True)
         elif result.status == "FAILED":
             self._guard.record(f"executor.{key}", succeeded=False)
+
+    @staticmethod
+    def _retry_safe(executor: ToolExecutor, config: dict[str, Any]) -> bool:
+        """只有具备幂等语义的调用才允许自动重试，避免超时/5xx 后重复外部副作用。"""
+        tool_type = str(getattr(executor, "tool_type", "")).upper()
+        if tool_type == "HTTP":
+            # GET 按 HTTP 语义视为幂等；POST 默认不重试，只有工具配置显式声明幂等才允许。
+            return str(config.get("method", "GET")).upper() == "GET" or config.get("idempotent") is True
+        if tool_type == "DB_QUERY":
+            # DB_QUERY 在执行器中只允许单条 SELECT。
+            return True
+        return config.get("idempotent") is True
 
     @staticmethod
     def _is_retryable(result: ExecutionResult) -> bool:

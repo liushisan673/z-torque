@@ -27,7 +27,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from app.builtin_plugins.audit_export_archive import jobs as audit_jobs
 from app.builtin_plugins.audit_export_archive.archiver import (
@@ -118,6 +118,28 @@ def _service(tmp_path, *, config=None, secret=None, guard=None):
     service = AuditExportService(sdk, config or _config(), guard=guard)
     service.start()
     return service, ports["object.store"]
+
+
+def test_start_tolerates_postgres_missing_plugin_table_before_migration(tmp_path, monkeypatch):
+    """PG 使用 SQLSTATE 42P01 表示迁移尚未创建插件表；不能阻止整个应用启动。"""
+    ports = {"object.store": LocalObjectStore(tmp_path / "objects")}
+    sdk = FakeSdk(settings=SimpleNamespace(), registry=FakeRegistry(ports))
+    service = AuditExportService(sdk, _config(purge_interval_seconds=0))
+    missing_table = ProgrammingError(
+        "SELECT ... FROM zr_audit_export_job",
+        {},
+        SimpleNamespace(sqlstate="42P01"),
+    )
+
+    def fail_recovery():
+        raise missing_table
+
+    monkeypatch.setattr(service, "recover_interrupted", fail_recovery)
+    service.start()
+    try:
+        assert service._executor is not None
+    finally:
+        service.shutdown()
 
 
 def _archive_service(tmp_path, *, config=None, secret=None):

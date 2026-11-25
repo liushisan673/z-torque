@@ -19,7 +19,7 @@ from sqlalchemy import create_engine
 
 import app.models  # noqa: F401  # 注册全部模型到 Base.metadata
 from alembic import command
-from app.db.alembic_support import compare_type
+from app.db.alembic_support import compare_type, include_object
 from app.db.base import Base
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -42,7 +42,7 @@ def test_migrations_match_models(tmp_path):
     engine = create_engine(url)
     try:
         with engine.connect() as conn:
-            context = MigrationContext.configure(conn, opts={"compare_type": compare_type})
+            context = MigrationContext.configure(conn, opts={"compare_type": compare_type, "include_object": include_object})
             diff = compare_metadata(context, Base.metadata)
             # FTS5 虚表及影子表（_config/_idx/_data/_docsize）由迁移 raw SQL 管理，
             # 不属于 ORM metadata；DB 中存在是预期状态，不能判为漂移。降级路径的
@@ -87,7 +87,7 @@ def test_postgres_schema_matches_models():
     engine = create_engine(_PG_URL)
     try:
         with engine.connect() as conn:
-            context = MigrationContext.configure(conn, opts={"compare_type": compare_type})
+            context = MigrationContext.configure(conn, opts={"compare_type": compare_type, "include_object": include_object})
             diff = compare_metadata(context, Base.metadata)
             # FTS5 虚表及影子表（_config/_idx/_data/_docsize）由迁移 raw SQL 管理，
             # 不属于 ORM metadata；DB 中存在是预期状态，不能判为漂移。降级路径的

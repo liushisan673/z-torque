@@ -16,6 +16,7 @@ payload 白名单刻意不含 token、header 原文与请求/响应 body——�
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import tempfile
@@ -23,7 +24,14 @@ import time
 from typing import Any
 from urllib.parse import urljoin
 
+import httpx
+
 from app.builtin_plugins.a2a_gateway.config import A2AConfig, PeerConfig
+from app.builtin_plugins.a2a_gateway.jsonrpc import (
+    parse_jsonrpc_request,
+    validate_agent_card,
+    validate_jsonrpc_response,
+)
 from app.core.errors import ApiError
 from app.plugin_sdk.observability import emit_event
 
@@ -179,7 +187,7 @@ class PeerRegistry:
         identity_headers: dict[str, str] | None = None,
         depth: int | None = None,
     ) -> dict[str, Any]:
-        """出站唯一收口：自证权限 → 熔断闸门 → POST → 观测上报 → 返回已校验 body。
+        """历史自定义协议出站入口；标准 A2A 调用使用 invoke_jsonrpc。
 
         `depth` 是**出站后的新深度**，只用于观测（由网关在扇出时传入）；
         `identity_headers` 与 `extra_headers` 必须分开传：前者由网关依据**已认证**的
@@ -187,6 +195,115 @@ class PeerRegistry:
         早期实现把两者混在一个 dict 里过 `_self_headers`，导致 `X-User-Id` /
         `Authorization` 被当成伪造头过滤掉，`a2a_identity_propagation` 静默失效。
         """
+        return await self._invoke_at(
+            peer, payload, endpoint_url=urljoin(peer.base_url.rstrip("/") + "/", _INVOKE_PATH.lstrip("/")),
+            extra_headers=extra_headers, identity_headers=identity_headers, depth=depth,
+        )
+
+    async def fetch_agent_card(self, peer: PeerConfig) -> dict[str, Any]:
+        """通过受控 HTTPS 获取远端标准 well-known Agent Card。"""
+        peer = self.resolve(peer.peer_id)
+        self._sdk.require_permission("network.outbound")
+        started = time.monotonic()
+        try:
+            self.check_breaker(peer.peer_id)
+            url = urljoin(peer.base_url.rstrip("/") + "/", ".well-known/agent-card.json")
+            headers = {"Accept": "application/json", **self._auth_headers(peer)}
+            timeout = peer.timeout_seconds or self._config.default_timeout_seconds
+            mtls_options, mtls_files = await asyncio.to_thread(self._mtls_client_options, peer)
+            try:
+                if self._client is not None:
+                    response = await self._client.get(url, headers=headers, timeout=timeout)
+                    if getattr(response, "history", ()):
+                        raise ApiError("AI_A2A_PEER_UNAVAILABLE", "Agent Card endpoint redirected the request", 503)
+                    raw = response.content
+                    status_code = response.status_code
+                else:
+                    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout, **mtls_options) as client:
+                        async with client.stream("GET", url, headers=headers) as response:
+                            status_code = response.status_code
+                            chunks: list[bytes] = []
+                            size = 0
+                            async for chunk in response.aiter_bytes():
+                                size += len(chunk)
+                                if size > self._config.max_response_bytes:
+                                    raise ApiError("AI_A2A_PEER_UNAVAILABLE", "Agent Card exceeds max_response_bytes", 503)
+                                chunks.append(chunk)
+                            raw = b"".join(chunks)
+            finally:
+                _remove_temp_files(mtls_files)
+            if len(raw) > self._config.max_response_bytes:
+                raise ApiError("AI_A2A_PEER_UNAVAILABLE", "Agent Card exceeds max_response_bytes", 503)
+            if status_code >= 500:
+                raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} returned {status_code}", 503)
+            if status_code >= 400:
+                raise ApiError("AI_A2A_DENIED", f"peer {peer.peer_id!r} rejected Agent Card request ({status_code})", 403)
+            try:
+                card = validate_agent_card(json.loads(raw or b"{}"))
+            except (ValueError, TypeError) as exc:
+                raise ApiError("AI_A2A_PEER_UNAVAILABLE", "peer returned an invalid Agent Card JSON document", 503) from exc
+            self.record_breaker(peer.peer_id, succeeded=True)
+            _emit_outbound(peer.peer_id, result=RESULT_OK, duration_ms=_elapsed_ms(started), response_bytes=len(raw), depth=None)
+            return card
+        except httpx.TimeoutException as exc:
+            self.record_breaker(peer.peer_id, succeeded=False)
+            _emit_outbound(peer.peer_id, result=RESULT_TIMEOUT, duration_ms=_elapsed_ms(started), response_bytes=0, depth=None)
+            raise ApiError("AI_A2A_TIMEOUT", f"peer {peer.peer_id!r} Agent Card request timed out", 504) from exc
+        except ApiError:
+            self.record_breaker(peer.peer_id, succeeded=False)
+            _emit_outbound(peer.peer_id, result=RESULT_ERROR, duration_ms=_elapsed_ms(started), response_bytes=0, depth=None)
+            raise
+        except Exception as exc:  # noqa: BLE001 - 连接级失败不泄漏底层网络细节
+            self.record_breaker(peer.peer_id, succeeded=False)
+            _emit_outbound(peer.peer_id, result=RESULT_ERROR, duration_ms=_elapsed_ms(started), response_bytes=0, depth=None)
+            raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} Agent Card is unavailable", 503) from exc
+
+    async def invoke_jsonrpc(
+        self,
+        peer: PeerConfig,
+        payload: dict[str, Any],
+        *,
+        endpoint_url: str,
+        extra_headers: dict[str, str] | None = None,
+        identity_headers: dict[str, str] | None = None,
+        depth: int | None = None,
+    ) -> dict[str, Any]:
+        """向 Agent Card 声明的 JSON-RPC endpoint 发送标准 A2A 请求。
+
+        endpoint 必须与配置 peer 同源，防止恶意/被篡改 Agent Card 将凭据导向其他主机。
+        """
+        peer = self.resolve(peer.peer_id)
+        request = parse_jsonrpc_request(payload)
+        from urllib.parse import urlparse
+
+        base = urlparse(peer.base_url)
+        target = urlparse(endpoint_url)
+        if (
+            target.scheme != base.scheme
+            or target.netloc.lower() != base.netloc.lower()
+            or target.username
+            or target.password
+            or target.fragment
+            or not target.path
+        ):
+            raise ApiError("AI_A2A_PEER_UNAVAILABLE", "Agent Card JSON-RPC endpoint is outside the configured peer origin", 503)
+        response = await self._invoke_at(
+            peer, payload, endpoint_url=endpoint_url,
+            extra_headers=extra_headers, identity_headers=identity_headers, depth=depth,
+        )
+        return validate_jsonrpc_response(response, expected_id=request.request_id)
+
+    async def _invoke_at(
+        self,
+        peer: PeerConfig,
+        payload: dict[str, Any],
+        *,
+        endpoint_url: str,
+        extra_headers: dict[str, str] | None = None,
+        identity_headers: dict[str, str] | None = None,
+        depth: int | None = None,
+    ) -> dict[str, Any]:
+        """受控出站唯一收口：权限、熔断、体积限制、审计观测和错误映射共用。"""
         # 每次出站前自证权限：manifest 未声明 network.outbound 时这里必然抛错
         self._sdk.require_permission("network.outbound")
         started = time.monotonic()
@@ -198,7 +315,7 @@ class PeerRegistry:
                 _emit_outbound(peer.peer_id, result=RESULT_CIRCUIT_OPEN, duration_ms=_elapsed_ms(started), response_bytes=0, depth=depth)
             raise
         try:
-            body, response_bytes = await self._send(peer, payload, extra_headers=extra_headers, identity_headers=identity_headers)
+            body, response_bytes = await self._send(peer, payload, endpoint_url=endpoint_url, extra_headers=extra_headers, identity_headers=identity_headers)
         except ApiError as exc:
             _emit_outbound(
                 peer.peer_id,
@@ -219,6 +336,7 @@ class PeerRegistry:
         *,
         extra_headers: dict[str, str] | None = None,
         identity_headers: dict[str, str] | None = None,
+        endpoint_url: str | None = None,
     ) -> tuple[dict[str, Any], int]:
         """真正发起出站请求；返回 (已解析 body, 响应字节数)。错误映射与熔断计数都在这层。"""
         import httpx
@@ -230,7 +348,7 @@ class PeerRegistry:
             **(identity_headers or {}),
             **self._auth_headers(peer),
         }
-        url = urljoin(peer.base_url + "/", _INVOKE_PATH.lstrip("/"))
+        url = endpoint_url or urljoin(peer.base_url.rstrip("/") + "/", _INVOKE_PATH.lstrip("/"))
         timeout = peer.timeout_seconds or self._config.default_timeout_seconds
         # mTLS 材料（如有）先落盘为 owner-only 临时文件；无论成败用完即删（密钥不驻留磁盘）。
         # 写 PEM + 构建 SSLContext 是同步阻塞 IO（含磁盘与证书解析），不能压在事件循环上。

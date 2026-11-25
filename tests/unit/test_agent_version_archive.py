@@ -98,7 +98,7 @@ def test_archive_blocked_for_current_published_version():
         db.rollback()
 
 
-def test_archive_blocked_by_published_delegation_reference():
+def test_archive_not_blocked_by_legacy_published_delegation_reference():
     with SessionLocal() as db:
         tenant, user, agent, _current, target = _fixture(db)
         other = Agent(tenant_id=tenant.id, owner_user_id=user.id, name="parent", source_type="USER", status="ACTIVE")
@@ -116,13 +116,12 @@ def test_archive_blocked_by_published_delegation_reference():
         )
         db.add(referrer)
         db.flush()
-        with pytest.raises(ApiError) as exc:
-            archive_version(db, tenant_id=tenant.id, user_id=user.id, version_id=target.id)
-        assert exc.value.code == "AI_AGENT_VERSION_REFERENCED"
+        archived = archive_version(db, tenant_id=tenant.id, user_id=user.id, version_id=target.id)
+        assert archived.status == "ARCHIVED"
         db.rollback()
 
 
-def test_draft_delegation_reference_only_warns():
+def test_legacy_draft_delegation_reference_does_not_block_or_warn():
     with SessionLocal() as db:
         tenant, user, agent, _current, target = _fixture(db)
         referrer = AgentVersion(
@@ -139,7 +138,8 @@ def test_draft_delegation_reference_only_warns():
         db.flush()
         check = archive_check(db, tenant_id=tenant.id, user_id=user.id, version_id=target.id)
         assert check["can_archive"] is True
-        assert check["warnings"] and check["warnings"][0]["code"] == "AI_AGENT_VERSION_REFERENCED_BY_DRAFT"
+        assert check["warnings"] == []
+        assert check["referenced_by"] == []
         db.rollback()
 
 
@@ -163,4 +163,59 @@ def test_archive_is_idempotent():
         again = archive_version(db, tenant_id=tenant.id, user_id=user.id, version_id=target.id)
         assert again.status == "ARCHIVED"
         assert again.id == target.id
+        db.rollback()
+
+
+
+def test_rollback_reactivates_archived_snapshot_without_mutating_config():
+    from app.kernel.agent.version_service import rollback_version
+
+    with SessionLocal() as db:
+        tenant, user, agent, current, target = _fixture(db)
+        original_snapshot = dict(target.config_snapshot)
+        archive_version(db, tenant_id=tenant.id, user_id=user.id, version_id=target.id)
+        restored = rollback_version(db, tenant_id=tenant.id, user_id=user.id, version_id=target.id)
+        db.flush()
+        assert restored.status == "PUBLISHED"
+        assert agent.current_published_version_id == target.id
+        assert restored.config_snapshot == original_snapshot
+        assert current.status == "PUBLISHED"
+        db.rollback()
+
+
+def test_rollback_rejects_draft_version():
+    from app.kernel.agent.version_service import rollback_version
+
+    with SessionLocal() as db:
+        tenant, user, _agent, _current, target = _fixture(db)
+        target.status = "DRAFT"
+        with pytest.raises(ApiError) as exc:
+            rollback_version(db, tenant_id=tenant.id, user_id=user.id, version_id=target.id)
+        assert exc.value.code == "AI_AGENT_VERSION_NOT_ROLLBACKABLE"
+        db.rollback()
+
+
+def test_copy_agent_does_not_inherit_legacy_child_agent_policy():
+    from app.kernel.agent.service import copy_agent
+
+    with SessionLocal() as db:
+        tenant, user, agent, current, _target = _fixture(db)
+        current.delegation_enabled = True
+        current.allowed_child_agent_versions = [str(uuid4())]
+        current.child_necessity_policy = {"required": True}
+        current.delegation_capability_version = "legacy-v1"
+        db.flush()
+
+        copied_agent = copy_agent(db, tenant_id=tenant.id, user_id=user.id, agent_id=agent.id)
+        copied_version = db.scalar(
+            select(AgentVersion).where(
+                AgentVersion.agent_id == copied_agent.id,
+                AgentVersion.status == "DRAFT",
+            )
+        )
+        assert copied_version is not None
+        assert copied_version.delegation_enabled is False
+        assert copied_version.allowed_child_agent_versions in (None, [])
+        assert copied_version.child_necessity_policy in (None, {})
+        assert copied_version.delegation_capability_version is None
         db.rollback()

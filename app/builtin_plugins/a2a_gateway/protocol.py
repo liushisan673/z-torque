@@ -1,6 +1,6 @@
-"""A2A 协议适配层（v1.3 §6.2）。
+"""历史 a2a.invoke 兼容信封（不是官方 A2A v1.0 JSON-RPC binding）。
 
-固定 v1 线格式（外部对端契约，改动需版本化）：
+固定的历史自定义线格式（外部兼容契约，改动需版本化；标准 A2A v1.0 适配器待实现）：
 
 请求
 ```json
@@ -28,7 +28,9 @@ from uuid import UUID, uuid4
 
 from app.core.errors import ApiError
 
-A2A_VERSION = "1.0"
+LEGACY_ENVELOPE_VERSION = "1.0"
+# 保留别名以兼容现有插件调用方；该值不是官方 A2A protocolVersion。
+A2A_VERSION = LEGACY_ENVELOPE_VERSION
 A2A_DEPTH_HEADER = "X-A2A-Depth"
 A2A_TRACE_HEADER = "X-A2A-Trace"
 A2A_ROUTE_HEADER = "X-A2A-Route"  # 出站标记：对端据此判断"这是 A2A 入站"而非普通 API

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_optional_user
 from app.api.router import router as api_router
+from app.api.routes.a2a import well_known_router as a2a_well_known_router
 from app.api.routes.webhooks import inbound_router as webhook_inbound_router
 from app.assembly import assemble, resolve_profile
 from app.config import get_settings
@@ -136,6 +137,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+app.include_router(a2a_well_known_router)
 # 通用入站 Webhook：外部系统按配置调用 POST /webhooks/{id}，与用户鉴权链路隔离
 app.include_router(webhook_inbound_router)
 

@@ -4,6 +4,8 @@ import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
 import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
 import type {
+  AuditEvent,
+  AuditListResponse,
   Connector,
   ConnectorDiscoverResult,
   ConnectorDiscoveredToolSummary,
@@ -241,8 +243,13 @@ export function ConnectorsPage() {
 
   // 健康检查结果（本会话内保留，按连接 id 记忆）
   const [testResults, setTestResults] = useState<Record<string, ConnectorTestResult>>({});
-  const [testFailure, setTestFailure] = useState<{ message: string; traceId?: string } | null>(null);
+  const [testFailure, setTestFailure] = useState<{ connectorId: string; message: string; traceId?: string } | null>(null);
   const [testing, setTesting] = useState(false);
+  // 持久化检查历史来自 audit 表；与本会话内存中的详细探测结果分开管理。
+  const [testHistory, setTestHistory] = useState<AuditEvent[]>([]);
+  const [testHistoryLoading, setTestHistoryLoading] = useState(false);
+  const [testHistoryError, setTestHistoryError] = useState<string | null>(null);
+  const [testHistoryRefresh, setTestHistoryRefresh] = useState(0);
 
   // MCP 工具发现（/discover 结果，切换连接时重置）
   const [discovering, setDiscovering] = useState(false);
@@ -536,6 +543,36 @@ export function ConnectorsPage() {
     [items, selectedId, detail],
   );
 
+  // 后端 CONNECTOR_TESTED 审计事件是持久化记录；普通用户只会拿到自己的事件，管理员范围由后端决定。
+  useEffect(() => {
+    const connectorId = selected?.id;
+    if (!connectorId) {
+      setTestHistory([]);
+      setTestHistoryError(null);
+      return;
+    }
+    let cancelled = false;
+    setTestHistoryLoading(true);
+    setTestHistoryError(null);
+    const qs = new URLSearchParams({
+      action: "CONNECTOR_TESTED",
+      resource_type: "CONNECTOR",
+      resource_id: connectorId,
+      offset: "0",
+      limit: "10",
+    });
+    request<AuditListResponse>(`/api/z-torque/audit?${qs.toString()}`)
+      .then((response) => { if (!cancelled) setTestHistory(response.items); })
+      .catch((err) => {
+        if (!cancelled) {
+          setTestHistory([]);
+          setTestHistoryError(errorText(err, "检查历史暂不可用"));
+        }
+      })
+      .finally(() => { if (!cancelled) setTestHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [selected?.id, testHistoryRefresh]);
+
   // 列表筛选 + 搜索（名称 / 描述 / 目标）
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
@@ -664,11 +701,13 @@ export function ConnectorsPage() {
         return next;
       });
       setTestFailure({
+        connectorId: c.id,
         message: errorText(err, "检查失败"),
         traceId: err instanceof ApiRequestError ? err.traceId : undefined,
       });
     } finally {
       setTesting(false);
+      setTestHistoryRefresh((value) => value + 1);
     }
   }
 
@@ -1197,6 +1236,7 @@ export function ConnectorsPage() {
   }
 
   const lastTest = selected ? testResults[selected.id] ?? null : null;
+  const selectedTestFailure = selected && testFailure?.connectorId === selected.id ? testFailure : null;
   // 已登记工具名集合：用于在发现结果里区分「已注册 / 未注册」，并支撑批量注册
   const registeredNames = new Set(
     tools.map((t) => String(t.external_name ?? t.name ?? "").trim()).filter(Boolean),
@@ -1310,7 +1350,16 @@ export function ConnectorsPage() {
                   <div
                     key={c.id}
                     className={`connector-card${c.id === selectedId ? " active" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={c.id === selectedId}
                     onClick={() => void openDetail(c)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        void openDetail(c);
+                      }
+                    }}
                   >
                     <div className="row1">
                       <span className="name">{c.name}</span>
@@ -1451,7 +1500,7 @@ export function ConnectorsPage() {
                           <label>最近检查</label>
                           <input
                             type="text"
-                            value={lastTest ? `${fmtTime(lastTest.checked_at)} · 检查正常` : testFailure ? "最近一次检查异常" : "未检查"}
+                            value={lastTest ? `${fmtTime(lastTest.checked_at)} · ${lastTest.partial ? "部分检查完成" : "检查正常"}` : selectedTestFailure ? "最近一次检查异常" : "未检查"}
                             disabled
                           />
                         </div>
@@ -1463,8 +1512,8 @@ export function ConnectorsPage() {
                       <div className="connector-health-grid">
                         <div className="connector-health-card">
                           <div className="label">连通性</div>
-                          <div className={`value${lastTest ? " ok" : testFailure ? " err" : ""}`}>
-                            {lastTest ? "正常" : testFailure ? "异常" : "未检查"}
+                          <div className={`value${lastTest ? (lastTest.partial ? " warn" : " ok") : selectedTestFailure ? " err" : ""}`}>
+                            {lastTest ? (lastTest.partial ? "部分可用" : "正常") : selectedTestFailure ? "异常" : "未检查"}
                           </div>
                         </div>
                         <div className="connector-health-card">
@@ -1496,6 +1545,39 @@ export function ConnectorsPage() {
                       {!enabled && (
                         <p className="connector-foot-hint">连接已停用，启用后才能运行检查。</p>
                       )}
+
+                      <div className="connector-test-history" style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 14 }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                          <strong style={{ fontSize: 13 }}>最近检查记录</strong>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>持久化审计 · 最近 10 条</span>
+                        </div>
+                        {testHistoryLoading ? (
+                          <div className="text-muted text-sm">正在加载检查历史…</div>
+                        ) : testHistoryError ? (
+                          <div className="text-muted text-sm">{testHistoryError}</div>
+                        ) : testHistory.length === 0 ? (
+                          <div className="text-muted text-sm">暂无已持久化的检查记录。部分在探测前即被拒绝的请求可能不会生成检查历史事件。</div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                            {testHistory.map((event) => {
+                              const partial = event.detail?.partial === true;
+                              const failed = event.result === "failed" || event.result === "denied"
+                                || event.summary === "connector test failed" || typeof event.detail?.error === "string";
+                              const label = failed ? "检查失败" : partial ? "部分检查" : "检查成功";
+                              const latency = typeof event.detail?.latency_ms === "number" ? ` · ${event.detail.latency_ms} ms` : "";
+                              return (
+                                <div key={event.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: 7 }}>
+                                  <div style={{ minWidth: 0 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 600, color: failed ? "var(--danger, #dc4446)" : partial ? "var(--warning, #b7791f)" : "var(--text)" }}>{label}{latency}</div>
+                                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{fmtTime(event.created_at)}</div>
+                                  </div>
+                                  <span style={{ fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--mono)", flexShrink: 0 }}>{event.trace_id ? `${event.trace_id.slice(0, 8)}…` : "无 Trace"}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
                       {lastTest && (
                         <div className={`connector-test-result ${lastTest.partial ? "warn" : "ok"}`}>
                           {/* REST：区分「真的连上了」「被鉴权拒了」「压根没发请求」三种情况 */}
@@ -1517,7 +1599,7 @@ export function ConnectorsPage() {
                             </>
                           ) : (
                             <>
-                              <strong>连接就绪</strong>
+                              <strong>{lastTest.partial ? "部分检查完成" : "连接就绪"}</strong>
                               <div className="meta">
                                 {typeLabel} · 状态 {lastTest.status} · 检查耗时 {lastTest.latency_ms} ms · {fmtTime(lastTest.checked_at)}
                               </div>
@@ -1532,11 +1614,11 @@ export function ConnectorsPage() {
                           {lastTest.trace_id && <div className="trace">trace_id: {lastTest.trace_id}</div>}
                         </div>
                       )}
-                      {testFailure && !lastTest && (
+                      {selectedTestFailure && !lastTest && (
                         <div className="connector-test-result fail">
                           <strong>检查失败</strong>
-                          <div className="meta">{testFailure.message}</div>
-                          {testFailure.traceId && <div className="trace">trace_id: {testFailure.traceId}</div>}
+                          <div className="meta">{selectedTestFailure.message}</div>
+                          {selectedTestFailure.traceId && <div className="trace">trace_id: {selectedTestFailure.traceId}</div>}
                         </div>
                       )}
                       {/* DB 连接：表清单勾选 → 保存 allowed_tables，供 SQL 工具注册引用 */}

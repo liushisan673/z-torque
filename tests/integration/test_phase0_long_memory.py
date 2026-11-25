@@ -94,6 +94,55 @@ def test_persist_recall_and_scope_isolation():
     assert bundle["CONVERSATION:conversation:" + str(conversation_id) + ":summary"] == "conv-summary"
 
 
+def test_recall_bundle_is_bounded_and_never_leaks_other_conversations(monkeypatch):
+    tenant_id, user_id, (agent_a, _), conversation_id = _bootstrap()
+    other_conversation_id = uuid4()
+    store = DbLongTermMemoryStore()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "memory_long_context_max_items_per_scope", 2)
+    monkeypatch.setattr(settings, "memory_long_context_max_chars", 150)
+
+    with SessionLocal.begin() as db:
+        for index in range(3):
+            store.remember_scoped(
+                db, tenant_id=tenant_id, user_id=user_id, agent_id=agent_a,
+                scope="AGENT", key=f"agent:bounded-{index}", value="a" * 30,
+                source_ref="test:bounded",
+            )
+            store.remember_scoped(
+                db, tenant_id=tenant_id, user_id=user_id,
+                scope="USER", key=f"user:bounded-{index}", value="u" * 30,
+                source_ref="test:bounded",
+            )
+            store.remember_scoped(
+                db, tenant_id=tenant_id, user_id=user_id, agent_id=agent_a,
+                scope="CONVERSATION", key=f"conversation:{conversation_id}:bounded-{index}", value="c" * 30,
+                source_ref="test:bounded",
+            )
+        store.remember_scoped(
+            db, tenant_id=tenant_id, user_id=user_id, agent_id=agent_a,
+            scope="CONVERSATION", key=f"conversation:{other_conversation_id}:private", value="other conversation",
+            source_ref="test:other-conversation",
+        )
+
+    with SessionLocal() as db:
+        bundle = store.recall_bundle(
+            db, tenant_id=tenant_id, user_id=user_id, agent_id=agent_a,
+            conversation_id=conversation_id,
+        )
+        no_conversation_bundle = store.recall_bundle(
+            db, tenant_id=tenant_id, user_id=user_id, agent_id=agent_a,
+            conversation_id=None,
+        )
+
+    assert sum(len(value) for value in bundle.values()) <= 150
+    assert sum(key.startswith("AGENT:") for key in bundle) <= 2
+    assert sum(key.startswith("USER:") for key in bundle) <= 2
+    assert sum(key.startswith("CONVERSATION:") for key in bundle) <= 2
+    assert not any(str(other_conversation_id) in key for key in bundle)
+    assert not any(key.startswith("CONVERSATION:") for key in no_conversation_bundle)
+
+
 def test_immutable_append_only_and_version_conflict():
     """immutable 键 append-only + 版本链；content_hash + version 冲突抛 AI_MEMORY_CONFLICT + audit。"""
     tenant_id, user_id, (agent_a, _), _ = _bootstrap()

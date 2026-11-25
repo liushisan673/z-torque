@@ -1,8 +1,8 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { downloadFile, request } from "../services/api";
 import { errorText } from "../services/errorText";
-import type { AuditEvent, AuditListResponse } from "../types";
+import type { AuditEvent, AuditListResponse, Task, TaskEvent } from "../types";
 import { Loading } from "../components/Loading";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { Pagination, usePager } from "../components/Pagination";
@@ -776,6 +776,11 @@ export function AuditPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [traceChain, setTraceChain] = useState<AuditEvent[] | null>(null);
   const [traceLoading, setTraceLoading] = useState(false);
+  // 任务详情使用独立 API，并遵循任务接口自身的 owner 范围；不从审计 payload 猜测执行步骤。
+  const [taskInspection, setTaskInspection] = useState<{ task: Task; events: TaskEvent[] } | null>(null);
+  const [taskInspectionLoading, setTaskInspectionLoading] = useState(false);
+  const [taskInspectionError, setTaskInspectionError] = useState<string | null>(null);
+  const taskInspectionRequestRef = useRef(0);
   // 列表统一分页：同 Trace 链路记录接入公共分页条组件（客户端分页，切换链路后回第 1 页）
   const tracePager = usePager(traceChain ?? [], 10);
 
@@ -879,6 +884,10 @@ export function AuditPage() {
   async function openDetail(e: AuditEvent, keepTrace = false) {
     setDetail(e);
     if (!keepTrace) setTraceChain(null);
+    const inspectionRequestId = ++taskInspectionRequestRef.current;
+    setTaskInspection(null);
+    setTaskInspectionError(null);
+    setTaskInspectionLoading(false);
     setDetailLoading(true);
     try {
       const d = await request<AuditEvent>(`${API}/${e.id}`);
@@ -887,6 +896,25 @@ export function AuditPage() {
       setError(errorText(err, "加载详情失败"));
     } finally {
       setDetailLoading(false);
+    }
+    // Task API 只允许任务所有者查看。管理员即使能查看全局审计，也不能借此越过任务数据范围。
+    if (e.resource_type === "TASK" && e.resource_id && e.actor_user_id && e.actor_user_id === user?.id) {
+      setTaskInspectionLoading(true);
+      try {
+        const [task, events] = await Promise.all([
+          request<Task>(`/api/z-torque/tasks/${e.resource_id}`),
+          request<{ items: TaskEvent[] }>(`/api/z-torque/tasks/${e.resource_id}/events`),
+        ]);
+        if (inspectionRequestId === taskInspectionRequestRef.current) {
+          setTaskInspection({ task, events: events.items });
+        }
+      } catch (err) {
+        if (inspectionRequestId === taskInspectionRequestRef.current) {
+          setTaskInspectionError(errorText(err, "任务详情暂不可用"));
+        }
+      } finally {
+        if (inspectionRequestId === taskInspectionRequestRef.current) setTaskInspectionLoading(false);
+      }
     }
   }
 
@@ -911,6 +939,18 @@ export function AuditPage() {
 
   return (
     <div className="audit-page" style={listPane.style}>
+      <header className="audit-page-header">
+        <div>
+          <h1>运行与审计</h1>
+          <p>查看任务执行记录、工具调用事件与审计详情，定位失败原因并追踪完整执行链路。</p>
+        </div>
+        <div className="audit-page-count" aria-live="polite">
+          <strong>{total.toLocaleString()}</strong>
+          <span>条记录</span>
+          <span className="audit-page-scope">{scope === "all" ? "全局范围" : "仅本人"}</span>
+        </div>
+      </header>
+
       {/* 范围提示 */}
 
       {/* 筛选栏 */}
@@ -1056,7 +1096,15 @@ export function AuditPage() {
                       <tr
                         key={e.id}
                         className={detail?.id === e.id ? "active" : ""}
+                        tabIndex={0}
+                        aria-label={`查看审计事件：${summaryLabel(e.summary)}`}
                         onClick={() => void openDetail(e)}
+                        onKeyDown={(ev) => {
+                          if (ev.key === "Enter" || ev.key === " ") {
+                            ev.preventDefault();
+                            void openDetail(e);
+                          }
+                        }}
                       >
                         <td className="time" title={fmtTime(e.created_at)}>{fmtListTime(e.created_at)}</td>
                         <td><span className={`audit-tag ${tg.cls}`}>{tg.label}</span></td>
@@ -1150,6 +1198,77 @@ export function AuditPage() {
                     </dd>
                   </dl>
                 </div>
+
+                {detail.resource_type === "TASK" && (
+                  <div className="audit-detail-section">
+                    <h3>任务执行详情</h3>
+                    {detail.actor_user_id !== user?.id ? (
+                      <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                        该任务不属于当前登录用户。审计可见范围不等于任务详情权限，任务执行数据不会在此越权展开。
+                      </span>
+                    ) : taskInspectionLoading ? (
+                      <Loading />
+                    ) : taskInspectionError ? (
+                      <div className="skill-alert skill-alert-error"><span>{taskInspectionError}</span></div>
+                    ) : taskInspection ? (
+                      <>
+                        <dl className="audit-kv">
+                          <dt>任务状态</dt><dd>{taskInspection.task.status}</dd>
+                          <dt>任务 ID</dt><dd className="mono">{taskInspection.task.id}</dd>
+                          <dt>Agent ID</dt><dd className="mono">{taskInspection.task.agent_id ?? "—"}</dd>
+                          <dt>直接父任务</dt><dd className="mono">{taskInspection.task.parent_task_id ?? "根任务"}</dd>
+                          <dt>子任务序号</dt><dd>{taskInspection.task.child_sequence ?? "—"}</dd>
+                          <dt>根任务 ID</dt><dd className="mono">{taskInspection.task.root_task_id}</dd>
+                          <dt>委派层级</dt><dd>{taskInspection.task.delegation_depth}</dd>
+                          <dt>创建时间</dt><dd>{fmtTime(taskInspection.task.created_at)}</dd>
+                          <dt>更新时间</dt><dd>{fmtTime(taskInspection.task.updated_at)}</dd>
+                        </dl>
+                        {(taskInspection.task.error_message || taskInspection.task.error_code) && (
+                          <div className="skill-alert skill-alert-error" style={{ marginTop: 8 }}>
+                            <span>任务错误：{taskInspection.task.error_message ?? taskInspection.task.error_code}</span>
+                            {taskInspection.task.error_code && <span style={{ display: "block", fontSize: 11, opacity: 0.75 }}>错误码：{taskInspection.task.error_code}</span>}
+                          </div>
+                        )}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "12px 0 6px" }}>
+                          <strong style={{ fontSize: 12 }}>任务事件（{taskInspection.events.length}）</strong>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>按任务事件序号排列</span>
+                        </div>
+                        {taskInspection.events.length === 0 ? (
+                          <span style={{ fontSize: 12, color: "var(--text-muted)" }}>暂无任务事件。</span>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                            {taskInspection.events.map((event) => {
+                              const failed = event.to_state === "FAILED" || event.to_state === "TIMEOUT"
+                                || /FAIL|ERROR|TIMEOUT|DENIED/i.test(event.event_type);
+                              return (
+                                <div key={event.seq} style={{ borderLeft: `2px solid ${failed ? "var(--danger, #dc4446)" : "var(--border)"}`, padding: "2px 0 4px 10px" }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 11, color: "var(--text-muted)" }}>
+                                    <span>#{event.seq} · {event.event_type}</span>
+                                    <span>{fmtTime(event.created_at)}</span>
+                                  </div>
+                                  <div style={{ fontSize: 12, marginTop: 3, color: failed ? "var(--danger, #dc4446)" : "var(--text)" }}>{event.summary}</div>
+                                  {(event.from_state || event.to_state) && (
+                                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                                      状态：{event.from_state ?? "—"} → {event.to_state ?? "—"}
+                                    </div>
+                                  )}
+                                  {event.payload_summary && Object.keys(event.payload_summary).length > 0 && (
+                                    <details className="skill-doc-details" style={{ marginTop: 4 }}>
+                                      <summary>查看事件摘要数据</summary>
+                                      <pre className="audit-json">{JSON.stringify(event.payload_summary, null, 2)}</pre>
+                                    </details>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <span style={{ fontSize: 12, color: "var(--text-muted)" }}>尚未加载任务详情。</span>
+                    )}
+                  </div>
+                )}
 
                 {/* 失败/拒绝事件：把失败原因从参数里提出来置顶展示，不再让用户在 JSON 里找 */}
                 {resultOf(detail).cls === "audit-result-err" && failureMessage(detail) && (

@@ -10,19 +10,33 @@ from app.core.errors import ApiError
 from app.core.limits import MAX_SKILL_BOUND_TOOLS
 from app.kernel.audit.service import record_audit
 from app.kernel.task.states import TERMINAL_STATES
-from app.models import Agent, AgentVersion, AgentVersionSkill, SkillVersion, SkillVersionTool, Task
+from app.models import (
+    Agent,
+    AgentVersion,
+    AgentVersionSkill,
+    Skill,
+    SkillVersion,
+    SkillVersionTool,
+    Task,
+    Tool,
+    ToolVersion,
+)
 
 VERSION_NOT_FOUND = "version not found"
 
 # 归档阻断错误码（前端按 code 映射中文文案）
 ARCHIVE_ERR_CURRENT = "AI_AGENT_VERSION_IS_CURRENT"
 ARCHIVE_ERR_IN_USE = "AI_AGENT_VERSION_IN_USE"
-ARCHIVE_ERR_REFERENCED = "AI_AGENT_VERSION_REFERENCED"
-ARCHIVE_WARN_REFERENCED_BY_DRAFT = "AI_AGENT_VERSION_REFERENCED_BY_DRAFT"
 
 
-def _snapshot_hash(snapshot: dict) -> str:
-    encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+def _snapshot_hash(snapshot: dict, *, skill_version_ids: list[UUID] | None = None, tool_version_ids: set[str] | None = None) -> str:
+    """Hash the executable version contract, including immutable dependency references."""
+    payload = {
+        "config_snapshot": snapshot,
+        "skill_version_ids": sorted(str(item) for item in (skill_version_ids or [])),
+        "tool_version_ids": sorted(str(item) for item in (tool_version_ids or set())),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -36,13 +50,6 @@ def _owned_agent(db: Session, tenant_id: UUID, user_id: UUID, agent_id: UUID) ->
 def create_version(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUID, snapshot: dict) -> AgentVersion:
     _owned_agent(db, tenant_id, user_id, agent_id)
     number = (db.scalar(select(func.max(AgentVersion.version_number)).where(AgentVersion.agent_id == agent_id)) or 0) + 1
-    # 委派配置随新草稿继承当前发布版本（启用开关 / 任务数上限 / 委派白名单），
-    # 避免新建草稿后被清空重填；无发布版本时保持默认（不启用）
-    current = db.scalar(
-        select(AgentVersion)
-        .where(AgentVersion.agent_id == agent_id, AgentVersion.status == "PUBLISHED")
-        .order_by(AgentVersion.version_number.desc())
-    )
     version = AgentVersion(
         tenant_id=tenant_id,
         agent_id=agent_id,
@@ -50,9 +57,6 @@ def create_version(db: Session, *, tenant_id: UUID, user_id: UUID, agent_id: UUI
         status="DRAFT",
         config_schema_version="1",
         config_snapshot=snapshot,
-        delegation_enabled=bool(current.delegation_enabled) if current is not None else False,
-        allowed_child_agent_versions=list(current.allowed_child_agent_versions or []) if current is not None else [],
-        child_necessity_policy=dict(current.child_necessity_policy) if current is not None and current.child_necessity_policy else None,
     )
     db.add(version)
     db.flush()
@@ -77,14 +81,7 @@ def update_draft(
         raise ApiError("AI_REQUEST_INVALID", "published version is immutable", 422)
     if snapshot is not None:
         version.config_snapshot = snapshot
-    # 委派配置（仅草稿可改）：键存在才更新，显式 null 表示清空
-    if delegation_updates:
-        if delegation_updates.get("delegation_enabled") is not None:
-            version.delegation_enabled = bool(delegation_updates["delegation_enabled"])
-        if "allowed_child_agent_versions" in delegation_updates:
-            version.allowed_child_agent_versions = delegation_updates["allowed_child_agent_versions"] or []
-        if "child_necessity_policy" in delegation_updates:
-            version.child_necessity_policy = delegation_updates["child_necessity_policy"]
+    # delegation_updates is intentionally ignored. Legacy columns remain for historical compatibility.
     return version
 
 
@@ -116,82 +113,43 @@ def publish_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: 
             f"an agent version can expose at most {MAX_SKILL_BOUND_TOOLS} tools, got {len(exposed_tool_ids)}",
             409,
         )
-    # 委派白名单校验：引用必须是同租户、已发布版本的 AgentVersion
-    if version.delegation_enabled:
-        for cid in version.allowed_child_agent_versions or []:
-            try:
-                child = db.get(AgentVersion, UUID(str(cid)))
-            except (ValueError, TypeError):
-                raise ApiError("AI_REQUEST_INVALID", "invalid child agent version reference", 422)
-            if child is None or child.tenant_id != tenant_id or child.status != "PUBLISHED":
-                raise ApiError("AI_REQUEST_INVALID", "delegation references an unpublished child agent version", 422)
     version.status = "PUBLISHED"
-    version.snapshot_hash = _snapshot_hash(version.config_snapshot)
+    version.snapshot_hash = _snapshot_hash(version.config_snapshot, skill_version_ids=bound_skill_ids, tool_version_ids=exposed_tool_ids)
     version.published_at = datetime.now(timezone.utc)
     agent.current_published_version_id = version.id
     record_audit(db, tenant_id=tenant_id, actor_user_id=user_id, action="AGENT_VERSION_PUBLISHED", resource_type="AGENT_VERSION", resource_id=version.id, summary="agent version published")
     return version
 
 
-def _referrer_agent_name(db: Session, version: AgentVersion) -> str:
-    agent = db.get(Agent, version.agent_id)
-    return agent.name if agent else "未知智能体"
-
-
-def _version_label(db: Session, version: AgentVersion) -> str:
-    return f"{_referrer_agent_name(db, version)} v{version.version_number}"
-
-
 def _running_task_count(db: Session, tenant_id: UUID, version_id: UUID) -> int:
-    """引用该版本且未终态的任务数（含委派子任务）：运行中 = 不允许归档。"""
+    """归档保护：统计仍引用该不可变版本快照的非终态任务。"""
     return (
         db.scalar(
             select(func.count(Task.id)).where(
                 Task.tenant_id == tenant_id,
                 Task.agent_version_id == version_id,
-                Task.status.notin_([str(s) for s in TERMINAL_STATES]),
+                Task.status.notin_([str(status) for status in TERMINAL_STATES]),
             )
         )
         or 0
     )
 
 
-def _delegation_referrers(db: Session, tenant_id: UUID, version_id: UUID) -> list[AgentVersion]:
-    """其他版本中把该版本列入委派白名单的引用方（DRAFT / PUBLISHED）。"""
-    target = str(version_id)
-    rows = db.scalars(
-        select(AgentVersion).where(
-            AgentVersion.tenant_id == tenant_id,
-            AgentVersion.id != version_id,
-            AgentVersion.delegation_enabled.is_(True),
-            AgentVersion.status.in_(["DRAFT", "PUBLISHED"]),
-        )
-    ).all()
-    return [v for v in rows if target in [str(x) for x in (v.allowed_child_agent_versions or [])]]
-
-
 def _archive_blockers(db: Session, agent: Agent, version: AgentVersion) -> tuple[list[dict], list[dict], int, list[AgentVersion]]:
-    """归档阻断项与提示项：返回 (reasons, warnings, running_task_count, referrers)。
+    """归档阻断项与提示项：只检查当前发布指针和非终态 Task 引用。
 
-    reasons 非空即不可归档；warnings 仅提示不阻断。
+    A2A 目标由运行时 Discovery 解析，不形成 AgentVersion 静态引用关系。
     """
+
     reasons: list[dict] = []
     warnings: list[dict] = []
     running = _running_task_count(db, version.tenant_id, version.id)
-    referrers = _delegation_referrers(db, version.tenant_id, version.id)
+    referrers: list[AgentVersion] = []  # Dynamic A2A discovery creates no static version references
 
     if version.id == agent.current_published_version_id:
         reasons.append({"code": ARCHIVE_ERR_CURRENT, "message": "当前发布版本不可归档，请先发布其他版本"})
     if running:
         reasons.append({"code": ARCHIVE_ERR_IN_USE, "message": f"该版本有 {running} 个任务正在执行"})
-    published_refs = [v for v in referrers if v.status == "PUBLISHED"]
-    if published_refs:
-        shown = "、".join(_version_label(db, v) for v in published_refs[:3])
-        reasons.append({"code": ARCHIVE_ERR_REFERENCED, "message": f"该版本被已发布版本（{shown}{'等' if len(published_refs) > 3 else ''}）的委派白名单引用"})
-    draft_refs = [v for v in referrers if v.status != "PUBLISHED"]
-    if draft_refs:
-        shown = "、".join(_version_label(db, v) for v in draft_refs[:3])
-        warnings.append({"code": ARCHIVE_WARN_REFERENCED_BY_DRAFT, "message": f"草稿（{shown}{'等' if len(draft_refs) > 3 else ''}）的委派白名单引用了本版本，归档后其发布会失败"})
     return reasons, warnings, running, referrers
 
 
@@ -208,15 +166,7 @@ def archive_check(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UU
         "reasons": reasons,
         "warnings": warnings,
         "running_task_count": running,
-        "referenced_by": [
-            {
-                "version_id": str(v.id),
-                "agent_name": _referrer_agent_name(db, v),
-                "version_number": v.version_number,
-                "status": v.status,
-            }
-            for v in referrers
-        ],
+        "referenced_by": [],
     }
 
 
@@ -241,5 +191,54 @@ def archive_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: 
         resource_id=version.id,
         summary="agent version archived",
         detail={"agent_id": str(agent.id), "version_number": version.version_number},
+    )
+    return version
+
+
+def rollback_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UUID) -> AgentVersion:
+    """切换当前发布指针到历史快照；不修改 AgentVersion 配置内容。"""
+    version = db.get(AgentVersion, version_id)
+    if version is None or version.tenant_id != tenant_id:
+        raise ApiError("AI_AGENT_VERSION_NOT_FOUND", VERSION_NOT_FOUND, 404)
+    agent = _owned_agent(db, tenant_id, user_id, version.agent_id)
+    if version.status not in {"PUBLISHED", "ARCHIVED"}:
+        raise ApiError("AI_AGENT_VERSION_NOT_ROLLBACKABLE", "only published or archived versions can be rolled back", 409)
+    if agent.current_published_version_id == version.id:
+        return version
+
+    links = db.scalars(select(AgentVersionSkill).where(
+        AgentVersionSkill.tenant_id == tenant_id,
+        AgentVersionSkill.agent_version_id == version.id,
+    )).all()
+    for link in links:
+        skill_version = db.get(SkillVersion, link.skill_version_id)
+        skill = db.get(Skill, skill_version.skill_id) if skill_version is not None else None
+        if (
+            skill_version is None or skill_version.tenant_id != tenant_id
+            or skill_version.status != "PUBLISHED" or skill is None or skill.status != "ACTIVE"
+        ):
+            raise ApiError("AI_AGENT_VERSION_DEPENDENCY_UNAVAILABLE", "a pinned Skill version required by this Agent version is no longer available", 409)
+        tool_ids = db.scalars(select(SkillVersionTool.tool_version_id).where(
+            SkillVersionTool.tenant_id == tenant_id,
+            SkillVersionTool.skill_version_id == skill_version.id,
+        )).all()
+        for tool_id in tool_ids:
+            tool_version = db.get(ToolVersion, tool_id)
+            tool = db.get(Tool, tool_version.tool_id) if tool_version is not None else None
+            if (
+                tool_version is None or tool_version.tenant_id != tenant_id
+                or tool_version.status != "PUBLISHED" or tool is None or tool.status != "ACTIVE"
+            ):
+                raise ApiError("AI_AGENT_VERSION_DEPENDENCY_UNAVAILABLE", "a pinned Tool version required by this Agent version is no longer available", 409)
+
+    previous_version_id = agent.current_published_version_id
+    version.status = "PUBLISHED"
+    agent.current_published_version_id = version.id
+    record_audit(
+        db, tenant_id=tenant_id, actor_user_id=user_id,
+        action="AGENT_VERSION_ROLLED_BACK", resource_type="AGENT_VERSION",
+        resource_id=version.id, summary="agent current published version rolled back",
+        detail={"agent_id": str(agent.id), "version_number": version.version_number,
+                "previous_version_id": str(previous_version_id) if previous_version_id else None},
     )
     return version

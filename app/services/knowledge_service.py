@@ -10,6 +10,7 @@ import hashlib
 from pathlib import Path
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -82,26 +83,45 @@ def search(
     db: Session, *, provider: KnowledgeProvider, ctx: SecurityContext,
     query: str, allowed_paths: list[str], top_k: int,
 ) -> list:
+    """文档与消息双源检索：两类结果均有保留配额，避免文档命中占满 Top-K。"""
     audit_degradation(provider, ctx)
-    chunks = list(provider.search(
-        db=db, tenant_id=ctx.tenant_id, query=query, top_k=top_k,
+    limit = max(1, min(int(top_k), 50))
+    documents = list(provider.search(
+        db=db, tenant_id=ctx.tenant_id, query=query, top_k=limit,
         filters={"allowed_paths": allowed_paths},
     ))
-    if get_settings().knowledge_message_search_enabled:
-        message_chunks = list(provider.search_messages(
-            db, tenant_id=ctx.tenant_id, user_id=ctx.user_id, query=query, top_k=top_k,
-        ))
-        seen = {item.source for item in chunks}
-        chunks.extend(item for item in message_chunks if item.source not in seen)
-        if message_chunks:
-            record_audit_detached(
-                tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id,
-                action="KNOWLEDGE_MESSAGE_SEARCH", resource_type="KNOWLEDGE", resource_id=None,
-                summary="message-level full-text search",
-                detail={"query_hash": hashlib.sha256(query.encode("utf-8")).hexdigest(), "hits": len(message_chunks)},
-                trace_id=ctx.trace_id,
-            )
-    return chunks[:top_k]
+    if not get_settings().knowledge_message_search_enabled:
+        return documents[:limit]
+
+    messages = list(provider.search_messages(
+        db, tenant_id=ctx.tenant_id, user_id=ctx.user_id, query=query, top_k=limit,
+    ))
+    if messages:
+        record_audit_detached(
+            tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id,
+            action="KNOWLEDGE_MESSAGE_SEARCH", resource_type="KNOWLEDGE", resource_id=None,
+            summary="message-level full-text search",
+            detail={"query_hash": hashlib.sha256(query.encode("utf-8")).hexdigest(), "hits": len(messages)},
+            trace_id=ctx.trace_id,
+        )
+    if not documents:
+        return messages[:limit]
+    if not messages:
+        return documents[:limit]
+
+    # 两个来源分数不可直接比较（文档为 BM25，消息为精确子串 + 时间排序），
+    # 采用来源配额而不是把两种 score 混在一起排序；某一来源不足时再由另一来源补齐。
+    document_quota = (limit + 1) // 2
+    message_quota = limit // 2
+    selected = documents[:document_quota] + messages[:message_quota]
+    selected_ids = {id(item) for item in selected}
+    if len(selected) < limit:
+        remainder = [
+            item for item in (*documents[document_quota:], *messages[message_quota:])
+            if id(item) not in selected_ids
+        ]
+        selected.extend(remainder[:limit - len(selected)])
+    return selected[:limit]
 
 
 def allowed_paths_for_user(request, db: Session, *, tenant_id: UUID, user_id: UUID) -> list[str]:
@@ -110,7 +130,13 @@ def allowed_paths_for_user(request, db: Session, *, tenant_id: UUID, user_id: UU
 
     store = getattr(request.app.state, "port_registry", None)
     object_store = store.get("object.store") if store is not None else None
-    rows = db.query(File).filter(File.tenant_id == tenant_id, File.owner_user_id == user_id, File.status == "PARSED").all()
     if object_store is None:
         return []
-    return [str(Path(object_store.local_path(item.storage_key)).resolve()) for item in rows]
+    storage_keys = db.scalars(
+        select(File.storage_key).where(
+            File.tenant_id == tenant_id,
+            File.owner_user_id == user_id,
+            File.status == "PARSED",
+        )
+    ).all()
+    return [str(Path(object_store.local_path(key)).resolve()) for key in storage_keys]

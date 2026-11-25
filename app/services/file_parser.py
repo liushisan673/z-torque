@@ -21,6 +21,7 @@ SUPPORTED = {".txt", ".md", ".csv", ".pdf", ".xlsx"}
 
 _LINES_PER_BLOCK = 40
 _MAX_PDF_PAGES = 100
+_MAX_CSV_ROWS = 10000
 _MAX_XLSX_SHEETS = 20
 _MAX_XLSX_ROWS = 10000
 _MAX_XLSX_COLS = 100
@@ -33,38 +34,55 @@ def _truncate_block(text: str, max_block_chars: int) -> tuple[str, bool]:
     return text[:max_block_chars], True
 
 
-def _text_blocks(path: Path) -> list[ParsedBlock]:
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return [
-        ParsedBlock("\n".join(lines[start:start + _LINES_PER_BLOCK]), line_start=start + 1, line_end=min(start + _LINES_PER_BLOCK, len(lines)))
-        for start in range(0, len(lines), _LINES_PER_BLOCK)
-    ]
+def _text_blocks(path: Path, *, limit: int):
+    """按行流式分块；只读取 max_blocks + 1 个 block，避免整文件读入内存。"""
+    block_lines: list[str] = []
+    block_start = 1
+    emitted = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line_no, line in enumerate(handle, start=1):
+            block_lines.append(line.rstrip("\r\n"))
+            if len(block_lines) < _LINES_PER_BLOCK:
+                continue
+            yield ParsedBlock("\n".join(block_lines), line_start=block_start, line_end=line_no)
+            emitted += 1
+            if emitted >= limit:
+                return
+            block_start = line_no + 1
+            block_lines.clear()
+    if block_lines and emitted < limit:
+        yield ParsedBlock("\n".join(block_lines), line_start=block_start, line_end=block_start + len(block_lines) - 1)
 
 
-def _csv_blocks(path: Path) -> list[ParsedBlock]:
+def _csv_blocks(path: Path, *, limit: int):
+    """CSV 按行惰性读取；不再先构造最多 1 万行的完整 list。"""
     with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
-        rows = list(csv.reader(handle))[:10000]
-    return [ParsedBlock("\t".join(row[:100]), line_start=index + 1, line_end=index + 1) for index, row in enumerate(rows)]
+        for index, row in enumerate(csv.reader(handle)):
+            if index >= min(_MAX_CSV_ROWS + 1, limit):
+                return
+            yield ParsedBlock("\t".join(row[:_MAX_XLSX_COLS]), line_start=index + 1, line_end=index + 1)
 
 
-def _pdf_blocks(path: Path) -> list[ParsedBlock]:
+def _pdf_blocks(path: Path, *, limit: int):
     try:
         from pypdf import PdfReader
     except ImportError as exc:
         raise ValueError("PDF parser unavailable") from exc
-    return [
-        ParsedBlock(page.extract_text() or "", page_no=index + 1)
-        for index, page in enumerate(PdfReader(path).pages[:_MAX_PDF_PAGES])
-    ]
+    reader = PdfReader(path)
+    for index, page in enumerate(reader.pages):
+        if index >= limit:
+            return
+        yield ParsedBlock(page.extract_text() or "", page_no=index + 1)
 
 
-def _xlsx_blocks(path: Path) -> list[ParsedBlock]:
+def _xlsx_blocks(path: Path, *, limit: int):
+    """只产出需要的非空单元格；旧实现会先把 20×10000×100 个单元格装入 list。"""
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError("XLSX parser unavailable") from exc
     # 存储层文件名为无扩展名 UUID，openpyxl 会按后缀拒收；传二进制流按内容校验
-    blocks: list[ParsedBlock] = []
+    emitted = 0
     with path.open("rb") as handle:
         workbook = load_workbook(handle, read_only=True, data_only=True)
         try:
@@ -73,14 +91,21 @@ def _xlsx_blocks(path: Path) -> list[ParsedBlock]:
                     for cell in row:
                         if cell.value is None or str(cell.value).strip() == "":
                             continue
-                        blocks.append(ParsedBlock(str(cell.value), sheet=sheet.title, row_no=cell.row, col_no=cell.column))
+                        yield ParsedBlock(str(cell.value), sheet=sheet.title, row_no=cell.row, col_no=cell.column)
+                        emitted += 1
+                        if emitted >= limit:
+                            return
         finally:
             workbook.close()
-    return blocks
 
 
-_BLOCK_PARSERS = {".txt": _text_blocks, ".md": _text_blocks, ".csv": _csv_blocks, ".pdf": _pdf_blocks, ".xlsx": _xlsx_blocks}
-
+_BLOCK_PARSERS = {
+    ".txt": _text_blocks,
+    ".md": _text_blocks,
+    ".csv": _csv_blocks,
+    ".pdf": _pdf_blocks,
+    ".xlsx": _xlsx_blocks,
+}
 
 def parse_file_structured(
     path: Path,
@@ -96,8 +121,15 @@ def parse_file_structured(
         raise ValueError("unsupported file type")
     blocks: list[ParsedBlock] = []
     truncated = False
-    for block in parser(path):
-        if len(blocks) >= max_blocks:
+    hard_limit = min(
+        max_blocks,
+        _MAX_PDF_PAGES if suffix.lower() == ".pdf" else (
+            _MAX_CSV_ROWS if suffix.lower() == ".csv" else max_blocks
+        ),
+    )
+    # 额外读取一个 block 用于判断是否因 max_blocks 截断；解析器按需产出，不预先构造全量结果。
+    for block in parser(path, limit=hard_limit + 1):
+        if len(blocks) >= hard_limit:
             truncated = True
             break
         text, block_truncated = _truncate_block(block.text, max_block_chars)

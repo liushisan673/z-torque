@@ -30,6 +30,7 @@ from app.models.audit import AuditLog
 from app.models.task import Task, TaskEvent
 from app.services.context_builder import build_context
 from app.services.md_skill_upload import peek_skill_name
+from tests.support.db_cleanup import cleanup_session
 
 _CREATED_TENANTS: list = []
 
@@ -38,7 +39,7 @@ _CREATED_TENANTS: list = []
 def cleanup():
     _CREATED_TENANTS.clear()
     yield
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         if _CREATED_TENANTS:
             # 只清理本文件创建的租户数据，避免影响其它用例依赖的种子数据
             for model in (AuditLog, TaskEvent, Task, Message, Conversation, AgentVersion, Agent, User):

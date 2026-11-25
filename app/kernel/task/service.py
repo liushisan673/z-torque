@@ -165,8 +165,9 @@ def _resolve_parent(db: Session, tenant_id: UUID, parent_task_id: UUID | None) -
     parent = db.get(Task, parent_task_id)
     if parent is None or parent.tenant_id != tenant_id or parent.root_task_id is None:
         raise ApiError("AI_REQUEST_INVALID", "invalid parent task", 422)
+    from app.config import get_settings
     depth = parent.delegation_depth + 1
-    if depth > 1:
+    if depth > get_settings().delegation_max_depth:
         raise ApiError("AI_AGENT_DELEGATION_DEPTH_EXCEEDED", "task delegation depth exceeded", 409)
     return parent.root_task_id, depth
 

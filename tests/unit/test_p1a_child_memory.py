@@ -57,10 +57,38 @@ def test_child_agent_inherits_scoped_memory(monkeypatch):
         cancellation_event=None, deadline_at=None, task_id=uuid4(),
     ))
 
-    assert result == "child ok"
+    assert result["status"] == "SUCCEEDED"
+    assert result["content"] == "child ok"
     assert captured["memory_kwargs"]["user_id"] == user_id
     assert captured["memory_kwargs"]["agent_id"] == child_version.agent_id
     assert captured["memory_kwargs"]["conversation_id"] == conversation_id
     contents = [message.content for message in captured["messages"]]
     assert any("Delegated memory / 用户画像" in text and "用户偏好：简洁回答" in text for text in contents)
     assert any("Delegated memory / 智能体指令" in text for text in contents)
+
+
+
+def test_a2a_dispatch_requires_invoke_permission(monkeypatch):
+    tenant_id = uuid4()
+    user_id = uuid4()
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: SimpleNamespace(delegation_max_depth=3),
+    )
+    monkeypatch.setattr(
+        "app.security.permissions.list_user_permissions",
+        lambda *_args, **_kwargs: set(),
+    )
+    loop = execution_loop.AgentExecutionLoop(None, None)
+    result = asyncio.run(loop._run_child_agent(
+        object(),
+        ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id, trace_id="a2a-denied"),
+        child_agent_version_id=uuid4(),
+        task_text="perform a delegated task",
+        delegation_depth=0,
+        require_current_version=True,
+        cancellation_event=None,
+        deadline_at=None,
+    ))
+    assert result["status"] == "FAILED"
+    assert result["error_code"] == "AI_A2A_DENIED"

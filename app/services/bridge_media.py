@@ -48,8 +48,9 @@ def _shared_root(settings: Settings) -> Path:
 
 def _safe_export_name(item: File) -> str:
     """生成共享卷内的稳定文件名；去掉路径分隔符，避免逃逸。"""
-    raw = Path(item.original_name or "file").name
-    safe = raw.replace("\\", "_").replace("/", "_").strip() or "file"
+    # Normalize both Windows and POSIX separators independent of the host OS.
+    raw = (item.original_name or "file").replace("\\", "/").rsplit("/", 1)[-1]
+    safe = raw.replace("..", "_").strip(" .") or "file"
     return f"{item.id}_{safe}"[:255]
 
 

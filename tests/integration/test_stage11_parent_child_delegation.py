@@ -22,15 +22,14 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
-from tests.support.ddl import fk_off, fk_on
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture(autouse=True)
 def baseline():
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         # 别的用例会留下审计行，其 actor_user_id 仍指向这里的 User；
         # 清理前统一关外键，避免 PG 上因残留引用报 23503
-        fk_off(db)
         # 子表→父表顺序：Message.task_id 为 RESTRICT，必须先于 Task 删除
         db.execute(delete(Message))
         db.execute(delete(Conversation))
@@ -42,7 +41,6 @@ def baseline():
         db.execute(delete(User))
         db.execute(delete(Role))
         db.execute(delete(Tenant))
-        fk_on(db)
 
         tenant = Tenant(name=f"stage11-{uuid4()}")
         db.add(tenant)
@@ -113,7 +111,7 @@ def baseline():
 
     yield data
 
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         db.execute(delete(TaskEvent))
         db.execute(delete(Task))
         db.execute(delete(Message))
@@ -154,7 +152,7 @@ async def test_default_parent_used_when_agent_not_selected(baseline):
 
 
 @pytest.mark.asyncio
-async def test_child_task_requires_delegation_fields_and_depth_is_limited(baseline):
+async def test_child_task_requires_delegation_fields_and_respects_configured_depth(baseline):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         token = await _login(client, "owner", "pass")
         headers = {"Authorization": f"Bearer {token}"}
@@ -216,8 +214,40 @@ async def test_child_task_requires_delegation_fields_and_depth_is_limited(baseli
                 "child_sequence": 1,
             },
         )
-        assert grandchild.status_code == 409
-        assert grandchild.json()["code"] == "AI_AGENT_DELEGATION_DEPTH_EXCEEDED"
+        assert grandchild.status_code == 200
+        grandchild_id = grandchild.json()["data"]["id"]
+
+        great_grandchild = await client.post(
+            "/api/z-torque/tasks",
+            headers=headers,
+            json={
+                "agent_id": str(baseline["default_parent_id"]),
+                "agent_version_id": str(baseline["default_parent_v1"]),
+                "idempotency_key": "stage11-great-grandchild",
+                "request_summary": "great grandchild",
+                "parent_task_id": grandchild_id,
+                "delegation_id": str(uuid4()),
+                "child_sequence": 1,
+            },
+        )
+        assert great_grandchild.status_code == 200
+        great_grandchild_id = great_grandchild.json()["data"]["id"]
+
+        too_deep = await client.post(
+            "/api/z-torque/tasks",
+            headers=headers,
+            json={
+                "agent_id": str(baseline["default_parent_id"]),
+                "agent_version_id": str(baseline["default_parent_v1"]),
+                "idempotency_key": "stage11-depth-four",
+                "request_summary": "too deep",
+                "parent_task_id": great_grandchild_id,
+                "delegation_id": str(uuid4()),
+                "child_sequence": 1,
+            },
+        )
+        assert too_deep.status_code == 409
+        assert too_deep.json()["code"] == "AI_AGENT_DELEGATION_DEPTH_EXCEEDED"
 
 
 @pytest.mark.asyncio

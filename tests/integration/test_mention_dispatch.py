@@ -21,11 +21,12 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture
 def mention_env():
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         for model in (Task, Message, Conversation, AuthSession, User, AgentVersion, Agent, Tenant):
             db.execute(delete(model))
         tenant = Tenant(name=f"mention-{uuid4()}")
@@ -123,8 +124,9 @@ async def test_unmentioned_message_keeps_default_parent_behavior(mention_env):
             json={"agent_id": None, "conversation_id": None, "message": "随便聊聊", "content_parts": None, "stream": False},
         )
     assert response.status_code == 200, response.text
-    # 系统自带智能体有派发工具，/chat（非流式）一律创建任务，由执行循环 deciding 是否调用工具
-    assert response.json()["data"]["response_type"] == "TASK"
+    # 模型返回普通文本时，即使 Agent 可用 A2A 工具，也保持普通 CHAT，不创建 Task。
+    assert response.json()["data"]["response_type"] == "CHAT"
+    assert response.json()["data"]["task_id"] is None
 
 
 @pytest.mark.asyncio
@@ -151,3 +153,58 @@ async def test_generation_preset_actually_changes_model_request(mention_env, mon
     assert response.status_code == 200, response.text
     assert gateway.requests
     assert gateway.requests[0].temperature == 0.4
+
+
+@pytest.mark.asyncio
+async def test_non_stream_chat_creates_task_only_when_model_requests_a2a_dispatch(mention_env, monkeypatch):
+    from app.kernel.model_gateway.contracts import ModelResponse, ModelToolCall
+
+    class ToolCallingGateway:
+        default_model = "mock"
+
+        def __init__(self):
+            self.requests = []
+
+        async def generate(self, request):
+            self.requests.append(request)
+            assert any(tool["function"]["name"] == "route_specialist" for tool in request.tools)
+            return ModelResponse(
+                content=None,
+                tool_calls=[
+                    ModelToolCall(
+                        id="call-a2a-nonstream",
+                        name="route_specialist",
+                        arguments={
+                            "agent_version_id": mention_env["target_version_id"],
+                            "task": "写一份季度报告",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+
+    gateway = ToolCallingGateway()
+    monkeypatch.setattr(app.state, "model_gateway", gateway)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        headers = await _headers(client, mention_env["username"])
+        response = await client.post(
+            "/api/z-torque/chat",
+            headers={**headers, "Idempotency-Key": "a2a-tool-call"},
+            json={
+                "agent_id": None,
+                "conversation_id": None,
+                "message": "请委派给写作智能体完成季度报告",
+                "content_parts": None,
+                "stream": False,
+            },
+        )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["response_type"] == "TASK"
+    assert data["task_id"]
+    assert gateway.requests
+    with SessionLocal() as db:
+        task = db.get(Task, data["task_id"])
+        assert task is not None
+        assert task.parent_task_id is None
+        assert task.request_summary == "请委派给写作智能体完成季度报告"

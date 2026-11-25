@@ -169,8 +169,19 @@ class AuditExportService:
         try:
             self.recover_interrupted()
         except Exception as exc:  # noqa: BLE001
+            # SQLite / MySQL / PostgreSQL 对缺表的文案不同；PG 的稳定 SQLSTATE 为 42P01。
+            # 只容忍「迁移尚未建表」，其余数据库故障仍必须阻止插件启动。
+            original = getattr(exc, "orig", None)
+            sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+            original_args = getattr(original, "args", ())
+            if sqlstate is None and original_args and isinstance(original_args[0], dict):
+                sqlstate = original_args[0].get("C") or original_args[0].get("code")
             message = str(exc).lower()
-            if "no such table" not in message and "doesn't exist" not in message:
+            missing_table = sqlstate == "42P01" or any(
+                marker in message
+                for marker in ("no such table", "doesn't exist", "does not exist")
+            )
+            if not missing_table:
                 raise
         with self._lock:
             if self._executor is None and not self._closed:

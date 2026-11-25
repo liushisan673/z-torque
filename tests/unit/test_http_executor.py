@@ -11,6 +11,17 @@ class FakeResponse:
     def __init__(self, status_code=200, text="ok"):
         self.status_code = status_code
         self.text = text
+        self.headers = {"content-length": str(len(text.encode("utf-8")))}
+        self.encoding = "utf-8"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def iter_bytes(self):
+        yield self.text.encode("utf-8")
 
     @property
     def is_success(self):
@@ -32,12 +43,8 @@ class FakeClient:
     def __exit__(self, *args):
         return False
 
-    def get(self, url, **kwargs):
-        FakeClient.calls.append(("GET", url, kwargs))
-        return FakeClient.response
-
-    def post(self, url, **kwargs):
-        FakeClient.calls.append(("POST", url, kwargs))
+    def stream(self, method, url, **kwargs):
+        FakeClient.calls.append((method, url, kwargs))
         return FakeClient.response
 
 
@@ -146,3 +153,13 @@ def test_allowed_url_matrix(monkeypatch):
     assert allow("https://evil.com/x", ["example.com"]) is False  # 白名单外
     assert allow("https://example.com/x", []) is False  # 空白名单 fail-closed
     assert allow("ftp://example.com/x", ["example.com"], True) is False  # 非 http(s) scheme
+
+
+
+def test_http_response_size_limit_is_enforced_during_stream(fake_http):
+    config = {**BASE_CONFIG, "max_response_bytes": 64}
+    fake_http.response = FakeResponse(status_code=200, text='{"payload":"' + ("x" * 4096) + '"}')
+    result = HttpExecutor().execute(config, {}, 5)
+    assert result.status == "FAILED"
+    assert result.error_code == "AI_HTTP_REQUEST_FAILED"
+    assert "size limit" in result.error_message

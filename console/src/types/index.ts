@@ -100,6 +100,7 @@ export type TaskStatus =
   | "QUEUED"
   | "RUNNING"
   | "WAITING_HUMAN"
+  | "WAITING_CHILD"
   | "CANCELING"
   | "CANCEL_REQUESTED"
   | "SUCCESS"
@@ -112,6 +113,9 @@ export interface Task {
   id: string;
   status: TaskStatus;
   owner_user_id: string;
+  agent_id?: string;
+  parent_task_id?: string | null;
+  child_sequence?: number | null;
   root_task_id: string;
   delegation_depth: number;
   request_summary: string;

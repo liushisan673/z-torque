@@ -44,12 +44,13 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture(autouse=True)
 def cleanup():
     yield
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         for model in (
             PatchArtifact, Message, TaskEvent, Outbox, TaskCheckpoint, Confirmation,
             AuditLog, Task, SkillVersion, Skill, AgentVersion, Agent, AuthSession, User, Tenant,
@@ -272,9 +273,13 @@ async def test_approved_scope_tampering_is_rejected_at_execution_point():
 
 
 @pytest.mark.asyncio
-async def test_full_scope_never_silently_downgrades_to_process():
+async def test_full_scope_never_silently_downgrades_to_process(tmp_path):
     """真实入口：full scope 落到 process 驱动显式 AI_CAPABILITY_UNAVAILABLE。"""
-    root = Path(get_settings().md_skills_dir)
+    root = tmp_path
+    skill_root = root / "demo"
+    script = skill_root / "scripts" / "demo.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("print('ok')", encoding="utf-8")
     driver = ProcessSandboxDriver(allowed_roots=[str(root)])
     full_scope = SandboxScope((str(root),), mode=SANDBOX_MODE_FULL, isolation="process")
     runtime = MdSkillRuntime(root, enabled=True, sandbox_driver=driver, allowed_roots=[str(root)])

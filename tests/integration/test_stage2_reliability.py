@@ -24,12 +24,13 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture(autouse=True)
 def cleanup():
     yield
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         db.execute(delete(Message))
         db.execute(delete(Conversation))
         db.execute(delete(TaskEvent))

@@ -35,7 +35,7 @@ import { useToast } from "../components/Toast";
 import { AppTopbar, APP_NAV, isAdminUser } from "../components/AppTopbar";
 import { useAuth } from "../stores/auth";
 // 内联执行块共享模块：与嵌入对话页（/embed/chat）共用类型/工具函数/渲染组件，保证实时链路展示一致
-import { RunBlock, eventLabel, localStep, payloadOf, TERMINAL, type ActiveRun, type TaskStep } from "./chatRun";
+import { RunBlock, eventLabel, localStep, payloadOf, toolCardOf, TERMINAL, type ActiveRun, type TaskStep } from "./chatRun";
 
 // 会话记忆摘要（GET /memory 与 POST /memory/summarize 共用返回结构）
 interface MemorySummary {
@@ -201,7 +201,6 @@ export function ChatPage() {
   // 窄屏抽屉：原实现在 <768px 直接隐藏侧栏，手机上无法切换会话与智能体
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // 宽屏会话列表折叠：点击可隐藏/展开左侧会话列表，让对话区更宽
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const navigate = useNavigate();
   const { push: toast } = useToast();
@@ -471,11 +470,13 @@ export function ChatPage() {
     }
   }, []);
 
-  // 拉取子任务列表：同 root_task_id 且非根任务本身
-  const refreshChildTasks = useCallback(async (rootId: string) => {
+  // 只拉取当前任务的直接子任务，避免选中某个子任务时把同根任务的兄弟节点误标成它的子任务。
+  const refreshChildTasks = useCallback(async (parentTaskId: string) => {
     try {
       const all = await request<{ items: Task[] }>("/api/z-torque/tasks", { query: { limit: 100 } });
-      setChildTasks(all.items.filter((x) => x.root_task_id === rootId && x.id !== rootId));
+      setChildTasks(all.items
+        .filter((x) => x.parent_task_id === parentTaskId)
+        .sort((a, b) => (a.child_sequence ?? Number.MAX_SAFE_INTEGER) - (b.child_sequence ?? Number.MAX_SAFE_INTEGER)));
     } catch {
       /* 子任务加载失败不影响主流程 */
     }
@@ -501,13 +502,14 @@ export function ChatPage() {
       // 保留本地步骤（seq < 0 的「理解需求」等），真实事件按 seq 追加在后
       setActiveRun((prev) =>
         prev?.taskId === taskId
-          ? { ...prev, steps: [...prev.steps.filter((s) => s.seq < 0), ...mapped], status: t.status, waiting: t.status === "WAITING_HUMAN" }
+          ? { ...prev, steps: [...prev.steps.filter((s) => s.seq < 0), ...mapped], status: t.status, waiting: t.status === "WAITING_HUMAN" || t.status === "WAITING_CHILD" }
           : prev,
       );
       setWaitingConfirm(t.status === "WAITING_HUMAN");
+      if (t.status === "WAITING_HUMAN" || t.status === "WAITING_CHILD") setTaskPanelOpen(true);
       const last = ev.items[ev.items.length - 1];
       lastEventIdRef.current = last ? String(last.seq) : "";
-      void refreshChildTasks(t.root_task_id || taskId);
+      void refreshChildTasks(t.id);
       return t;
     } catch (err) {
       setError(errorText(err, "加载任务详情失败"));
@@ -787,10 +789,10 @@ export function ChatPage() {
             delegation_depth: Number(d.delegation_depth ?? prev?.delegation_depth ?? 0),
             result: (d.result as Record<string, unknown>) ?? prev?.result ?? null,
           } as Task));
-          if (status === "WAITING_HUMAN") {
-            setWaitingConfirm(true);
-            applyRun((prev) => ({ ...prev, status, waiting: true }));
-          }
+          setWaitingConfirm(status === "WAITING_HUMAN");
+          applyRun((prev) => ({ ...prev, status, waiting: status === "WAITING_HUMAN" || status === "WAITING_CHILD" }));
+          if (status === "WAITING_HUMAN" || status === "WAITING_CHILD") setTaskPanelOpen(true);
+          if (status === "WAITING_CHILD") void refreshChildTasks(taskId);
           return;
         }
         const key = String(msg.id || "");
@@ -837,8 +839,16 @@ export function ChatPage() {
         applyRun((prev) => ({ ...prev, steps: prev.steps.some((s) => s.seq === seq) ? prev.steps : [...prev.steps, step] }));
         if (eventType === "TASK_WAITING_HUMAN") {
           setWaitingConfirm(true);
+          setTaskPanelOpen(true);
           applyRun((prev) => ({ ...prev, waiting: true }));
         }
+        if (eventType === "TASK_WAITING_CHILD") {
+          setWaitingConfirm(false);
+          setTaskPanelOpen(true);
+          applyRun((prev) => ({ ...prev, waiting: true }));
+          void refreshChildTasks(taskId);
+        }
+        if (eventType === "TASK_CHILD_COMPLETED") void refreshChildTasks(taskId);
         if (eventType === "TASK_APPROVAL_GRANTED" || eventType === "TASK_APPROVAL_REJECTED") {
           setWaitingConfirm(false);
           applyRun((prev) => ({ ...prev, waiting: false }));
@@ -847,7 +857,9 @@ export function ChatPage() {
         const toState = String(d.to_state ?? d.status ?? "");
         if (toState) {
           setTask((prev) => (prev ? { ...prev, status: toState } : prev));
-          applyRun((prev) => ({ ...prev, status: toState }));
+          const waiting = toState === "WAITING_HUMAN" || toState === "WAITING_CHILD";
+          if (!waiting) setWaitingConfirm(false);
+          applyRun((prev) => ({ ...prev, status: toState, waiting }));
         }
         if (TERMINAL.has(toState)) {
           setWaitingConfirm(false);
@@ -1173,7 +1185,10 @@ export function ChatPage() {
   const taskBadgeInfo = useMemo(() => {
     if (!task) return { cls: "muted", label: "—" } as const;
     if (task.status === "WAITING_HUMAN") return { cls: "waiting", label: "等待确认" } as const;
+    if (task.status === "WAITING_CHILD") return { cls: "waiting", label: "等待子智能体" } as const;
     if (task.status === "SUCCESS") return { cls: "success", label: "已完成" } as const;
+    if (task.status === "FAILED" || task.status === "TIMEOUT") return { cls: "failed", label: task.status === "TIMEOUT" ? "执行超时" : "执行失败" } as const;
+    if (task.status === "CANCELLED") return { cls: "muted", label: "已取消" } as const;
     if (TERMINAL.has(task.status)) return { cls: "failed", label: "已结束" } as const;
     return { cls: "running", label: "执行中" } as const;
   }, [task]);
@@ -1181,7 +1196,7 @@ export function ChatPage() {
   // 时间线节点样式：根据事件类型与位置推断 done/active/waiting/error
   function timelineItemClass(s: TaskStep, idx: number, total: number): string {
     if (s.eventType.includes("FAILED") || s.eventType.includes("ERROR") || s.eventType === "task.error") return "error";
-    if (s.eventType === "TASK_WAITING_HUMAN" || s.eventType === "task.waiting_human") return "waiting";
+    if (s.eventType === "TASK_WAITING_HUMAN" || s.eventType === "task.waiting_human" || s.eventType === "TASK_WAITING_CHILD") return "waiting";
     if (idx === total - 1 && taskRunning) return "active";
     return "done";
   }
@@ -1378,7 +1393,7 @@ export function ChatPage() {
   return (
     <div className="chat-page">
       <AppTopbar nav={APP_NAV} />
-      <div className={`chat-shell${sidebarCollapsed ? " chat-shell-sidebar-collapsed" : ""}`} style={listPane.style}>
+      <div className="chat-shell" style={listPane.style}>
         {/* 窄屏遮罩：侧栏以抽屉形式覆盖（原实现直接隐藏，手机上无法切换会话/智能体） */}
         {sidebarOpen && <div className="chat-sidebar-mask" onClick={() => setSidebarOpen(false)} />}
 
@@ -1477,7 +1492,7 @@ export function ChatPage() {
         </aside>
 
         {/* 左右分栏拖拽把手（会话列表折叠时不显示） */}
-        {!sidebarCollapsed && <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />}
+        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
 
         {/* 中间对话区：分栏时左侧保留当前会话，右侧是可独立收发的另一会话 */}
         <section className={`chat-main${splitOpen ? " chat-main-split" : ""}`} style={splitPane.style}>
@@ -1489,29 +1504,15 @@ export function ChatPage() {
                 className="chat-sidebar-toggle"
                 type="button"
                 onClick={() => setSidebarOpen(true)}
-                aria-label="打开会话与智能体列表"
-                title="会话与智能体"
+                aria-label="打开会话列表"
+                title="会话列表"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
-              </button>
-              {/* 宽屏会话列表折叠开关：点击隐藏/展开左侧会话列表（窄屏由抽屉 toggle 接管） */}
-              <button
-                className="chat-sidebar-collapse-toggle"
-                type="button"
-                onClick={() => setSidebarCollapsed((v) => !v)}
-                aria-label={sidebarCollapsed ? "展开会话列表" : "隐藏会话列表"}
-                title={sidebarCollapsed ? "展开会话列表" : "隐藏会话列表"}
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  {sidebarCollapsed
-                    ? <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /><path d="M15 9l3 3-3 3" /></>
-                    : <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /><path d="M15 9l-3 3 3 3" /></>}
-                </svg>
               </button>
               <span className="chat-header-title">{currentConversation?.title ?? "新会话"}</span>
               {currentAgent && <span className="chat-agent-chip">{currentAgent.name}</span>}
               {/* 执行中实时指示（对齐 chat.html 的 live-pill） */}
-              {runLive && <span className="chat-live-pill"><span className="dot" />执行中</span>}
+              {runLive && <span className="chat-live-pill" role="status" aria-live="polite"><span className="dot" />{waitingConfirm ? "等待人工确认" : "执行中"}</span>}
             </div>
             <div className="chat-header-actions">
               <FileCompareDrawer conversationId={conversationId} />
@@ -1541,7 +1542,7 @@ export function ChatPage() {
             ) : messages.length === 0 && streamingText === null && !activeRun && runAnswer === null ? (
               <div className="chat-welcome">
                 <h2>开始对话</h2>
-                <p>选择智能体后输入问题。需要执行技能时将自动创建任务，并在对话中实时展示执行过程。</p>
+                <p>直接提问会作为普通对话回复；只有需要调用工具、技能或明确执行任务时，系统才会创建 Task，并展示执行过程与审批状态。</p>
                 {/* 无可用智能体：这是产品的第一道门，必须给出原因与出路 */}
                 {!agentId ? (
                   <GuideCallout
@@ -1801,6 +1802,15 @@ export function ChatPage() {
                 {task.id.slice(0, 10)}…
                 {copiedId === "task-id" && <span className="copy-flag">已复制</span>}
               </div>
+              {task.parent_task_id && (
+                <div className="chat-panel-status-meta" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>直接父任务</span>
+                  <button type="button" className="btn btn-ghost btn-xs" disabled={!TERMINAL.has(task.status)} onClick={() => void loadTaskDetail(task.parent_task_id!)} title={TERMINAL.has(task.status) ? "查看直接父任务" : "当前子任务仍在执行，完成后再切换查看父任务"}>
+                    {task.parent_task_id.slice(0, 10)}… · 查看
+                  </button>
+                  {task.child_sequence != null && <span>子任务序号 #{task.child_sequence}</span>}
+                </div>
+              )}
               {task.delegation_depth > 0 && task.root_task_id && (
                 <div className="chat-panel-status-meta">
                   根任务
@@ -1828,12 +1838,28 @@ export function ChatPage() {
                   {steps.map((s, i) => {
                     const cls = timelineItemClass(s, i, steps.length);
                     const label = eventLabel(s.eventType);
+                    const tool = toolCardOf(s);
                     return (
                       <div key={s.seq} className={`chat-timeline-item ${cls}`}>
                         <div className="chat-timeline-dot" />
                         <div className="chat-timeline-title">{label}</div>
                         {s.summary && s.summary !== label && (
                           <div className="chat-timeline-desc">{s.summary}</div>
+                        )}
+                        {tool && (
+                          <div className="chat-tool-chip">
+                            <div className="chat-tool-chip-head">
+                              <span className="chat-tool-tag">工具</span>
+                              <span className="chat-tool-chip-name">{tool.name}</span>
+                            </div>
+                            {tool.result && <div className="chat-tool-result">{tool.result}</div>}
+                            {tool.args && (
+                              <details>
+                                <summary className="chat-tool-chip-toggle">查看参数</summary>
+                                <pre className="chat-tool-args">{tool.args}</pre>
+                              </details>
+                            )}
+                          </div>
                         )}
                         <div className="chat-timeline-time">{s.time}</div>
                       </div>
@@ -1844,7 +1870,7 @@ export function ChatPage() {
 
               {waitingConfirm && (
                 <div className="chat-confirm-box">
-                  <p>任务需要人工确认，请批准或拒绝以继续执行。</p>
+                  <p>当前任务已暂停并释放执行位。批准后将从检查点继续；等待期间，你可以切换到其他会话继续处理任务，返回本会话后再完成审批。</p>
                   <div className="chat-confirm-actions">
                     <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>确认</button>
                     <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
@@ -1865,14 +1891,14 @@ export function ChatPage() {
 
               {childTasks.length > 0 && (
                 <div className="chat-delegation-block">
-                  <h4>子任务（{childTasks.length}）</h4>
+                  <h4>直接子任务（{childTasks.length}）</h4>
                   {childTasks.map((c) => (
                     <div key={c.id} className="chat-child-task" onClick={() => void loadTaskDetail(c.id)} title="点击查看该子任务">
                       <div className="ct-head">
                         <span className="ct-name">{c.request_summary || c.id.slice(0, 8)}</span>
                         <StatusTag status={c.status} />
                       </div>
-                      <div className="ct-meta">层级 {c.delegation_depth}</div>
+                      <div className="ct-meta">层级 {c.delegation_depth}{c.child_sequence != null ? ` · 序号 #${c.child_sequence}` : ""}</div>
                     </div>
                   ))}
                 </div>
@@ -1903,7 +1929,7 @@ export function ChatPage() {
           ) : (
             <table className="table">
               <thead>
-                <tr><th>状态</th><th>摘要</th><th>层级</th><th>创建时间</th></tr>
+                <tr><th>状态</th><th>摘要</th><th>层级</th><th>创建时间</th><th>操作</th></tr>
               </thead>
               <tbody>
                 {taskHistory.map((t) => (
@@ -1912,6 +1938,7 @@ export function ChatPage() {
                     <td className="text-sm">{t.request_summary}</td>
                     <td className="text-sm">{t.delegation_depth > 0 ? "子任务" : "根任务"}</td>
                     <td className="text-muted text-sm">{new Date(t.created_at).toLocaleString()}</td>
+                    <td><Button size="small" type="link" onClick={() => { void loadTaskDetail(t.id); setTaskPanelOpen(true); setTaskHistoryOpen(false); }}>查看详情</Button></td>
                   </tr>
                 ))}
               </tbody>

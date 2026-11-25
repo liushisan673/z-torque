@@ -20,17 +20,17 @@
 
 | 能力 | Linux / macOS（process） | Windows（process） | 容器（docker CLI） |
 |------|--------------------------|--------------------|--------------------|
-| `python -I` 独立解释器 | 有 | 有 | 有 |
+| Python 独立 worker | 有（`python -I`） | 有（EXE 内置 worker 入口；非 `-I`） | 有 |
 | 最小环境变量 / 输出上限 / 超时 kill | 有 | 有 | 有 |
 | `resource.setrlimit`（CPU/内存） | 可选（`sandbox_rlimit_enabled`） | **无**，不宣称 | 由 `--memory` / `--cpus` / `--pids-limit` 替代 |
-| 进程组 kill | 有 | **无**（仅 kill 进程树） | docker kill + 进程树确认 |
+| 进程组 kill | 有 | **无**（taskkill `/T /F` 清理进程树） | docker kill + 进程树确认 |
 | cwd 白名单 + Scope 边界 | 有 | 有 | 有（挂载只暴露白名单根） |
 | `restricted` scope | 可用 | 可用 | 可用 |
 | `full` scope（不可信执行） | **不可用**（无容器） | **不可用**（无容器） | 可用 |
 | `isolation_level` | `rlimit` 或 `none` | **必须 `none`** | `container` |
 | `untrusted_execution` | `unavailable` | `unavailable` | `container` |
 
-超过资源限制的错误码：`AI_SANDBOX_RESOURCE_EXCEEDED`（429）。Windows 上该分支**不会触发**，不得在文档或前端宣称其可用。
+超过资源限制的错误码：`AI_SANDBOX_RESOURCE_EXCEEDED`（429）。Windows 上该分支**不会触发**，不得在文档或前端宣称其可用。EXE 使用 onedir 打包时，脚本 worker 通过同一个 `ZTorque.exe --zt-sandbox-worker` 入口启动；脚本目录作为 `sys.path[0]`，且保留最小系统环境变量。
 
 ---
 

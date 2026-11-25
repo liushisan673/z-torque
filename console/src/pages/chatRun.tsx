@@ -79,6 +79,8 @@ export function eventLabel(eventType: string): string {
     TASK_CANCELLED: "任务已取消",
     TASK_CANCEL_REQUESTED: "请求取消",
     TASK_WAITING_HUMAN: "等待人工确认",
+    TASK_WAITING_CHILD: "等待子智能体完成",
+    TASK_CHILD_COMPLETED: "子智能体已完成",
     TASK_APPROVAL_GRANTED: "已批准",
     TASK_APPROVAL_REJECTED: "已拒绝",
     TASK_SKILL_FAILED: "工具执行失败",
@@ -115,6 +117,7 @@ export function eventLabel(eventType: string): string {
 export function runStatusInfoOf(activeRun: ActiveRun | null): { cls: string; label: string } {
   if (!activeRun) return { cls: "run", label: "执行中" };
   if (activeRun.stopped) return { cls: "fail", label: "已停止" };
+  if (activeRun.status === "WAITING_CHILD") return { cls: "wait", label: "等待子任务" };
   if (activeRun.waiting || activeRun.status === "WAITING_HUMAN") return { cls: "wait", label: "等待确认" };
   if (activeRun.status === "SUCCESS") return { cls: "ok", label: "已完成" };
   if (TERMINAL.has(activeRun.status)) return { cls: "fail", label: "已结束" };
@@ -125,7 +128,7 @@ export function runStatusInfoOf(activeRun: ActiveRun | null): { cls: string; lab
 export function runStepState(s: TaskStep, idx: number, total: number, activeRun: ActiveRun | null): "active" | "done" | "waiting" | "fail" {
   if (s.eventType.includes("FAILED") || s.eventType.includes("ERROR") || s.eventType === "task.error") return "fail";
   if (s.eventType === "LOCAL_STOPPED") return "fail";
-  if (s.eventType === "TASK_WAITING_HUMAN" || s.eventType === "task.waiting_human") return "waiting";
+  if (s.eventType === "TASK_WAITING_HUMAN" || s.eventType === "task.waiting_human" || s.eventType === "TASK_WAITING_CHILD") return "waiting";
   if (!activeRun) return "done";
   if (activeRun.stopped || TERMINAL.has(activeRun.status)) return "done";
   return idx === total - 1 ? "active" : "done";

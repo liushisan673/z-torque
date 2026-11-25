@@ -1,4 +1,11 @@
-import { NavLink } from "react-router-dom";
+import { useState } from "react";
+import type { ReactNode } from "react";
+import { NavLink, useLocation } from "react-router-dom";
+import {
+  AppstoreOutlined, AuditOutlined, CloudServerOutlined, DatabaseOutlined,
+  MenuFoldOutlined, MenuUnfoldOutlined, MoonOutlined, RobotOutlined,
+  SettingOutlined, SunOutlined, TeamOutlined, ToolOutlined, ApiOutlined,
+} from "@ant-design/icons";
 import { useAuth } from "../stores/auth";
 import { useThemeMode } from "../theme/ThemeProvider";
 import type { UserInfo } from "../types";
@@ -6,33 +13,26 @@ import type { UserInfo } from "../types";
 export interface NavItem {
   to: string;
   label: string;
-  /** i18n key：有则用字典译文，缺失时回退 label（中文） */
   labelKey?: string;
-  /** 展示所需的权限（与后端 require_permissions 对应）；管理员自动可见 */
   permission?: string;
-  /** 仅管理员可见（对应后端 require_admin） */
   adminOnly?: boolean;
+  section?: "primary" | "more";
+  group?: "operations" | "configuration" | "account";
 }
 
-// 全站统一导航：仅包含已实现路由的入口；展示时按用户角色/权限过滤。
-// 权限矩阵：模型/连接器不进普通用户管理页（仅通过 Skill/Agent 间接使用），审计对普通用户开放（仅本人记录）
 export const APP_NAV: NavItem[] = [
-  { to: "/chat", label: "会话管理", labelKey: "nav.chat" },
-  { to: "/agents", label: "智能体管理", labelKey: "nav.agents" },
-  { to: "/skills", label: "技能管理", labelKey: "nav.skills" },
-  { to: "/models", label: "模型管理", labelKey: "nav.models", adminOnly: true },
-  { to: "/connectors", label: "连接器管理", labelKey: "nav.connectors", adminOnly: true },
-  { to: "/webhooks", label: "Webhook 接入", labelKey: "nav.webhooks", adminOnly: true },
-  // 审计为例外入口：普通用户可见，但后端自动限定为仅本人记录
-  { to: "/audit", label: "审计管理", labelKey: "nav.audit" },
-  { to: "/users", label: "用户管理", labelKey: "nav.users", adminOnly: true },
-  { to: "/settings", label: "偏好设置", labelKey: "nav.settings" },
+  { to: "/chat", label: "工作台", labelKey: "nav.chat", section: "primary" },
+  { to: "/knowledge", label: "知识库", labelKey: "nav.knowledge", section: "primary" },
+  { to: "/agents", label: "智能体", labelKey: "nav.agents", section: "primary" },
+  { to: "/skills", label: "技能", labelKey: "nav.skills", section: "primary" },
+  { to: "/audit", label: "运行与审计", labelKey: "nav.audit", section: "more", group: "operations" },
+  { to: "/models", label: "模型接入", labelKey: "nav.models", adminOnly: true, section: "more", group: "configuration" },
+  { to: "/connectors", label: "连接器", labelKey: "nav.connectors", adminOnly: true, section: "more", group: "configuration" },
+  { to: "/webhooks", label: "Webhook", labelKey: "nav.webhooks", adminOnly: true, section: "more", group: "configuration" },
+  { to: "/users", label: "用户与权限", labelKey: "nav.users", adminOnly: true, section: "more", group: "account" },
+  { to: "/settings", label: "偏好设置", labelKey: "nav.settings", section: "more", group: "account" },
 ];
 
-/**
- * 管理员判定：与后端 require_admin 的最小判定保持一致——
- * 拥有 admin 角色，或 admin.manage 权限，或任一 user./role./system. 前缀权限。
- */
 export function isAdminUser(user: UserInfo | null): boolean {
   if (!user) return false;
   if (user.roles?.includes("admin")) return true;
@@ -41,12 +41,10 @@ export function isAdminUser(user: UserInfo | null): boolean {
   return perms.some((p) => p.startsWith("user.") || p.startsWith("role.") || p.startsWith("system."));
 }
 
-/** 登录后的默认主页：管理员为模型配置（部署后第一件事），普通用户为会话 */
-export function homePath(user: UserInfo | null): string {
-  return isAdminUser(user) ? "/models" : "/chat";
+export function homePath(_user: UserInfo | null): string {
+  return "/chat";
 }
 
-/** 按导航元数据与用户权限过滤可见入口 */
 export function visibleNav(nav: NavItem[], user: UserInfo | null): NavItem[] {
   const admin = isAdminUser(user);
   const perms = user?.permissions ?? [];
@@ -57,63 +55,89 @@ export function visibleNav(nav: NavItem[], user: UserInfo | null): NavItem[] {
   });
 }
 
-/**
- * 应用顶栏：品牌 + 导航 + 用户区。
- * Chat 页与 ConsoleLayout 共用，保证全站导航视觉一致（对齐 docs/frontend/chat.html）。
- * 颜色/尺寸全部走 index.css 的 CSS 变量，不硬编码。
- */
+const NAV_ICONS: Record<string, ReactNode> = {
+  "/chat": <AppstoreOutlined />,
+  "/knowledge": <DatabaseOutlined />,
+  "/agents": <RobotOutlined />,
+  "/skills": <ToolOutlined />,
+  "/audit": <AuditOutlined />,
+  "/models": <CloudServerOutlined />,
+  "/connectors": <ApiOutlined />,
+  "/webhooks": <ApiOutlined />,
+  "/users": <TeamOutlined />,
+  "/settings": <SettingOutlined />,
+};
+
+/** 全站统一的左侧主导航；Chat 与管理页面共用同一权限过滤和导航数据源。 */
 export function AppTopbar({ nav }: { nav: NavItem[] }) {
   const { user, logout } = useAuth();
   const items = visibleNav(nav, user);
-  // 主题由 ThemeProvider 统一管理：同时驱动 antd design token 与手写 CSS 变量
+  const primaryItems = items.filter((item) => item.section !== "more");
+  const moreItems = items.filter((item) => item.section === "more");
   const { mode: theme, toggle, locale, setLocale, t } = useThemeMode();
+  const location = useLocation();
+  const [collapsed, setCollapsed] = useState(false);
+  const label = (item: NavItem) => item.labelKey ? t(item.labelKey) : item.label;
+  const groups = [
+    { key: "operations", title: t("nav.group.operations"), items: moreItems.filter((item) => item.group === "operations") },
+    { key: "configuration", title: t("nav.group.configuration"), items: moreItems.filter((item) => item.group === "configuration") },
+    { key: "account", title: t("nav.group.account"), items: moreItems.filter((item) => item.group === "account") },
+  ];
+
   return (
-    <header className="chat-topbar">
-      <div className="chat-topbar-brand">
+    <aside className={`app-nav-sidebar${collapsed ? " is-collapsed" : ""}`} aria-label="主导航">
+      <div className="app-nav-brand">
         <span className="chat-logo">Z</span>
-        <span className="chat-brand-name">Z-Torque</span>
-        <span className="chat-brand-sub">极矩</span>
+        {!collapsed && <span className="app-nav-brand-copy"><strong>Z-Torque</strong><small>极矩 · AI 工作空间</small></span>}
       </div>
-      <nav className="chat-topbar-nav">
-        {items.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            className={({ isActive }) => "chat-nav-link" + (isActive ? " active" : "")}
-          >
-            {item.labelKey ? t(item.labelKey) : item.label}
-          </NavLink>
+      <button className="app-nav-collapse" type="button" onClick={() => setCollapsed((value) => !value)}
+        title={collapsed ? "展开导航" : "收起导航"} aria-label={collapsed ? "展开导航" : "收起导航"}>
+        {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+        {!collapsed && <span>收起导航</span>}
+      </button>
+      <nav className="app-nav-list">
+        <div className="app-nav-group">
+          {!collapsed && <div className="app-nav-group-title">工作空间</div>}
+          {primaryItems.map((item) => (
+            <NavLink key={item.to} to={item.to}
+              className={({ isActive }) => "app-nav-link" + (isActive ? " active" : "")}
+              title={collapsed ? label(item) : undefined} aria-label={label(item)}>
+              <span className="app-nav-icon">{NAV_ICONS[item.to]}</span>
+              {!collapsed && <span className="app-nav-label">{label(item)}</span>}
+            </NavLink>
+          ))}
+        </div>
+        {groups.map((group) => group.items.length > 0 && (
+          <div className="app-nav-group" key={group.key}>
+            {!collapsed && <div className="app-nav-group-title">{group.title}</div>}
+            {group.items.map((item) => (
+              <NavLink key={item.to} to={item.to}
+                className={({ isActive }) => "app-nav-link" + (isActive || location.pathname.startsWith(item.to + "/") ? " active" : "")}
+                title={collapsed ? label(item) : undefined} aria-label={label(item)}>
+                <span className="app-nav-icon">{NAV_ICONS[item.to]}</span>
+                {!collapsed && <span className="app-nav-label">{label(item)}</span>}
+              </NavLink>
+            ))}
+          </div>
         ))}
       </nav>
-      <div className="chat-topbar-user">
-        <button
-          type="button"
-          className="chat-theme-toggle chat-locale-toggle"
-          onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
-          title={t("top.language")}
-          aria-label={t("top.language")}
-        >
-          <span className="chat-locale-label">{locale === "zh" ? "中" : "EN"}</span>
-        </button>
-        <button
-          type="button"
-          className="chat-theme-toggle"
-          onClick={toggle}
-          title={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
-          aria-label={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
-        >
-          {theme === "dark" ? (
-            // 太阳：当前深色，点击切浅色
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41-1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" /></svg>
-          ) : (
-            // 月亮：当前浅色，点击切深色
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" /></svg>
-          )}
-        </button>
-        <span className="chat-user-avatar">{user?.username.slice(0, 1).toUpperCase() ?? "U"}</span>
-        <span className="chat-user-name">{user?.username ?? t("top.notLoggedIn")}</span>
-        <button type="button" className="chat-btn-logout" onClick={() => void logout()}>{t("top.logout")}</button>
+      <div className="app-nav-footer">
+        <div className="app-nav-user">
+          <span className="chat-user-avatar">{user?.username.slice(0, 1).toUpperCase() ?? "U"}</span>
+          {!collapsed && <span className="app-nav-username" title={user?.username}>{user?.username ?? t("top.notLoggedIn")}</span>}
+        </div>
+        <div className="app-nav-tools">
+          <button type="button" className="app-nav-tool" onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
+            title={t("top.language")} aria-label={t("top.language")}>{locale === "zh" ? "中" : "EN"}</button>
+          <button type="button" className="app-nav-tool" onClick={toggle}
+            title={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
+            aria-label={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}>
+            {theme === "dark" ? <SunOutlined /> : <MoonOutlined />}
+          </button>
+          <button type="button" className="app-nav-tool app-nav-logout" onClick={() => void logout()}
+            title={t("top.logout")} aria-label={t("top.logout")}>{collapsed ? "↪" : t("top.logout")}</button>
+        </div>
       </div>
-    </header>
+    </aside>
   );
 }

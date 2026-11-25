@@ -168,6 +168,42 @@ def test_runtime_recover_requeues_running_and_writes_recovered_outbox():
         assert db.query(Outbox).filter_by(aggregate_id=task_id, event_type="TASK_READY").count() == 2
 
 
+def test_runtime_recover_does_not_replay_task_after_tool_dispatch():
+    tenant_id, user_id, agent_id, version_id = _bootstrap()
+    with SessionLocal.begin() as db:
+        task = create_task(
+            db,
+            ctx=SecurityContext(tenant_id=tenant_id, user_id=user_id),
+            agent_id=agent_id,
+            agent_version_id=version_id,
+            idempotency_key=str(uuid4()),
+            request_summary="run",
+        )
+        transition_task(db, task, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
+        transition_task(db, task, TaskStatus.RUNNING, "TASK_STARTED", "started")
+        task.last_event_seq += 1
+        db.add(TaskEvent(
+            tenant_id=tenant_id,
+            task_id=task.id,
+            seq=task.last_event_seq,
+            event_type="TASK_TOOL_CALL",
+            from_state=TaskStatus.RUNNING,
+            to_state=TaskStatus.RUNNING,
+            summary="calling external tool",
+        ))
+        task_id = task.id
+
+    asyncio.run(TaskRuntime(queue=InMemoryQueueDriver(), session_factory=SessionLocal).recover())
+
+    with SessionLocal() as db:
+        task = db.get(Task, task_id)
+        assert task is not None
+        assert task.status == TaskStatus.FAILED
+        assert task.error_code == "AI_TASK_RECOVERY_UNCERTAIN"
+        assert db.query(Outbox).filter_by(aggregate_id=task_id, event_type="TASK_READY").count() == 1
+        assert db.query(TaskEvent).filter_by(task_id=task_id, event_type="TASK_RECOVERY_UNCERTAIN").count() == 1
+
+
 @pytest.mark.asyncio
 async def test_timeout_loop_behavior_can_be_simulated_by_setting_deadline_and_executing():
     tenant_id, user_id, agent_id, version_id = _bootstrap()

@@ -5029,6 +5029,7 @@ body.pane-resizing {
   color: var(--text);
 }
 .connector-health-card .value.ok { color: var(--success); }
+.connector-health-card .value.warn { color: var(--warning, #b7791f); }
 .connector-health-card .value.err { color: var(--danger); }
 
 .connector-test-result {
@@ -5119,6 +5120,51 @@ body.pane-resizing {
   flex-direction: column;
   min-height: 0;
   font-size: var(--skill-font-size);
+}
+.audit-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 2px 2px 14px;
+  flex-shrink: 0;
+}
+.audit-page-header h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1.3;
+  font-weight: 700;
+}
+.audit-page-header p {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.audit-page-count {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.audit-page-count strong {
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.audit-page-scope {
+  margin-left: 8px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+}
+@media (max-width: 640px) {
+  .audit-page-header { align-items: flex-start; flex-direction: column; gap: 8px; }
 }
 
 /* ---- 筛选栏 ---- */
@@ -6840,3 +6886,415 @@ html[data-embed-theme="dark"] .embed-shell {
 .settings-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; }
 .settings-row + .settings-row { border-top: 0.5px solid var(--border); }
 .settings-preview { padding: 14px 16px; border-radius: var(--radius); background: var(--bg-elevated); border: 0.5px solid var(--border); font-size: var(--base-font-size); }
+
+/* ---- 知识库：面向单机用户的资料入口与检索工作区 ---- */
+.knowledge-page {
+  width: min(1440px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.knowledge-header,
+.knowledge-files-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.knowledge-header .ant-typography,
+.knowledge-files-heading .ant-typography { margin-bottom: 0; }
+.knowledge-header .ant-typography-paragraph { margin-top: 5px; }
+.knowledge-state-alert { border-radius: 12px; }
+.knowledge-upload-progress { border-radius: 12px; }
+.knowledge-search-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(250px, 0.8fr);
+  gap: 16px;
+  align-items: stretch;
+}
+.knowledge-search-card,
+.knowledge-summary-card,
+.knowledge-files-card { border-radius: 14px; }
+.knowledge-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.knowledge-card-heading .ant-typography { margin: 0; }
+.knowledge-card-heading .ant-typography + .ant-typography { display: block; margin-top: 3px; }
+.knowledge-card-icon,
+.knowledge-file-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+  background: var(--primary-soft);
+  flex-shrink: 0;
+}
+.knowledge-results { margin-top: 18px; max-height: 420px; overflow: auto; }
+.knowledge-result-item { width: 100%; min-width: 0; }
+.knowledge-result-meta { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.knowledge-result-content { margin: 8px 0 0 !important; white-space: pre-wrap; line-height: 1.7; color: var(--text-muted); }
+.knowledge-stat,
+.knowledge-summary-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.knowledge-stat strong { color: var(--text); font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.knowledge-summary-foot { margin-bottom: 16px; border-bottom: 0; }
+.knowledge-files-heading { margin-bottom: 14px; }
+.knowledge-files-heading .ant-typography-title { margin-bottom: 3px; }
+.knowledge-file-icon { width: 30px; height: 30px; border-radius: 8px; }
+.chat-nav-more {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.chat-nav-more .anticon { font-size: 10px; }
+@media (max-width: 900px) {
+  .knowledge-search-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .knowledge-header { align-items: flex-start; flex-direction: column; }
+  .knowledge-header > .ant-space { width: 100%; }
+  .knowledge-header > .ant-space .ant-btn { flex: 1; }
+  .knowledge-result-meta { align-items: flex-start; flex-direction: column; }
+}
+
+
+/* ---- 桌面端控制台的窄屏收敛：导航保持可访问，内容区避免横向挤压 ---- */
+@media (max-width: 760px) {
+  .chat-topbar {
+    height: auto;
+    min-height: var(--topbar-h);
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 8px 14px;
+  }
+
+  .chat-topbar-nav {
+    order: 3;
+    flex: 1 1 100%;
+    width: 100%;
+    justify-content: flex-start;
+    padding-bottom: 2px;
+  }
+
+  .chat-topbar-user {
+    margin-left: auto;
+    gap: 7px;
+  }
+
+  .chat-user-name,
+  .chat-topbar-brand .chat-brand-sub {
+    display: none;
+  }
+
+  .content {
+    padding: 16px;
+  }
+
+  .knowledge-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .knowledge-header > .ant-space {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 480px) {
+  .chat-topbar {
+    padding: 8px 10px;
+  }
+
+  .chat-topbar-brand {
+    gap: 7px;
+  }
+
+  .chat-topbar-nav {
+    gap: 1px;
+  }
+
+  .chat-nav-link {
+    padding: 6px 9px;
+    font-size: 12px;
+  }
+
+  .chat-topbar-user {
+    gap: 5px;
+  }
+
+  .chat-btn-logout {
+    padding: 4px 7px;
+  }
+
+  .content {
+    padding: 12px;
+  }
+}
+
+
+/* ---- Desktop product polish: calmer hierarchy, clearer focus, consistent workspace surfaces ---- */
+.chat-topbar {
+  backdrop-filter: saturate(1.15) blur(14px);
+}
+.chat-topbar-brand .chat-logo {
+  border-radius: 9px;
+}
+.chat-nav-link {
+  position: relative;
+  transition: color var(--topbar-transition), background var(--topbar-transition);
+}
+.chat-nav-link.active {
+  box-shadow: none;
+}
+.chat-nav-link.active::after {
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 2px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--primary);
+  opacity: 0.8;
+}
+.content {
+  scroll-behavior: smooth;
+}
+.content :focus-visible,
+.chat-topbar :focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary) 78%, transparent);
+  outline-offset: 2px;
+}
+.knowledge-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.knowledge-title-row .ant-typography {
+  margin: 0;
+}
+.knowledge-workflow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-elevated) 86%, var(--primary-soft));
+}
+.knowledge-workflow > div {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 9px;
+  align-items: center;
+  min-width: 0;
+}
+.knowledge-workflow b {
+  grid-row: 1 / 3;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: var(--primary-soft);
+  color: var(--primary);
+  font-size: 11px;
+}
+.knowledge-workflow strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+.knowledge-workflow span {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.knowledge-workflow i {
+  color: var(--text-muted);
+  font-style: normal;
+  opacity: 0.65;
+}
+.knowledge-workflow .ant-btn {
+  margin-left: auto;
+  white-space: nowrap;
+  padding-inline: 8px;
+}
+.knowledge-number-success { color: var(--success) !important; }
+.knowledge-number-danger { color: var(--danger) !important; }
+.knowledge-files-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.knowledge-files-tools .ant-input-affix-wrapper {
+  width: 220px;
+}
+.knowledge-files-tools .ant-select {
+  min-width: 116px;
+}
+.knowledge-page .ant-card {
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 3%, transparent);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.knowledge-page .ant-card:hover {
+  border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
+}
+.knowledge-page .ant-table-wrapper {
+  overflow: hidden;
+  border-radius: 10px;
+}
+@media (max-width: 900px) {
+  .knowledge-workflow {
+    flex-wrap: wrap;
+  }
+  .knowledge-workflow .ant-btn {
+    margin-left: 0;
+  }
+}
+@media (max-width: 640px) {
+  .knowledge-workflow {
+    align-items: flex-start;
+    gap: 10px;
+  }
+  .knowledge-workflow > div {
+    flex: 1 1 calc(50% - 12px);
+  }
+  .knowledge-workflow > i {
+    display: none;
+  }
+  .knowledge-files-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .knowledge-files-tools {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+  .knowledge-files-tools .ant-input-affix-wrapper {
+    width: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+
+/* ---- App shell: persistent left navigation shared by workspace and chat ---- */
+:root { --app-nav-width: 232px; --app-nav-collapsed-width: 68px; }
+.app-shell {
+  display: flex;
+  flex-direction: row;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+.app-shell > .content {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 28px;
+  background: var(--bg);
+}
+.app-nav-sidebar {
+  flex: 0 0 var(--app-nav-width);
+  width: var(--app-nav-width);
+  min-width: var(--app-nav-width);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 12px 12px;
+  color: var(--text);
+  background: var(--bg-elevated);
+  border-right: 1px solid var(--border);
+  transition: width .18s ease, min-width .18s ease, flex-basis .18s ease;
+  z-index: 30;
+}
+.app-nav-sidebar.is-collapsed {
+  flex-basis: var(--app-nav-collapsed-width);
+  width: var(--app-nav-collapsed-width);
+  min-width: var(--app-nav-collapsed-width);
+  padding-inline: 10px;
+}
+.app-nav-brand { display:flex; align-items:center; gap:10px; min-height:42px; padding:0 7px; }
+.app-nav-brand .chat-logo { display:grid; place-items:center; flex:0 0 34px; width:34px; height:34px; border-radius:10px; color:#fff; background:var(--primary); font-weight:800; }
+.app-nav-brand-copy { display:flex; flex-direction:column; min-width:0; line-height:1.35; }
+.app-nav-brand-copy strong { font-size:14px; letter-spacing:.01em; }
+.app-nav-brand-copy small { color:var(--text-muted); font-size:10px; }
+.app-nav-collapse { display:flex; align-items:center; justify-content:flex-start; gap:10px; min-height:34px; padding:0 10px; border:0; border-radius:8px; color:var(--text-muted); background:transparent; cursor:pointer; text-align:left; }
+.app-nav-collapse:hover,.app-nav-tool:hover { color:var(--text); background:var(--bg); }
+.app-nav-list { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:16px; padding:2px 0; }
+.app-nav-group { display:flex; flex-direction:column; gap:3px; }
+.app-nav-group-title { padding:4px 10px 5px; color:var(--text-muted); font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+.app-nav-link { display:flex; align-items:center; gap:11px; min-height:38px; padding:0 10px; border-radius:8px; color:var(--text-muted); text-decoration:none; font-size:13px; font-weight:500; transition:background .15s ease,color .15s ease; }
+.app-nav-link:hover { color:var(--text); background:var(--bg); }
+.app-nav-link.active { color:var(--primary); background:var(--primary-soft); font-weight:650; }
+.app-nav-icon { display:grid; place-items:center; flex:0 0 18px; width:18px; font-size:16px; }
+.app-nav-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.app-nav-footer { display:flex; flex-direction:column; gap:9px; padding-top:10px; border-top:1px solid var(--border); }
+.app-nav-user { display:flex; align-items:center; gap:9px; min-width:0; padding:0 5px; }
+.app-nav-user .chat-user-avatar { flex:0 0 28px; width:28px; height:28px; }
+.app-nav-username { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; font-weight:600; }
+.app-nav-tools { display:flex; align-items:center; gap:5px; }
+.app-nav-tool { min-height:30px; min-width:30px; padding:0 8px; border:0; border-radius:7px; color:var(--text-muted); background:transparent; cursor:pointer; font-size:12px; }
+.app-nav-logout { margin-left:auto; }
+.app-nav-sidebar.is-collapsed .app-nav-brand { justify-content:center; padding:0; }
+.app-nav-sidebar.is-collapsed .app-nav-collapse { justify-content:center; padding:0; }
+.app-nav-sidebar.is-collapsed .app-nav-link { justify-content:center; padding:0; }
+.app-nav-sidebar.is-collapsed .app-nav-footer { align-items:center; }
+.app-nav-sidebar.is-collapsed .app-nav-user { justify-content:center; padding:0; }
+.app-nav-sidebar.is-collapsed .app-nav-tools { flex-direction:column; }
+.chat-page { flex-direction:row; }
+.chat-page > .app-nav-sidebar { flex-shrink:0; }
+.chat-page > .chat-shell { flex:1; width:0; min-width:0; min-height:0; }
+.app-shell > .content :focus-visible,
+.app-nav-sidebar :focus-visible { outline:2px solid color-mix(in srgb,var(--primary) 78%,transparent); outline-offset:2px; border-radius:7px; }
+
+@media (max-width: 760px) {
+  .app-nav-sidebar, .app-nav-sidebar.is-collapsed {
+    flex-basis:60px; width:60px; min-width:60px; padding:12px 7px;
+  }
+  .app-nav-brand { justify-content:center; padding:0; }
+  .app-nav-brand-copy,.app-nav-collapse span,.app-nav-group-title,.app-nav-label,.app-nav-username { display:none; }
+  .app-nav-collapse,.app-nav-link { justify-content:center; padding:0; }
+  .app-nav-footer { align-items:center; }
+  .app-nav-user { justify-content:center; padding:0; }
+  .app-nav-tools { flex-direction:column; }
+  .app-shell > .content { padding:16px; }
+  .chat-page > .chat-shell { min-width:0; }
+}
+@media (max-width: 480px) {
+  .app-nav-sidebar, .app-nav-sidebar.is-collapsed { flex-basis:54px; width:54px; min-width:54px; padding-inline:5px; }
+  .app-shell > .content { padding:12px; }
+}
+
+.chat-page > .app-nav-sidebar.is-collapsed ~ .chat-shell .chat-sidebar { left: var(--app-nav-collapsed-width); }
+.chat-page > .app-nav-sidebar.is-collapsed ~ .chat-shell .chat-sidebar-mask { left: var(--app-nav-collapsed-width); }

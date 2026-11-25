@@ -4,7 +4,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
-from app.db.session import SessionLocal
 from app.main import app
 from app.models import (
     Agent,
@@ -21,11 +20,12 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 
 
 @pytest.fixture(autouse=True)
 def users():
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         db.execute(delete(AuditLog))
         db.execute(delete(Message))
         db.execute(delete(Conversation))
@@ -99,3 +99,43 @@ async def test_task_api_rejects_unknown_agent_snapshot(users):
             json={**users, "agent_version_id": str(uuid4()), "idempotency_key": "api-3", "request_summary": "x"},
         )
         assert mismatched_version.status_code == 409
+
+@pytest.mark.asyncio
+async def test_task_response_exposes_direct_delegation_relationship(users):
+    """任务响应返回真实 parent/child 字段，供 UI 精确呈现直接委派关系。"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login = await client.post("/api/z-torque/auth/login", json={"username": "owner", "password": "pass"})
+        headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+        root_response = await client.post(
+            "/api/z-torque/tasks",
+            headers=headers,
+            json={**users, "idempotency_key": "delegation-root", "request_summary": "root task"},
+        )
+        assert root_response.status_code == 200
+        root = root_response.json()["data"]
+        assert root["agent_id"] == users["agent_id"]
+        assert root["parent_task_id"] is None
+        assert root["child_sequence"] is None
+
+        child_response = await client.post(
+            "/api/z-torque/tasks",
+            headers=headers,
+            json={
+                **users,
+                "idempotency_key": "delegation-child",
+                "request_summary": "child task",
+                "parent_task_id": root["id"],
+                "delegation_id": str(uuid4()),
+                "child_sequence": 1,
+            },
+        )
+        assert child_response.status_code == 200
+        child = child_response.json()["data"]
+        assert child["parent_task_id"] == root["id"]
+        assert child["root_task_id"] == root["id"]
+        assert child["child_sequence"] == 1
+        assert child["delegation_depth"] == 1
+
+        child_detail = await client.get(f"/api/z-torque/tasks/{child['id']}", headers=headers)
+        assert child_detail.status_code == 200
+        assert child_detail.json()["data"]["parent_task_id"] == root["id"]

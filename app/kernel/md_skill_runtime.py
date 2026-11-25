@@ -58,19 +58,19 @@ class MdSkillRuntime:
                 raise ApiError("AI_CAPABILITY_UNAVAILABLE", "Windows process execution is disabled", 503)
             if not manifest.windows_trusted:
                 raise ApiError(SKILL_WINDOWS_UNTRUSTED, "skill did not declare windows_trusted", 403)
-        if self._sandbox is None:
-            # 能力缺失必须显式暴露：未装 sandbox_driver 插件时不允许执行脚本
-            raise ApiError("AI_CAPABILITY_UNAVAILABLE", "no sandbox.driver implementation is resolved", 503)
         if len(manifest.script_files) != 1:
             raise ApiError("AI_SKILL_INVALID_MANIFEST", "exactly one script is required", 422)
         script = (self.root / manifest.relative_path / manifest.script_files[0]).resolve()
         skill_root = (self.root / manifest.relative_path).resolve()
-        if skill_root not in script.parents or script.suffix != ".py" or not script.is_file():
-            raise ApiError("AI_SKILL_PATH_INVALID", "script path is invalid", 422)
-        # 路径白名单强制收口：所有平台统一校验，Windows 上任一越界直接拒绝（不静默降级）
+        # 先校验授权根目录，避免无沙箱驱动时把越权路径错误地报告为普通能力缺失。
         in_allowlist = any(root == skill_root or root in skill_root.parents for root in self.allowed_roots)
         if not in_allowlist:
             raise ApiError("AI_SANDBOX_DENIED", "skill root is outside allowed sandbox roots", 403)
+        if skill_root not in script.parents or script.suffix != ".py" or not script.is_file():
+            raise ApiError("AI_SKILL_PATH_INVALID", "script path is invalid", 422)
+        if self._sandbox is None:
+            # 能力缺失必须显式暴露：未装 sandbox_driver 插件时不允许执行脚本
+            raise ApiError("AI_CAPABILITY_UNAVAILABLE", "no sandbox.driver implementation is resolved", 503)
         # 唯一执行入口：显式 scope 贯穿，驱动侧再做一次边界与隔离形态复校验
         effective_scope = scope or self._sandbox.declared_scope()
         result = await self._sandbox.execute(

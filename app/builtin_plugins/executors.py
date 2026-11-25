@@ -15,6 +15,7 @@ import json
 import os
 import re
 import socket
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -104,24 +105,57 @@ class HttpExecutor:
             # 无法把连接固定到已校验地址时 fail-closed，避免退化为可被 rebinding 绕过的校验
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_TARGET_BLOCKED", error_message="HTTP client cannot pin the validated address")
         try:
+            max_response_bytes = max(1, min(int(config.get("max_response_bytes", 1_000_000)), 10_000_000))
+            request_kwargs: dict[str, Any] = {"headers": headers}
+            if method == "POST":
+                # 导入工具约定：requestBody 整体作为 __body__ 参数；其余参数拼 query
+                request_kwargs["json"] = arguments.get("__body__")
+                query_args = {key: value for key, value in arguments.items() if key != "__body__"}
+                request_kwargs["params"] = {**query_params, **query_args}
+            else:
+                request_kwargs["params"] = {**query_params, **arguments}
+
+            # 使用流式响应；旧实现 response.text 会先完整缓冲响应，再切片，
+            # max_response_bytes 只是截断展示，并不能限制内存占用。
             with client:
-                if method == "POST":
-                    # 导入工具约定：requestBody 整体作为 __body__ 参数；其余参数拼 query
-                    body = arguments.get("__body__")
-                    query_args = {key: value for key, value in arguments.items() if key != "__body__"}
-                    response = client.post(url, json=body, params={**query_params, **query_args}, headers=headers)
-                else:
-                    params: dict[str, Any] = {**query_params, **arguments}
-                    response = client.get(url, params=params, headers=headers)
-            body = response.text[: int(config.get("max_response_bytes", 1_000_000))]
-            # body 为响应原文（截断）；能解析为 JSON 时附加 json 字段，
-            # 组合工具步骤间即可引用内层字段（$steps.<key>.output.json.<path>）
-            data: dict[str, Any] = {"status_code": response.status_code, "body": body}
+                with client.stream(method, url, **request_kwargs) as response:
+                    response_status = response.status_code
+                    response_success = response.is_success
+                    content_length = response.headers.get("content-length", "")
+                    if content_length.isdigit() and int(content_length) > max_response_bytes:
+                        return ExecutionResult(
+                            status="FAILED",
+                            error_code="AI_HTTP_REQUEST_FAILED",
+                            error_message="HTTP response exceeded configured size limit",
+                        )
+                    body_bytes = bytearray()
+                    exceeded = False
+                    for chunk in response.iter_bytes():
+                        remaining = max_response_bytes - len(body_bytes)
+                        if len(chunk) > remaining:
+                            body_bytes.extend(chunk[:remaining])
+                            exceeded = True
+                            break
+                        body_bytes.extend(chunk)
+                    if exceeded:
+                        return ExecutionResult(
+                            status="FAILED",
+                            error_code="AI_HTTP_REQUEST_FAILED",
+                            error_message="HTTP response exceeded configured size limit",
+                        )
+                    body = bytes(body_bytes).decode(response.encoding or "utf-8", errors="replace")
+
+            # 能解析为 JSON 时附加 json 字段，组合工具步骤间即可引用内层字段。
+            data: dict[str, Any] = {"status_code": response_status, "body": body}
             try:
                 data["json"] = json.loads(body)
             except ValueError:
                 data["json"] = None
-            return ExecutionResult(status="SUCCEEDED" if response.is_success else "FAILED", data=data, error_code=None if response.is_success else "AI_HTTP_ERROR")
+            return ExecutionResult(
+                status="SUCCEEDED" if response_success else "FAILED",
+                data=data,
+                error_code=None if response_success else "AI_HTTP_ERROR",
+            )
         except (httpx.HTTPError, ValueError) as exc:
             return ExecutionResult(status="FAILED", error_code="AI_HTTP_REQUEST_FAILED", error_message=str(exc))
 
@@ -225,22 +259,48 @@ class DbQueryExecutor:
 
     def execute(self, config: dict, arguments: dict, timeout_seconds: float) -> ExecutionResult:
         query = str(config.get("query", "")).strip()
-        dialect = self._dialect()
         try:
+            dialect = self._dialect()
             statements = parse(query, read=dialect)
         except Exception:
             return ExecutionResult(status="FAILED", error_code="AI_REQUEST_INVALID", error_message="query parse failed")
         if len(statements) != 1 or not isinstance(statements[0], exp.Select):
             return ExecutionResult(status="FAILED", error_code="AI_REQUEST_INVALID", error_message="exactly one SELECT statement is required")
+        statement = statements[0]
         allowed_tables = set(config.get("allowed_tables", []))
         allowed_columns = set(config.get("allowed_columns", []))
-        if not self._authorized_references(statements[0], allowed_tables, allowed_columns):
-            return ExecutionResult(status="FAILED", error_code="AI_FORBIDDEN", error_message="query references an unauthorized table or column")
+        if not self._authorized_references(statement, allowed_tables, allowed_columns):
+            return ExecutionResult(status="FAILED", error_code="AI_FORBIDDEN", error_message="query references an unauthorized table, column, or operation")
+
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
         try:
-            with self.engine.connect() as connection:
-                rows = connection.execute(text(query), arguments).mappings().fetchmany(int(config.get("max_rows", 100)))
+            max_rows = max(1, min(int(config.get("max_rows", 100)), 1000))
+            timeout_ms = max(100, min(int(timeout_seconds * 1000), 60000))
+            # 外层 LIMIT 使数据库本身也受行数上限约束，而不只是 Python fetchmany 截断。
+            safe_query = f"SELECT * FROM ({statement.sql(dialect=dialect)}) AS zt_query_result LIMIT {max_rows}"
+            deadline = time.monotonic() + (timeout_ms / 1000)
+            with self.engine.begin() as connection:
+                raw_connection = None
+                if self.engine.dialect.name == "sqlite":
+                    raw_connection = connection.connection.driver_connection
+                    raw_connection.set_progress_handler(
+                        lambda: 1 if time.monotonic() >= deadline else 0,
+                        1000,
+                    )
+                elif self.engine.dialect.name == "postgresql":
+                    connection.exec_driver_sql(f"SET LOCAL statement_timeout = {timeout_ms}")
+                try:
+                    result = connection.execution_options(stream_results=True).execute(
+                        text(safe_query), arguments
+                    )
+                    rows = result.mappings().fetchmany(max_rows)
+                finally:
+                    if raw_connection is not None:
+                        raw_connection.set_progress_handler(None, 0)
             return ExecutionResult(status="SUCCEEDED", data=[dict(row) for row in rows])
         except Exception:
+            if time.monotonic() >= deadline:
+                return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message="database query timed out")
             return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message="database query failed")
 
     def _dialect(self) -> str:
@@ -253,6 +313,14 @@ class DbQueryExecutor:
     def _authorized_references(statement: exp.Select, allowed_tables: set[str], allowed_columns: set[str]) -> bool:
         tables = {table.name for table in statement.find_all(exp.Table)}
         columns = {column.name for column in statement.find_all(exp.Column)}
+        # CTE 内的 DML 仍然可能产生写入；SELECT * 也不能绕过列级白名单。
+        unsafe_nodes = {"Insert", "Update", "Delete", "Create", "Drop", "Alter", "Merge", "TruncateTable", "Command"}
+        if any(node.__class__.__name__ in unsafe_nodes for node in statement.walk()):
+            return False
+        if any(True for _ in statement.find_all(exp.Star)):
+            return False
+        if statement.args.get("into") is not None or statement.args.get("locks"):
+            return False
         return bool(tables) and tables.issubset(allowed_tables) and columns.issubset(allowed_columns)
 
 

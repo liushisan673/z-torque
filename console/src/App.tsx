@@ -10,6 +10,7 @@ import { LoadingScreen } from "./components/Loading";
 
 // 路由级代码分割：首屏只加载登录页，其余页面按需加载（主 chunk 从 ~528KB 显著下降）
 const ChatPage = lazy(() => import("./pages/Chat").then((m) => ({ default: m.ChatPage })));
+const KnowledgePage = lazy(() => import("./pages/Knowledge").then((m) => ({ default: m.KnowledgePage })));
 const AgentsPage = lazy(() => import("./pages/Agents").then((m) => ({ default: m.AgentsPage })));
 const SkillsPage = lazy(() => import("./pages/Skills").then((m) => ({ default: m.SkillsPage })));
 const ModelsPage = lazy(() => import("./pages/Models").then((m) => ({ default: m.ModelsPage })));
@@ -73,15 +74,16 @@ export function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/embed/chat" element={<ChatEmbedPage />} />
           <Route path="/chat" element={<RequireAccess><ChatPage /></RequireAccess>} />
-          <Route path="/agents" element={<RequireAccess><ConsoleShell><AgentsPage /></ConsoleShell></RequireAccess>} />
-          <Route path="/skills" element={<RequireAccess><ConsoleShell><SkillsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/knowledge" element={<RequireAccess navTo="/knowledge"><ConsoleShell><KnowledgePage /></ConsoleShell></RequireAccess>} />
+          <Route path="/agents" element={<RequireAccess navTo="/agents"><ConsoleShell><AgentsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/skills" element={<RequireAccess navTo="/skills"><ConsoleShell><SkillsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/models" element={<RequireAccess navTo="/models"><ConsoleShell><ModelsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/connectors" element={<RequireAccess navTo="/connectors"><ConsoleShell><ConnectorsPage /></ConsoleShell></RequireAccess>} />
           <Route path="/webhooks" element={<RequireAccess navTo="/webhooks"><ConsoleShell><WebhooksPage /></ConsoleShell></RequireAccess>} />
-          <Route path="/audit" element={<RequireAccess><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/audit" element={<RequireAccess navTo="/audit"><ConsoleShell><AuditPage /></ConsoleShell></RequireAccess>} />
           <Route path="/users" element={<RequireAccess navTo="/users"><ConsoleShell><UsersPage /></ConsoleShell></RequireAccess>} />
           <Route path="/onboarding" element={<RequireAccess><OnboardingPage /></RequireAccess>} />
-          <Route path="/settings" element={<RequireAccess><ConsoleShell><SettingsPage /></ConsoleShell></RequireAccess>} />
+          <Route path="/settings" element={<RequireAccess navTo="/settings"><ConsoleShell><SettingsPage /></ConsoleShell></RequireAccess>} />
           <Route path="*" element={<HomeRedirect />} />
         </Routes>
       </Suspense>

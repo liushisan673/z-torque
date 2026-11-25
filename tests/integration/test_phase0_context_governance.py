@@ -32,6 +32,7 @@ from app.models import (
 from app.services.context_builder import build_context
 from app.services.context_governance import sanitize_untrusted, tool_pairs_balanced
 from app.services.execution_loop import AgentExecutionLoop
+from tests.support.db_cleanup import cleanup_session
 
 _CREATED_TENANTS: list = []
 
@@ -40,7 +41,7 @@ _CREATED_TENANTS: list = []
 def _cleanup():
     _CREATED_TENANTS.clear()
     yield
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         if _CREATED_TENANTS:
             for model in (AuditLog, ContextSummary, Message, Conversation, AgentVersion, Agent, User):
                 db.execute(delete(model).where(model.tenant_id.in_(_CREATED_TENANTS)))

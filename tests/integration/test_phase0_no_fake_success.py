@@ -30,13 +30,14 @@ from app.models import (
     User,
 )
 from app.security.passwords import hash_password
+from tests.support.db_cleanup import cleanup_session
 from tests.support.fakes import MockExecutor
 
 
 @pytest.fixture(autouse=True)
 def cleanup():
     yield
-    with SessionLocal.begin() as db:
+    with cleanup_session() as db:
         for model in (Message, TaskEvent, Outbox, AuditLog, Task, AgentVersion, Agent, AuthSession, User, Tenant):
             db.execute(delete(model))
 
