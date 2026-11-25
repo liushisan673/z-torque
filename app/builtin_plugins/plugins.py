@@ -4,8 +4,7 @@
 插件只依赖内核契约与配置，装配顺序与依赖见各 manifest。
 P2 收口（12 Port）：notify.channel / approval.provider / sandbox.driver /
 memory.working / memory.short / memory.long / object.store / interceptor /
-observability.sink / policy.source（vector.store / knowledge.provider 契约已定义，
-社区版无内置实现 → capabilities 显式 UNAVAILABLE）。
+observability.sink / policy.source；knowledge.provider / vector.store 由本地知识插件提供。
 """
 
 import logging

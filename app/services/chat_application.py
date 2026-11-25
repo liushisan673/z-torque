@@ -19,6 +19,7 @@ from app.kernel.task.service import create_task
 from app.models import Agent, AgentVersion, Conversation, File, Message, Task
 from app.models.message import message_file
 from app.security.permissions import admin_owned_clause
+from app.services import knowledge_service
 from app.services.bridge_media import export_file_to_bridge
 from app.services.chat_service import ChatResult
 from app.services.context_builder import (
@@ -188,10 +189,18 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
             if agent is not None and agent.current_published_version_id is not None:
                 agent_version = db.get(AgentVersion, agent.current_published_version_id)
         mappings, tools = build_tool_mappings(db, agent_version, tenant_id, user_id=ctx.user_id)
+        knowledge_chunks = []
         if agent_version is not None:
             # 先让模型在同一轮里决定是普通聊天还是需要执行工具。
             # 仅仅“存在可用工具”不等于用户这条消息需要创建 Task。
             system_prompt = build_agent_system_prompt(db, agent_version)
+            knowledge_chunks = knowledge_service.retrieve_agent_knowledge(
+                db, tenant_id=tenant_id, user_id=ctx.user_id, agent_version=agent_version,
+                query=content, trace_id=trace_id,
+            )
+            knowledge_prompt = knowledge_service.build_knowledge_context(knowledge_chunks)
+            if knowledge_prompt:
+                system_prompt = (system_prompt or "") + "\n\n" + knowledge_prompt
             settings = get_settings()
             temperature, max_tokens = snapshot_model_params(
                 agent_version.config_snapshot,
@@ -261,6 +270,8 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
                 return ChatResult(user_message=user_message, assistant_message=None, task_id=chat_task.id, mocked=False)
 
             reply = (response.content or "").strip()
+            if knowledge_chunks:
+                reply = knowledge_service.ensure_answer_citations(reply, knowledge_chunks)
             if not reply:
                 user_message.status = "FAILED"
                 raise ApiError("AI_MODEL_RESPONSE_INVALID", "model returned an empty response", 502)

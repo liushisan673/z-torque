@@ -23,6 +23,8 @@ dependencies = [
   "uuid6==2025.0.1",
   "pypdf==6.21.1",
   "openpyxl==3.1.5",
+  # CPU-only local ONNX Embedding runtime; model weights are bundled by scripts/download_embedding_model.py.
+  "fastembed==0.7.4",
 ]
 
 [build-system]

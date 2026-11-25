@@ -46,6 +46,7 @@ from app.models import (
 )
 from app.repositories import visible_owner_clause
 from app.security.permissions import list_user_permissions
+from app.services import knowledge_service
 from app.services.context_builder import (
     assistant_reasoning_parts,
     build_agent_system_prompt,
@@ -368,6 +369,14 @@ class TaskRuntime:
             mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id, user_id=task.owner_user_id)
             # 与 chat 页面流式链路一致：系统提示 + 绑定 skill 执行指令
             system_prompt = build_agent_system_prompt(db, agent_version, [m.skill_version_id for m in mappings.values() if m.skill_version_id])
+            knowledge_chunks = knowledge_service.retrieve_agent_knowledge(
+                db, tenant_id=task.tenant_id, user_id=task.owner_user_id, agent_version=agent_version,
+                query=((trigger.content or task.request_summary or "") if trigger is not None else (task.request_summary or "")),
+                trace_id=str(task.id),
+            ) if task.owner_user_id is not None else []
+            knowledge_prompt = knowledge_service.build_knowledge_context(knowledge_chunks)
+            if knowledge_prompt:
+                system_prompt = (system_prompt or "") + "\n\n" + knowledge_prompt
             selection = self._resolve_selection(db, task.tenant_id, agent_version)
             capabilities = model_capabilities(db, tenant_id=task.tenant_id, model_identifier=selection.model)
             messages = build_context(
@@ -429,6 +438,8 @@ class TaskRuntime:
             return self._fail_model_task(db, task, "AI_TOOL_MAPPING_INVALID", "tool execution requires an agent tool mapping")
         if not response.content:
             return self._fail_model_task(db, task, "AI_MODEL_RESPONSE_INVALID", "model returned an empty response")
+        if knowledge_chunks:
+            response = replace(response, content=knowledge_service.ensure_answer_citations(response.content or "", knowledge_chunks))
         await self._finish_chat_task(db, task, conversation, trigger, response, model=selection.model)
         self._cancellation_events.pop(task_id, None)
         return {"task_id": str(task_id), "status": "SUCCEEDED"}

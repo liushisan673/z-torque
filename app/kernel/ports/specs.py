@@ -5,8 +5,7 @@ PortRegistry 按本表做启动校验与能力查询（/api/z-torque/capabilitie
 
 pending 语义（阶段01 §3.11：必须区分"尚未进入实现阶段"与"已实现但当前配置不可用"）：
 - pending=False：已有满足契约的社区版实现并接入注册表（P2 收口后 21/21；
-  vector.store / knowledge.provider 为"契约已定义、社区版无内置实现"，
-  可选 Port 缺失 → capabilities 显式 UNAVAILABLE）。
+  knowledge.provider / vector.store 均由本地知识插件提供。
 - pending=True：业务能力可能已存在于代码中，但尚未按 Port 契约收口；
   启动校验对其豁免 fail-fast，只标记 NOT_PORTED 并告警。
 后续阶段每迁移一个 Port，把 pending 置 False，此后缺失即拒绝启动。
@@ -53,8 +52,8 @@ PORT_SPECS: tuple[PortSpec, ...] = (
     PortSpec("memory.working", GROUP_INFORMATION, True, "请求级上下文组装", "进程内会话工作记忆（LRU）", pending=False),
     PortSpec("memory.short", GROUP_INFORMATION, True, "会话级短记忆", "内置短记忆（DB）", pending=False),
     PortSpec("memory.long", GROUP_INFORMATION, False, "长期记忆", "内置 SQLite 持久化（单机固定租户）", pending=False),
-    PortSpec("vector.store", GROUP_INFORMATION, False, "向量检索", "UNAVAILABLE 或轻量实现", pending=False),
-    PortSpec("knowledge.provider", GROUP_INFORMATION, False, "知识库", "UNAVAILABLE", pending=False),
+    PortSpec("vector.store", GROUP_INFORMATION, False, "向量检索", "本地持久化精确余弦检索", pending=False),
+    PortSpec("knowledge.provider", GROUP_INFORMATION, False, "知识库", "SQLite FTS5 全文检索", pending=False),
     PortSpec("object.store", GROUP_INFORMATION, True, "文件对象存储", "本地文件系统", pending=False),
     # Cross-cutting（3）
     PortSpec("interceptor", GROUP_CROSS_CUTTING, True, "审计/配额拦截链", "内置审计/配额拦截链", pending=False),

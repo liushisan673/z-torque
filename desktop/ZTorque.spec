@@ -16,6 +16,12 @@ datas = [
     ),
 ]
 datas += collect_data_files("app")
+datas += collect_data_files("fastembed")
+
+embedding_assets = ROOT / "models" / "embedding-cache"
+if not embedding_assets.is_dir() or not any(embedding_assets.rglob("*.onnx")):
+    raise RuntimeError("Bundled Chinese Embedding model is missing. Run scripts/download_embedding_model.py before packaging.")
+datas.append((str(embedding_assets), "models/embedding-cache"))
 
 packages = (
     "app",
@@ -33,6 +39,8 @@ packages = (
     "yaml",
     "httpx",
     "multipart",
+    "fastembed",
+    "onnxruntime",
 )
 hiddenimports = []
 for package in packages:

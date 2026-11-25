@@ -285,6 +285,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
           python -m pip install pyinstaller==6.11.1
+      - name: Prepare offline Chinese Embedding model
+        run: python scripts/download_embedding_model.py
       - name: Build onedir EXE
         run: python -m PyInstaller --noconfirm --clean desktop/ZTorque.spec
       - name: Smoke test packaged EXE

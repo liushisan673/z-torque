@@ -125,6 +125,14 @@ class Settings(BaseSettings):
     knowledge_max_chunks_per_file: int = 4000
     knowledge_max_total_bytes: int = 50 * 1024 * 1024
     knowledge_top_k: int = 5
+    # 默认使用随 Windows 安装包分发的本地中文 ONNX 模型；外部 Provider 仍可通过环境变量覆盖。
+    embedding_enabled: bool = True
+    embedding_provider: str = "local"
+    embedding_base_url: str = ""
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    embedding_api_key: SecretStr | None = None
+    embedding_timeout_seconds: float = 20.0
+    embedding_batch_size: int = 32
     # 消息级全文检索已全量开启（与文档 chunk 检索并列）；scope 仍由服务端派生
     knowledge_message_search_enabled: bool = True
     log_level: str = 'INFO'

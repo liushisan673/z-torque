@@ -23,6 +23,7 @@ const MAX_AGENT_TOOLS = 30;
 const SELECTED_KEY = "zt.agents.selectedId";
 
 type Filter = "all" | "mine" | "official" | "draft";
+type KnowledgeBaseOption = { id: string; name: string; description?: string | null; status: string };
 
 // 详情区锚点配置：无页签，详情一次纵向展示全部，顶部锚点仅做快捷跳转
 const DETAIL_ANCHORS = [
@@ -91,6 +92,8 @@ export function AgentsPage() {
   const [loadingSkills, setLoadingSkills] = useState(false);
   const [latestTask, setLatestTask] = useState<Task | null>(null);
   const [models, setModels] = useState<ModelResource[]>([]);
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBaseOption[]>([]);
+  const [selectedKnowledgeBaseIds, setSelectedKnowledgeBaseIds] = useState<string[]>([]);
   // 发布预检：缺项时先展示检查结果，允许「仍要发布」强制跳过
   const [publishCheck, setPublishCheck] = useState<{ agentId: string; version: AgentVersion; missing: string[] } | null>(null);
 
@@ -171,6 +174,12 @@ export function AgentsPage() {
         // 模型加载失败不阻塞主流程
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    void request<KnowledgeBaseOption[]>("/api/z-torque/knowledge/bases")
+      .then(setKnowledgeBases)
+      .catch(() => setKnowledgeBases([]));
   }, []);
 
   const selected = useMemo(() => agents.find((a) => a.id === selectedId) ?? null, [agents, selectedId]);
@@ -547,6 +556,7 @@ export function AgentsPage() {
     const cfg = version.config_snapshot ?? {};
     setSystemPrompt(typeof cfg.system_prompt === "string" ? cfg.system_prompt : "");
     setModelId(typeof cfg.model === "string" ? cfg.model : "");
+    setSelectedKnowledgeBaseIds(Array.isArray(cfg.knowledge_base_ids) ? cfg.knowledge_base_ids.map(String) : []);
     setBindSkillOpen(false);
     setSkillPicks([]);
     setSkillQuery("");
@@ -569,13 +579,16 @@ export function AgentsPage() {
     if (modelId.trim()) snapshot.model = modelId.trim();
     else delete snapshot.model;
     try {
+      delete snapshot.knowledge_base_ids;
       const v = await request<AgentVersion>(`/api/z-torque/agents/${editing.agentId}/versions/${editing.version.id}`, {
         method: "PATCH",
-        body: {
-          config_snapshot: snapshot,
-        },
+        body: { config_snapshot: snapshot },
       });
-      setEditing({ agentId: editing.agentId, version: v });
+      const bound = await request<AgentVersion>(`/api/z-torque/agents/${editing.agentId}/versions/${editing.version.id}/knowledge-bases`, {
+        method: "PUT",
+        body: { knowledge_base_ids: selectedKnowledgeBaseIds },
+      });
+      setEditing({ agentId: editing.agentId, version: bound ?? v });
       if (selected) await openDetail(selected);
       setError(null);
       toast("success", "配置已保存");
@@ -1029,6 +1042,40 @@ export function AgentsPage() {
                           />
                         </div>
                       </div>
+                    </div>
+
+                    <div className="agent-section">
+                      <h3>
+                        知识库绑定
+                        <span className="hint">Agent 只检索此版本绑定且当前用户有权访问的知识库</span>
+                      </h3>
+                      {knowledgeBases.length === 0 ? (
+                        <div className="agent-readonly-banner">暂无可绑定的知识库，请先到「知识库」页面创建并上传文档。</div>
+                      ) : (
+                        <div className="agent-form-grid">
+                          {knowledgeBases.map((base) => {
+                            const checked = selectedKnowledgeBaseIds.includes(base.id);
+                            return (
+                              <label key={base.id} className="agent-field" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  disabled={!editing || busy}
+                                  onChange={(event) => setSelectedKnowledgeBaseIds((prev) =>
+                                    event.target.checked ? [...prev, base.id] : prev.filter((id) => id !== base.id)
+                                  )}
+                                />
+                                <span>{base.name}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {!editing && (viewVersion?.config_snapshot?.knowledge_base_ids as string[] | undefined)?.length ? (
+                        <div className="agent-readonly-banner">
+                          已绑定 {(viewVersion?.config_snapshot?.knowledge_base_ids as string[]).length} 个知识库
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="agent-section">
