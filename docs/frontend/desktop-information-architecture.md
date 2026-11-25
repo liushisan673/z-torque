@@ -98,8 +98,10 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 
 ## Agent and Skill onboarding clarity pass (2026-11-25)
 
-- The Agent creation dialog now explains the minimum first-publish path: name, model and system rules; skill binding is optional, while delegation and runtime strategy can be configured in a later draft version.
-- Agent delegation configuration explicitly distinguishes the parent AgentVersion's child-agent allowlist from user authorization. The allowlist narrows which child versions this parent version may delegate to; every execution still checks the initiating user's identity, resource scope and operation permissions. Being allowlisted does not grant a child Agent additional user permissions.
+- The Agent creation dialog explains the minimum first-publish path: name, model and system rules; skill binding is optional.
+- Agent creation and version editing no longer expose parent/child Agent relationships or child-version allowlists. All Agents use the same dynamic A2A discovery and delegation entry.
+- Discovery visibility is not invocation authorization: the execution path revalidates the target's current published version and the original user's `a2a.invoke` permission. The target Agent's own Skill/Tool execution also remains constrained by the original user's resource and operation permissions.
+- Delegation creates a separate Child Task linked to its parent at runtime; this execution tree is task history, not a static relationship configured on AgentVersion.
 - The Skill creation dialog distinguishes Standard Skill authoring from MD-Skill file import and explains that script mode is an implementation characteristic of a version. Users are reminded to review version content and tool bindings before publishing.
 - These are explanatory UI changes only: no API payloads, publication rules, version snapshots, delegation enforcement or authorization behavior were changed.
 
@@ -136,3 +138,11 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 - Audit task inspection now shows Agent ID and the direct parent/child sequence fields returned by the task API. Existing owner-scoped task access remains unchanged.
 - Added an integration test for root/child Task API response fields and direct-parent relationship. This test has been committed but must still pass CI before the change is considered verified.
 - No task delegation policy, execution behavior, user SecurityContext, event schema, trace semantics or audit visibility rules were changed.
+
+
+## A2A Child Task interaction (2026-11-25)
+
+- A parent Task that delegates now enters `WAITING_CHILD`, releases its worker execution slot and shows “等待子智能体” in the workbench.
+- Direct Child Tasks are listed separately under the parent Task. Selecting a child opens its own task detail and event timeline.
+- If a child requires human confirmation, select that child task to open its approval controls; approval resumes the child from its checkpoint. The parent remains waiting until the child reaches a terminal state, then resumes from its own checkpoint.
+- Parent cancellation cascades to non-terminal descendants. Task history keeps the parent/child Task IDs and sequence; it does not imply a preconfigured Agent parent/child relationship.
