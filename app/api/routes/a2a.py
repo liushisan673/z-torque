@@ -1,4 +1,4 @@
-"""历史 a2a.invoke 兼容 API；尚非官方 A2A v1.0 JSON-RPC endpoint。
+"""A2A v1.0 JSON-RPC endpoint plus the historical a2a.invoke compatibility API.
 
 - `POST /a2a/invoke`：入站 A2A 调用。**不**走 `get_current_user`：入站凭据由
   `identity.py` 用本域 JWT 自行认证并校验 `a2a.invoke`（v1 仅方案 A），
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import re
-
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -197,7 +196,7 @@ async def standard_agent_card(request: Request):
         "defaultInputModes": ["text/plain", "application/json"],
         "defaultOutputModes": ["text/plain", "application/json"],
         "skills": skills,
-        "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}},
+        "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "opaque"}},
         "security": [{"bearerAuth": []}],
     }
 
