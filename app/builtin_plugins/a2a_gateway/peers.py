@@ -192,6 +192,68 @@ class PeerRegistry:
             extra_headers=extra_headers, identity_headers=identity_headers, depth=depth,
         )
 
+    async def fetch_agent_card(self, peer: PeerConfig) -> dict[str, Any]:
+        """通过受控 HTTPS 获取远端标准 well-known Agent Card。"""
+        import json
+        import httpx
+
+        from app.builtin_plugins.a2a_gateway.jsonrpc import validate_agent_card
+
+        self._sdk.require_permission("network.outbound")
+        started = time.monotonic()
+        try:
+            self.check_breaker(peer.peer_id)
+            url = urljoin(peer.base_url.rstrip("/") + "/", ".well-known/agent-card.json")
+            headers = {"Accept": "application/json", **self._auth_headers(peer)}
+            timeout = peer.timeout_seconds or self._config.default_timeout_seconds
+            mtls_options, mtls_files = await asyncio.to_thread(self._mtls_client_options, peer)
+            try:
+                if self._client is not None:
+                    response = await self._client.get(url, headers=headers, timeout=timeout)
+                    if getattr(response, "history", ()):
+                        raise ApiError("AI_A2A_PEER_UNAVAILABLE", "Agent Card endpoint redirected the request", 503)
+                    raw = response.content
+                    status_code = response.status_code
+                else:
+                    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout, **mtls_options) as client:
+                        async with client.stream("GET", url, headers=headers) as response:
+                            status_code = response.status_code
+                            chunks: list[bytes] = []
+                            size = 0
+                            async for chunk in response.aiter_bytes():
+                                size += len(chunk)
+                                if size > self._config.max_response_bytes:
+                                    raise ApiError("AI_A2A_PEER_UNAVAILABLE", "Agent Card exceeds max_response_bytes", 503)
+                                chunks.append(chunk)
+                            raw = b"".join(chunks)
+            finally:
+                _remove_temp_files(mtls_files)
+            if len(raw) > self._config.max_response_bytes:
+                raise ApiError("AI_A2A_PEER_UNAVAILABLE", "Agent Card exceeds max_response_bytes", 503)
+            if status_code >= 500:
+                raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} returned {status_code}", 503)
+            if status_code >= 400:
+                raise ApiError("AI_A2A_DENIED", f"peer {peer.peer_id!r} rejected Agent Card request ({status_code})", 403)
+            try:
+                card = validate_agent_card(json.loads(raw or b"{}"))
+            except (ValueError, TypeError) as exc:
+                raise ApiError("AI_A2A_PEER_UNAVAILABLE", "peer returned an invalid Agent Card JSON document", 503) from exc
+            self.record_breaker(peer.peer_id, succeeded=True)
+            _emit_outbound(peer.peer_id, result=RESULT_OK, duration_ms=_elapsed_ms(started), response_bytes=len(raw), depth=None)
+            return card
+        except httpx.TimeoutException as exc:
+            self.record_breaker(peer.peer_id, succeeded=False)
+            _emit_outbound(peer.peer_id, result=RESULT_TIMEOUT, duration_ms=_elapsed_ms(started), response_bytes=0, depth=None)
+            raise ApiError("AI_A2A_TIMEOUT", f"peer {peer.peer_id!r} Agent Card request timed out", 504) from exc
+        except ApiError as exc:
+            self.record_breaker(peer.peer_id, succeeded=False)
+            _emit_outbound(peer.peer_id, result=RESULT_ERROR, duration_ms=_elapsed_ms(started), response_bytes=0, depth=None)
+            raise
+        except Exception as exc:  # noqa: BLE001 - 连接级失败不泄漏底层网络细节
+            self.record_breaker(peer.peer_id, succeeded=False)
+            _emit_outbound(peer.peer_id, result=RESULT_ERROR, duration_ms=_elapsed_ms(started), response_bytes=0, depth=None)
+            raise ApiError("AI_A2A_PEER_UNAVAILABLE", f"peer {peer.peer_id!r} Agent Card is unavailable", 503) from exc
+
     async def invoke_jsonrpc(
         self,
         peer: PeerConfig,
