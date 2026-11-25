@@ -14,24 +14,27 @@ from __future__ import annotations
 import json
 import re
 
-from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy.orm import Session
-
-from app.api.deps import get_current_user
 from datetime import datetime, timezone
 from uuid import UUID
 
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from app.builtin_plugins.a2a_gateway.jsonrpc import A2A_PROTOCOL_VERSION, jsonrpc_error, jsonrpc_result, parse_jsonrpc_request
-from app.kernel.task.service import assert_agent_version_visible, create_task, transition_task
-from app.kernel.task.states import TERMINAL_STATES, TaskStatus
-from app.kernel.task.runtime import write_task_cancel_notice
-from app.models import Agent, Task
+from app.api.deps import get_current_user
+from app.builtin_plugins.a2a_gateway.jsonrpc import (
+    A2A_PROTOCOL_VERSION,
+    jsonrpc_error,
+    jsonrpc_result,
+    parse_jsonrpc_request,
+)
 from app.core.errors import ApiError
 from app.core.responses import success_response, trace_id_from
 from app.db.session import get_db
-from app.models import User
+from app.kernel.task.runtime import write_task_cancel_notice
+from app.kernel.task.service import assert_agent_version_visible, create_task, transition_task
+from app.kernel.task.states import TERMINAL_STATES, TaskStatus
+from app.models import Agent, Task, User
 from app.security.permissions import list_user_permissions
 
 SERVICE_A2A_GATEWAY = "a2a_gateway"

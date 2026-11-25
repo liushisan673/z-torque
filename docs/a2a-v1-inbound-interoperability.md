@@ -2,8 +2,8 @@
 
 The community edition exposes the standard A2A Agent Card at
 `GET /.well-known/agent-card.json` and a JSON-RPC 2.0 endpoint at
-`POST /api/z-torque/a2a/jsonrpc`. The card is authenticated with a local
-Bearer JWT and only lists published Agents visible to that caller.
+`POST /api/z-torque/a2a/jsonrpc`. The card requires a trusted Bearer credential and only lists published Agents
+within the caller's configured workspace; federated credentials are read-only.
 
 Implemented JSON-RPC methods:
 - `SendMessage`: creates an ordinary Z-Torque Task and returns an A2A Task.
