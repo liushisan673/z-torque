@@ -119,3 +119,17 @@ def validate_agent_card(payload: Any) -> dict[str, Any]:
     if not isinstance(payload.get("name"), str) or not payload["name"].strip():
         raise ApiError("AI_A2A_PEER_UNAVAILABLE", "peer Agent Card is missing name", 503)
     return {**payload, "supportedInterfaces": candidates}
+
+
+def validate_send_message_result(payload: dict[str, Any]) -> dict[str, Any]:
+    """A2A SendMessageResponse must contain exactly one Task or Message."""
+    has_task = "task" in payload
+    has_message = "message" in payload
+    if has_task == has_message:
+        raise ApiError("AI_A2A_PEER_UNAVAILABLE", "A2A SendMessage result must contain exactly one task or message", 503)
+    value = payload["task"] if has_task else payload["message"]
+    if not isinstance(value, dict):
+        raise ApiError("AI_A2A_PEER_UNAVAILABLE", "A2A SendMessage task/message must be an object", 503)
+    if has_task and not isinstance(value.get("id"), str):
+        raise ApiError("AI_A2A_PEER_UNAVAILABLE", "A2A Task result is missing its id", 503)
+    return payload
