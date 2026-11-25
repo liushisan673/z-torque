@@ -502,6 +502,9 @@ class SkillGateway:
         stale = [k for k, (_, used) in self._mcp_sessions.items() if now - used > self.MCP_SESSION_IDLE_SECONDS]
         for stale_key in stale:
             await self._evict_mcp_session(stale_key)
+        for lock_key, lock in list(self._mcp_session_locks.items()):
+            if lock_key not in self._mcp_sessions and not lock.locked():
+                self._mcp_session_locks.pop(lock_key, None)
         hit = self._mcp_sessions.get(key)
         if hit is not None:
             self._mcp_sessions[key] = (hit[0], now)
