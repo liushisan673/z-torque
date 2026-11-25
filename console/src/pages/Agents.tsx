@@ -1145,6 +1145,9 @@ export function AgentsPage() {
                         </div>
                         <div className="agent-field full">
                           <label>允许的子智能体</label>
+                          <p className="hint" style={{ margin: "0 0 8px", lineHeight: 1.6 }}>
+                            这里配置的是当前 Agent 版本可委派的子 Agent 范围，不是用户授权。每次执行仍会按发起用户的身份、资源范围和操作权限校验；子 Agent 不会因为被加入白名单而获得额外权限。
+                          </p>
                           {editing ? (
                             <>
                               <div className="agent-skill-actions" style={{ marginBottom: 8 }}>
@@ -1363,6 +1366,9 @@ export function AgentsPage() {
           </>
         }
       >
+        <div className="agent-alert agent-alert-info">
+          <span>创建后会立即发布首个版本。先填写名称、模型和系统规则即可开始；技能绑定为可选项，委派与运行策略可在后续草稿版本中配置。</span>
+        </div>
         <div className="form-field">
           <label>名称</label>
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：客服助手" />
