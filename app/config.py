@@ -1,6 +1,7 @@
 import json
 import os
 import secrets
+import shutil
 from functools import lru_cache
 from pathlib import Path
 
@@ -482,6 +483,23 @@ def _ensure_frozen_runtime_secrets() -> None:
             pass
 
 
+def _seed_bundled_skills(target_dir: Path) -> None:
+    """Copy shipped example skills into mutable user storage without overwriting user edits."""
+    if not is_frozen():
+        return
+    source_dir = resource_dir() / "md-skills"
+    if not source_dir.is_dir():
+        return
+    for source in source_dir.rglob("*"):
+        if not source.is_file():
+            continue
+        target = target_dir / source.relative_to(source_dir)
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
 @lru_cache
 def get_settings() -> Settings:
     _ensure_frozen_runtime_secrets()
@@ -491,6 +509,7 @@ def get_settings() -> Settings:
     settings.secret_store_dir.mkdir(parents=True, exist_ok=True)
     settings.file_storage_dir.mkdir(parents=True, exist_ok=True)
     settings.md_skills_dir.mkdir(parents=True, exist_ok=True)
+    _seed_bundled_skills(settings.md_skills_dir)
     # 出站代理：httpx 默认 trust_env，读 os.environ；在 Settings 装配时同步写入进程环境，
     # 保证 MCP/REST 连接器等后续创建的客户端统一走代理（无需逐处传 proxy 参数）
     if settings.proxy_url.strip():
