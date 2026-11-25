@@ -6,8 +6,10 @@ app/kernel/mcp_connectors.py（Stdio 三件套）整体迁移，逻辑保持不�
 """
 
 import asyncio
+import ipaddress
 import json
 import os
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,7 +29,7 @@ class StreamableHttpMcpConnector:
 
     def __init__(self, endpoint: str, *, allowed_hosts: list[str], timeout_seconds: float = 30, max_response_bytes: int = 1_000_000, transport: httpx.AsyncBaseTransport | None = None, auth_token: str | None = None, extra_headers: dict[str, str] | None = None, allow_private_network: bool = False, proxy: str | None = None) -> None:
         self.endpoint = endpoint
-        self.allowed_hosts = set(allowed_hosts)
+        self.allowed_hosts = {str(host).strip().lower() for host in allowed_hosts if str(host).strip()}
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
         self.auth_token = auth_token
@@ -88,17 +90,27 @@ class StreamableHttpMcpConnector:
 
     async def _send(self, payload: dict[str, Any], *, expect_response: bool, include_session: bool = True) -> dict[str, Any]:
         parsed = urlparse(self.endpoint)
-        # 回环地址允许 http（本地联调）；其余目标强制 https 且必须在 allowed_hosts 白名单内；
-        # 连接器 target_policy.allow_private_network 时放行白名单内目标的 http 明文形式（对齐 REST 语义）
-        if parsed.hostname in _LOOPBACK_HOSTS:
-            if parsed.scheme not in ("https", "http"):
-                raise McpTransportError("MCP endpoint is not allowed")
-        elif parsed.hostname not in self.allowed_hosts:
-            raise McpTransportError(f"MCP endpoint host '{parsed.hostname}' is not in the allowed hosts whitelist (MCP_ALLOWED_HOSTS)")
-        elif parsed.scheme not in ("https", "http"):
+        host = (parsed.hostname or "").lower()
+        # 回环地址允许 http（本地联调）；其他目标必须命中白名单且默认 HTTPS。
+        if not host or parsed.username or parsed.password:
             raise McpTransportError("MCP endpoint is not allowed")
-        elif parsed.scheme == "http" and not self.allow_private_network:
+        if host not in _LOOPBACK_HOSTS and host not in self.allowed_hosts:
+            raise McpTransportError(f"MCP endpoint host '{host}' is not in the allowed hosts whitelist (MCP_ALLOWED_HOSTS)")
+        if parsed.scheme not in ("https", "http"):
+            raise McpTransportError("MCP endpoint is not allowed")
+        if parsed.scheme == "http" and host not in _LOOPBACK_HOSTS and not self.allow_private_network:
             raise McpTransportError("MCP endpoint must use https unless the connector enables 'allow_private_network' (允许访问)")
+        if host not in _LOOPBACK_HOSTS and not self.allow_private_network:
+            # 对白名单域名也做 DNS 预检，拒绝解析到私网/回环/链路本地的目标。
+            # HTTP 客户端仍自行解析，因此这属于额外 SSRF 防线，不宣称消除 DNS rebinding TOCTOU。
+            try:
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                records = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+                addresses = {record[4][0] for record in records}
+                if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
+                    raise McpTransportError("MCP endpoint resolves to a non-public network address")
+            except (OSError, ValueError) as exc:
+                raise McpTransportError("MCP endpoint DNS validation failed") from exc
         headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json", "MCP-Protocol-Version": self.protocol_version}
         if self.auth_token:
             headers["Authorization"] = f"Bearer {self.auth_token}"
