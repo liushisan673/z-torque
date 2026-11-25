@@ -260,10 +260,10 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
             score_terms: list[str] = []
             for index, term in enumerate(terms):
                 key = f"term_{index}"
-                escaped = term.replace("\\\\", "\\\\\\\\").replace("%", "\\\\%").replace("_", "\\\\_")
+                escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 params[key] = f"%{escaped}%"
-                like_clauses.append(f"zr_knowledge_fts.text LIKE :{key} ESCAPE '\\\\'")
-                score_terms.append(f"(CASE WHEN zr_knowledge_fts.text LIKE :{key} ESCAPE '\\\\' THEN 1 ELSE 0 END)")
+                like_clauses.append(f"zr_knowledge_fts.text LIKE :{key} ESCAPE '\\'")
+                score_terms.append(f"(CASE WHEN zr_knowledge_fts.text LIKE :{key} ESCAPE '\\' THEN 1 ELSE 0 END)")
             score = " + ".join(score_terms)
             rows = db.execute(
                 text(
