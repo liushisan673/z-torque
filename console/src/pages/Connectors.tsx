@@ -1310,7 +1310,16 @@ export function ConnectorsPage() {
                   <div
                     key={c.id}
                     className={`connector-card${c.id === selectedId ? " active" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={c.id === selectedId}
                     onClick={() => void openDetail(c)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        void openDetail(c);
+                      }
+                    }}
                   >
                     <div className="row1">
                       <span className="name">{c.name}</span>
