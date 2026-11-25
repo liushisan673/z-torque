@@ -5,6 +5,7 @@ import { AuthProvider } from "./stores/auth";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import App from "./App";
 import "./index.css";
+import "./workspace-refresh.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
