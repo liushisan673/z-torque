@@ -79,3 +79,23 @@ The remote interoperability target is the official A2A v1.0 JSON-RPC 2.0 binding
 - Keep the current custom `a2a.invoke` envelope only as a legacy compatibility adapter during migration. It must not be described as A2A v1.0 JSON-RPC interoperability and should be removed after supported peers have migrated.
 
 The local in-process adapter and remote JSON-RPC adapter must expose the same internal delegation contract: target identity, original caller context, child-task lifecycle, deadline, cancellation, structured result, and audit correlation.
+
+
+## Remote A2A v1.0 JSON-RPC adapter progress
+
+The peer transport now has a separate standard-protocol path; it no longer needs to reuse the legacy `/api/z-torque/a2a/invoke` URL for a standards-based peer call.
+
+Implemented:
+- Parse and validate JSON-RPC 2.0 request envelopes and the A2A v1.0 method-name set.
+- Validate JSON-RPC response IDs and enforce exactly one of `result` or `error`.
+- Fetch a remote Agent Card from `/.well-known/agent-card.json` using the configured peer's authentication, mTLS, response-size limit, timeout and circuit breaker.
+- Select only interfaces declared as `protocolBinding=JSONRPC` and `protocolVersion=1.0`.
+- Reject JSON-RPC interface URLs whose scheme/authority differ from the configured peer origin, preventing a malicious Agent Card from redirecting peer credentials to another host.
+- Send a standard `SendMessage` request through the interface URL declared in the Agent Card and validate the response's Task-or-Message oneof shape.
+- Preserve outbound permission self-checks, peer allowlisting, bounded response reads and outbound observability.
+
+Not yet complete:
+- This is the remote JSON-RPC transport adapter, not yet the end-to-end unified Agent dispatcher. The local Task dispatcher still accepts local AgentVersion IDs; remote AgentCard identities are not yet represented as first-class Task targets.
+- The public inbound API still exposes the legacy `/a2a/invoke` envelope. A standard inbound JSON-RPC endpoint and a well-known Agent Card for the multi-tenant/multi-Agent host remain to be implemented.
+- Standard `GetTask`, `ListTasks`, `CancelTask` and `SubscribeToTask` still need authenticated remote-task persistence/ownership mapping. Do not advertise these capabilities until they are implemented.
+- The legacy skill-oriented `a2a.invoke` route is retained temporarily for compatibility and must not be used as the standard A2A integration path.
