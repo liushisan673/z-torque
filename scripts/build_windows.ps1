@@ -23,14 +23,23 @@ finally {
 Write-Host "[2/5] Prepare isolated Python runtime for MD-Skill"
 $RuntimeDir = Join-Path $RepoRoot "build/runtime"
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
-if (-not (Test-Path (Join-Path $RuntimeDir "python.exe"))) {
+$RuntimeStamp = Join-Path $RuntimeDir "VERSION"
+$BundledVersion = if (Test-Path $RuntimeStamp) { (Get-Content $RuntimeStamp -Raw).Trim() } else { "" }
+if (-not (Test-Path (Join-Path $RuntimeDir "python.exe")) -or $BundledVersion -ne $PythonVersion) {
+    if (Test-Path $RuntimeDir) { Remove-Item -Recurse -Force $RuntimeDir }
+    New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
     $RuntimeZip = Join-Path $RepoRoot "build/python-embed-amd64.zip"
     $RuntimeUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-embed-amd64.zip"
     Invoke-WebRequest -Uri $RuntimeUrl -OutFile $RuntimeZip
     Expand-Archive -Path $RuntimeZip -DestinationPath $RuntimeDir -Force
+    Set-Content -Path $RuntimeStamp -Value $PythonVersion -NoNewline
 }
 if (-not (Test-Path (Join-Path $RuntimeDir "python.exe"))) {
     throw "Python embeddable runtime was not found after extraction"
+}
+$RuntimePythonVersion = & (Join-Path $RuntimeDir "python.exe") -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
+if ($LASTEXITCODE -ne 0 -or $RuntimePythonVersion -ne $PythonVersion) {
+    throw "Bundled Python runtime version mismatch: $RuntimePythonVersion vs $PythonVersion"
 }
 
 Write-Host "[3/5] Install desktop build dependencies"
