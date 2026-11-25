@@ -53,3 +53,24 @@ Knowledge remains a primary navigation item. It is a core product capability and
 3. Connectors and Models: prioritize connection health and test actions; keep secrets masked.
 4. Run & Audit: make task status, duration, failure reason and trace/correlation identifiers easy to inspect.
 5. Desktop packaging: verify minimum window size, keyboard navigation, scaling and offline/local startup states.
+
+## Sidebar navigation decision (2026-11-25)
+
+The desktop console uses a persistent left sidebar instead of the previous horizontal top navigation.
+
+- Keep 工作台、知识库、智能体、技能 in the primary workspace group.
+- Keep 运行与审计 in the operations group.
+- Keep 模型接入、连接器、Webhook in the system configuration group; preserve existing admin-only visibility.
+- Keep 用户与权限、偏好设置 in the account group; preserve the current permission filter as the single source of truth.
+- Support a collapsible desktop sidebar and an icon-rail layout at narrow widths.
+- Keep the Chat workspace's own conversation/session sidebar separate from the global product navigation.
+- Do not change routes, API contracts, authorization rules or feature availability as part of this visual change.
+- The active route, keyboard focus, hover state and accessible labels must remain clear in expanded and collapsed modes.
+
+## Follow-up UI implementation order
+
+1. Workbench: separate conversation context from task execution; make current agent, task progress, pending confirmation and result states visible without exposing infrastructure internals.
+2. Agent and Skill: use a clear list/detail hierarchy; make create/publish the primary path and keep versioning, tool binding, permissions and runtime limits in an advanced configuration area.
+3. Connectors: distinguish configured, healthy, degraded and unavailable states; provide a safe test action and a concise last-test result without exposing credentials.
+4. Run & Audit: make task status, elapsed time, failure reason and trace/correlation identifiers scannable; keep detailed event payloads in a secondary inspection panel.
+5. Responsive and accessibility pass: verify narrow window behavior, collapsed navigation tooltips, focus order, minimum window size and reduced-motion behavior.
