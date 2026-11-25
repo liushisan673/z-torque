@@ -9,7 +9,15 @@ from cryptography.fernet import Fernet
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.runtime_paths import (\n    default_data_dir,\n    default_database_url,\n    default_env_file,\n    default_sandbox_python,\n    default_user_path,\n    is_frozen,\n    resource_dir,\n)
+from app.runtime_paths import (
+    default_data_dir,
+    default_database_url,
+    default_env_file,
+    default_sandbox_python,
+    default_user_path,
+    is_frozen,
+    resource_dir,
+)
 
 _WEAK_ADMIN_PASSWORDS = {'admin123', 'admin', 'password', 'password123', '123456', '12345678', 'changeme', 'admin888'}
 _MIN_ADMIN_PASSWORD_LENGTH = 12
