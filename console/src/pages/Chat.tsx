@@ -201,7 +201,6 @@ export function ChatPage() {
   // 窄屏抽屉：原实现在 <768px 直接隐藏侧栏，手机上无法切换会话与智能体
   const [sidebarOpen, setSidebarOpen] = useState(false);
   // 宽屏会话列表折叠：点击可隐藏/展开左侧会话列表，让对话区更宽
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const navigate = useNavigate();
   const { push: toast } = useToast();
@@ -1394,7 +1393,7 @@ export function ChatPage() {
   return (
     <div className="chat-page">
       <AppTopbar nav={APP_NAV} />
-      <div className={`chat-shell${sidebarCollapsed ? " chat-shell-sidebar-collapsed" : ""}`} style={listPane.style}>
+      <div className="chat-shell" style={listPane.style}>
         {/* 窄屏遮罩：侧栏以抽屉形式覆盖（原实现直接隐藏，手机上无法切换会话/智能体） */}
         {sidebarOpen && <div className="chat-sidebar-mask" onClick={() => setSidebarOpen(false)} />}
 

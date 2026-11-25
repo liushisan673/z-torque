@@ -7295,3 +7295,6 @@ html[data-embed-theme="dark"] .embed-shell {
   .app-nav-sidebar, .app-nav-sidebar.is-collapsed { flex-basis:54px; width:54px; min-width:54px; padding-inline:5px; }
   .app-shell > .content { padding:12px; }
 }
+
+.chat-page > .app-nav-sidebar.is-collapsed ~ .chat-shell .chat-sidebar { left: var(--app-nav-collapsed-width); }
+.chat-page > .app-nav-sidebar.is-collapsed ~ .chat-shell .chat-sidebar-mask { left: var(--app-nav-collapsed-width); }
