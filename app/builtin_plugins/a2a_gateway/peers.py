@@ -208,6 +208,9 @@ class PeerRegistry:
         """
         from urllib.parse import urlparse
 
+        from app.builtin_plugins.a2a_gateway.jsonrpc import parse_jsonrpc_request, validate_jsonrpc_response
+
+        request = parse_jsonrpc_request(payload)
         base = urlparse(peer.base_url)
         target = urlparse(endpoint_url)
         if (
@@ -219,10 +222,11 @@ class PeerRegistry:
             or not target.path
         ):
             raise ApiError("AI_A2A_PEER_UNAVAILABLE", "Agent Card JSON-RPC endpoint is outside the configured peer origin", 503)
-        return await self._invoke_at(
+        response = await self._invoke_at(
             peer, payload, endpoint_url=endpoint_url,
             extra_headers=extra_headers, identity_headers=identity_headers, depth=depth,
         )
+        return validate_jsonrpc_response(response, expected_id=request.request_id)
 
     async def _invoke_at(
         self,
