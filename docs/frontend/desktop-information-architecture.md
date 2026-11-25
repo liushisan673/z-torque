@@ -118,3 +118,12 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 - The task API is owner-scoped. The UI only requests task detail when the audit event actor matches the current user; global audit visibility does not grant permission to inspect another user's task. Other users' task payloads are intentionally not fetched or exposed.
 - The task event sequence is presented as the task's own execution history. The existing audit `by-trace` view remains explicitly labelled “同 Trace”; it is correlation by trace ID, not proof of parent/child causality. Task root ID and delegation depth are shown as returned by the task API; no parent-task relationship is fabricated.
 - No backend route, schema, permission, audit retention or task lifecycle behavior was changed.
+
+## Connector test history pass (2026-11-25)
+
+- The Connector detail page now loads the latest 10 `CONNECTOR_TESTED` audit events for the selected connector using the existing audit list endpoint and its `action`, `resource_type` and `resource_id` filters.
+- The list is persisted audit history, distinct from the in-memory detailed probe result. It survives page reloads to the extent that the backend has recorded the event; the detailed REST/MCP/database probe payload remains session-local.
+- The history view shows timestamp, success/partial/failure classification, recorded latency when available and a shortened Trace ID. It does not display raw error payloads or connector credentials.
+- The audit API enforces its own user scope. A regular user sees only their own audit events; users with the relevant global audit permission receive the broader scope from the backend.
+- Some failures rejected before the connector probe writes a `CONNECTOR_TESTED` audit event may not appear in this history. The UI describes the list as recorded audit events rather than claiming it is an exhaustive log of every attempted request.
+- No new endpoint, audit schema, connector test behavior or persistence table was introduced.
