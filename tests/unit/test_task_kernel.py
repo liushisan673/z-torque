@@ -120,8 +120,12 @@ def test_parent_depth_constraint():
     with SessionLocal.begin() as db:
         root = create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="root", request_summary="root")
         child = create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="child", request_summary="child", parent_task_id=root.id)
-        with pytest.raises(ApiError):
-            create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="grandchild", request_summary="grandchild", parent_task_id=child.id)
+        grandchild = create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="grandchild", request_summary="grandchild", parent_task_id=child.id)
+        great_grandchild = create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="great-grandchild", request_summary="great grandchild", parent_task_id=grandchild.id)
+        assert (child.delegation_depth, grandchild.delegation_depth, great_grandchild.delegation_depth) == (1, 2, 3)
+        with pytest.raises(ApiError) as error:
+            create_task(db, ctx=_ctx(tenant_id, user_id), agent_id=uuid4(), agent_version_id=uuid4(), idempotency_key="depth-four", request_summary="too deep", parent_task_id=great_grandchild.id)
+        assert error.value.code == "AI_AGENT_DELEGATION_DEPTH_EXCEEDED"
 
 
 @pytest.mark.asyncio
@@ -186,3 +190,85 @@ def test_task_can_pause_for_approval_more_than_once():
         assert checkpoint.pending_call == {"tool_version_id": "b"}
         assert checkpoint.status == "WAITING_APPROVAL"
         assert task.status == TaskStatus.WAITING_HUMAN
+
+
+def test_waiting_child_task_yields_parent_and_resumes_after_child_terminal(monkeypatch):
+    """A2A 委派创建独立 Child Task；父任务挂起释放 Worker，子任务终态后父任务重新入队。"""
+    from app.kernel.task.runtime import TaskRuntime
+
+    tenant_id, user_id = setup_user()
+    monkeypatch.setattr("app.kernel.task.runtime.list_user_permissions", lambda *_args, **_kwargs: {"a2a.invoke"})
+    runtime = TaskRuntime(queue=object(), session_factory=SessionLocal)
+
+    with SessionLocal.begin() as db:
+        target = Agent(
+            tenant_id=tenant_id,
+            owner_user_id=None,
+            name="A2A Target",
+            description="target",
+            source_type="OFFICIAL",
+            status="ACTIVE",
+        )
+        db.add(target)
+        db.flush()
+        target_version = AgentVersion(
+            tenant_id=tenant_id,
+            agent_id=target.id,
+            version_number=1,
+            status="PUBLISHED",
+            config_schema_version="1",
+            config_snapshot={"system_prompt": "target"},
+        )
+        db.add(target_version)
+        db.flush()
+        target.current_published_version_id = target_version.id
+        parent = create_task(
+            db,
+            ctx=_ctx(tenant_id, user_id),
+            agent_id=uuid4(),
+            agent_version_id=uuid4(),
+            idempotency_key="a2a-parent",
+            request_summary="parent request",
+        )
+        transition_task(db, parent, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
+        transition_task(db, parent, TaskStatus.RUNNING, "TASK_STARTED", "started")
+        parent_id = parent.id
+        target_version_id = target_version.id
+        result = runtime._pause_for_child_task(
+            db,
+            parent,
+            {
+                "agent_version_id": str(target_version.id),
+                "task_text": "write a report",
+                "tool_call_id": "call-a2a-1",
+                "tool_name": "route_specialist",
+                "messages": [{"role": "user", "content": "write a report"}],
+            },
+        )
+        assert result["status"] == "WAITING_CHILD"
+        child_id = UUID(result["child_task_id"])
+        assert parent.status == TaskStatus.WAITING_CHILD
+        checkpoint = db.query(TaskCheckpoint).filter_by(task_id=parent_id).one()
+        assert checkpoint.status == "WAITING_CHILD"
+        child = db.get(Task, child_id)
+        assert child.parent_task_id == parent_id
+        assert child.agent_version_id == target_version_id
+        assert child.owner_user_id == user_id
+        assert child.delegation_depth == 1
+
+    with SessionLocal.begin() as db:
+        child = db.get(Task, child_id)
+        transition_task(db, child, TaskStatus.QUEUED, "TASK_QUEUED", "queued")
+        transition_task(db, child, TaskStatus.RUNNING, "TASK_STARTED", "started")
+        child.result = {"content": "report complete"}
+        transition_task(db, child, TaskStatus.SUCCESS, "TASK_SUCCEEDED", "child completed")
+
+    runtime._notify_parent_task(child_id)
+
+    with SessionLocal() as db:
+        parent = db.get(Task, parent_id)
+        checkpoint = db.query(TaskCheckpoint).filter_by(task_id=parent_id).one()
+        assert parent.status == TaskStatus.QUEUED
+        assert checkpoint.status == "CHILD_COMPLETED"
+        outbox = db.query(Outbox).filter_by(aggregate_id=parent_id, event_type="TASK_READY").one()
+        assert outbox.status == "PENDING"
