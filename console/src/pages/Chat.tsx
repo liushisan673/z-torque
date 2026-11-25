@@ -1811,7 +1811,7 @@ export function ChatPage() {
               {task.parent_task_id && (
                 <div className="chat-panel-status-meta" style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span>直接父任务</span>
-                  <button type="button" className="btn btn-ghost btn-xs" onClick={() => void loadTaskDetail(task.parent_task_id!)} title="查看直接父任务">
+                  <button type="button" className="btn btn-ghost btn-xs" disabled={!TERMINAL.has(task.status)} onClick={() => void loadTaskDetail(task.parent_task_id!)} title={TERMINAL.has(task.status) ? "查看直接父任务" : "当前子任务仍在执行，完成后再切换查看父任务"}>
                     {task.parent_task_id.slice(0, 10)}… · 查看
                   </button>
                   {task.child_sequence != null && <span>子任务序号 #{task.child_sequence}</span>}
