@@ -114,12 +114,12 @@ async def test_stdio_fake_server_serializes_concurrent_requests(tmp_path):
 async def test_stdio_fake_server_enforces_output_limit(tmp_path):
     script = tmp_path / "oversized_server.py"
     script.write_text(
-        "import json, sys\\n"
-        "for line in sys.stdin:\\n"
-        "    request = json.loads(line)\\n"
-        "    if request.get('method') == 'notifications/initialized': continue\\n"
-        "    result = {'protocolVersion': '2025-06-18'} if request.get('method') == 'initialize' else {'content': [{'type': 'text', 'text': 'x' * 2000}]}\\n"
-        "    print(json.dumps({'jsonrpc': '2.0', 'id': request.get('id'), 'result': result}), flush=True)\\n",
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    if request.get('method') == 'notifications/initialized': continue\n"
+        "    result = {'protocolVersion': '2025-06-18'} if request.get('method') == 'initialize' else {'content': [{'type': 'text', 'text': 'x' * 2000}]}\n"
+        "    print(json.dumps({'jsonrpc': '2.0', 'id': request.get('id'), 'result': result}), flush=True)\n",
         encoding="utf-8",
     )
     connector = StdioMcpConnector(
