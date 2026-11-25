@@ -8,8 +8,8 @@ from uuid import UUID
 
 from sqlalchemy import select, update
 
-from app.core.errors import ApiError
 from app.config import get_settings
+from app.core.errors import ApiError
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import (
     ModelContentPart,
