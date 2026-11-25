@@ -214,7 +214,8 @@ async def test_context_does_not_inject_full_extracted_text():
     assert len(rendered) < len(text) // 2, "整段 extracted_text 不应再进入 prompt"
 
 
-def test_cjk_trigram_retrieval_and_global_user_knowledge_context():
+@pytest.mark.asyncio
+async def test_cjk_trigram_retrieval_and_global_user_knowledge_context():
     """中文无空格检索可命中，且 Agent 会话能检索用户未作为附件发送的已上传文档。"""
     tenant_id, user_a = _bootstrap()
     with SessionLocal.begin() as db:
@@ -234,8 +235,7 @@ def test_cjk_trigram_retrieval_and_global_user_knowledge_context():
             assert response.status_code == 200, response.text
             assert response.json()["data"]["status"] == "PARSED", response.text
 
-    import asyncio
-    asyncio.run(upload_document())
+    await upload_document()
 
     conversation_ids = {}
     with SessionLocal.begin() as db:
@@ -260,8 +260,8 @@ def test_cjk_trigram_retrieval_and_global_user_knowledge_context():
         conversation_b = db.get(Conversation, conversation_ids[user_b_id])
         context_b = build_context(db, conversation_b)
 
-    rendered_a = "\\n".join(item.content or "" for item in context_a)
-    rendered_b = "\\n".join(item.content or "" for item in context_b)
+    rendered_a = "\n".join(item.content or "" for item in context_a)
+    rendered_b = "\n".join(item.content or "" for item in context_b)
     assert "SQLite FTS5 trigram 检索" in rendered_a
     assert "[chunk:" in rendered_a
     assert "SQLite FTS5 trigram 检索" not in rendered_b
