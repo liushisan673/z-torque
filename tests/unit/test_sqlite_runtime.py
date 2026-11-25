@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, event
+from sqlalchemy import event
 
 from app.db.session import _build_engine, _sqlite_pragmas, _sqlite_wal_first_connect
 
