@@ -102,3 +102,11 @@ The desktop console uses a persistent left sidebar instead of the previous horiz
 - Agent delegation configuration explicitly distinguishes the parent AgentVersion's child-agent allowlist from user authorization. The allowlist narrows which child versions this parent version may delegate to; every execution still checks the initiating user's identity, resource scope and operation permissions. Being allowlisted does not grant a child Agent additional user permissions.
 - The Skill creation dialog distinguishes Standard Skill authoring from MD-Skill file import and explains that script mode is an implementation characteristic of a version. Users are reminded to review version content and tool bindings before publishing.
 - These are explanatory UI changes only: no API payloads, publication rules, version snapshots, delegation enforcement or authorization behavior were changed.
+
+
+## Connector health and audit accessibility pass (2026-11-25)
+
+- Connector test failures are now associated with the connector that produced them. Switching to another connector no longer carries the previous connector's failure banner or health summary into the selected detail pane.
+- Connector health distinguishes a complete successful check, a partial check, a failed check, and a connector that has not been checked in the current session. Partial results are not presented as fully healthy.
+- Audit event rows can be opened with keyboard focus plus Enter/Space, matching their existing click behavior. Trace ID copy remains a separate action and does not open the event row.
+- These changes are presentation/state-scoping improvements; no connector test API, audit API, backend health persistence, or authorization rules were changed. Connector test results remain session-local in the current UI.
