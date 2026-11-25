@@ -1129,7 +1129,16 @@ export function SkillsPage() {
                   <div
                     key={s.id}
                     className={`skill-card${isActive ? " active" : ""}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-pressed={isActive}
                     onClick={() => void openDetail(s)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        void openDetail(s);
+                      }
+                    }}
                   >
                     <div className="row1">
                       <span className="name">{s.name}</span>
