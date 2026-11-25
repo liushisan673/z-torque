@@ -505,6 +505,7 @@ export function ChatPage() {
           : prev,
       );
       setWaitingConfirm(t.status === "WAITING_HUMAN");
+      if (t.status === "WAITING_HUMAN") setTaskPanelOpen(true);
       const last = ev.items[ev.items.length - 1];
       lastEventIdRef.current = last ? String(last.seq) : "";
       void refreshChildTasks(t.root_task_id || taskId);
@@ -789,6 +790,7 @@ export function ChatPage() {
           } as Task));
           if (status === "WAITING_HUMAN") {
             setWaitingConfirm(true);
+            setTaskPanelOpen(true);
             applyRun((prev) => ({ ...prev, status, waiting: true }));
           }
           return;
@@ -837,6 +839,7 @@ export function ChatPage() {
         applyRun((prev) => ({ ...prev, steps: prev.steps.some((s) => s.seq === seq) ? prev.steps : [...prev.steps, step] }));
         if (eventType === "TASK_WAITING_HUMAN") {
           setWaitingConfirm(true);
+          setTaskPanelOpen(true);
           applyRun((prev) => ({ ...prev, waiting: true }));
         }
         if (eventType === "TASK_APPROVAL_GRANTED" || eventType === "TASK_APPROVAL_REJECTED") {
@@ -1174,6 +1177,8 @@ export function ChatPage() {
     if (!task) return { cls: "muted", label: "—" } as const;
     if (task.status === "WAITING_HUMAN") return { cls: "waiting", label: "等待确认" } as const;
     if (task.status === "SUCCESS") return { cls: "success", label: "已完成" } as const;
+    if (task.status === "FAILED" || task.status === "TIMEOUT") return { cls: "failed", label: task.status === "TIMEOUT" ? "执行超时" : "执行失败" } as const;
+    if (task.status === "CANCELLED") return { cls: "muted", label: "已取消" } as const;
     if (TERMINAL.has(task.status)) return { cls: "failed", label: "已结束" } as const;
     return { cls: "running", label: "执行中" } as const;
   }, [task]);
@@ -1844,7 +1849,7 @@ export function ChatPage() {
 
               {waitingConfirm && (
                 <div className="chat-confirm-box">
-                  <p>任务需要人工确认，请批准或拒绝以继续执行。</p>
+                  <p>当前任务已暂停并释放执行位。批准后将从检查点继续；等待期间，其他任务可以正常运行。</p>
                   <div className="chat-confirm-actions">
                     <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>确认</button>
                     <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
@@ -1903,7 +1908,7 @@ export function ChatPage() {
           ) : (
             <table className="table">
               <thead>
-                <tr><th>状态</th><th>摘要</th><th>层级</th><th>创建时间</th></tr>
+                <tr><th>状态</th><th>摘要</th><th>层级</th><th>创建时间</th><th>操作</th></tr>
               </thead>
               <tbody>
                 {taskHistory.map((t) => (
@@ -1912,6 +1917,7 @@ export function ChatPage() {
                     <td className="text-sm">{t.request_summary}</td>
                     <td className="text-sm">{t.delegation_depth > 0 ? "子任务" : "根任务"}</td>
                     <td className="text-muted text-sm">{new Date(t.created_at).toLocaleString()}</td>
+                    <td><Button size="small" type="link" onClick={() => { void loadTaskDetail(t.id); setTaskPanelOpen(true); setTaskHistoryOpen(false); }}>查看详情</Button></td>
                   </tr>
                 ))}
               </tbody>
