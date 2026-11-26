@@ -9,7 +9,6 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.config import get_settings
-
 from app.models import (
     Agent,
     AgentVersion,

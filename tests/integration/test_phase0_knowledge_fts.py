@@ -239,7 +239,7 @@ async def test_answer_without_citation_is_rejected_and_audited():
         found = await client.post("/api/z-torque/knowledge/search", headers=headers, json={"query": case["query"]})
         chunk_id = found.json()["data"]["chunks"][0]["chunk_id"]
         missing = await client.post("/api/z-torque/knowledge/verify-answer", headers=headers, json={"answer": "这是没有依据的回答", "chunk_ids": [chunk_id]})
-        cited = await client.post("/api/z-torque/knowledge/verify-answer", headers=headers, json={"answer": f"依据片段 [chunk:{chunk_id}]", "chunk_ids": [chunk_id]})
+        cited = await client.post("/api/z-torque/knowledge/verify-answer", headers=headers, json={"answer": f"依据资料 [资料:{case['document']}]", "chunk_ids": [chunk_id]})
     assert missing.json()["data"]["action"] == "REJECTED"
     assert missing.json()["data"]["citation_valid"] is False
     assert cited.json()["data"]["action"] == "OK"
@@ -281,7 +281,8 @@ async def test_context_does_not_inject_full_extracted_text():
         conversation = db.get(Conversation, conversation_id)
         context = build_context(db, conversation)
     rendered = "\n".join(item.content or "" for item in context)
-    assert "[chunk:" in rendered
+    assert "[资料:context.md]" in rendered
+    assert "[chunk:" not in rendered
     assert len(rendered) < len(text) // 2, "整段 extracted_text 不应再进入 prompt"
 
 

@@ -33,7 +33,7 @@ MEDIA_KIND_AUDIO = "audio"
 MEDIA_KIND_VIDEO = "video"
 MEDIA_KINDS = frozenset({MEDIA_KIND_IMAGE, MEDIA_KIND_FILE, MEDIA_KIND_AUDIO, MEDIA_KIND_VIDEO})
 
-_DOCUMENT_SUFFIXES = frozenset({".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"})
+_DOCUMENT_SUFFIXES = frozenset({".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".pptx"})
 _IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
 _AUDIO_SUFFIXES = frozenset({".mp3", ".wav", ".ogg", ".amr", ".m4a"})
 _VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm"})
@@ -52,6 +52,7 @@ _SUFFIX_BY_MIME = {
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
     "image/jpeg": ".jpg",
     "image/png": ".png",
     "image/gif": ".gif",
@@ -72,6 +73,7 @@ _MIME_BY_SUFFIX = {
     ".csv": "text/csv",
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -108,7 +110,7 @@ def signature_matches(suffix: str, head: bytes) -> bool:
         return True
     if suffix == ".pdf":
         return head.startswith(b"%PDF")
-    if suffix in {".docx", ".xlsx"}:
+    if suffix in {".docx", ".xlsx", ".pptx"}:
         return head.startswith(b"PK\x03\x04")
     if suffix in {".jpg", ".jpeg"}:
         return head.startswith(b"\xff\xd8\xff")

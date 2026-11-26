@@ -248,6 +248,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                 continue
             try:
                 parsed = parse_file_structured(path, Path(item.original_name).suffix, settings.file_max_extracted_text, max_blocks=settings.knowledge_max_chunks_per_file, max_block_chars=settings.knowledge_chunk_max_chars)
+                item.extracted_text = parsed.text
                 self.index_file(db, tenant_id=tenant_id, file_id=item.id, path=str(path), sha256=item.sha256, parsed=parsed, size_bytes=item.size_bytes)
                 indexed += 1
             except Exception:  # noqa: BLE001 - 单个存量文件失败不影响整体回填
@@ -265,6 +266,8 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
         if not query.strip() or not allowed:
             return []
         limit = max(1, min(int(top_k), 50))
+        # 先扩大关键词候选池，再与向量候选做 RRF 融合；最终仍严格返回 top_k。
+        candidate_limit = min(50, max(limit * 5, limit))
         is_sqlite = db.get_bind().dialect.name == "sqlite"
         if not is_sqlite:
             self.last_degradation_reason = "non-SQLite dialect; using chunk-table LIKE retrieval"
@@ -280,7 +283,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                     "AND d.path IN :allowed_paths "
                     "ORDER BY score LIMIT :limit"
                 ).bindparams(bindparam("allowed_paths", expanding=True)),
-                {"query": _fts_query(query), "tenant_id": str(tenant_id), "allowed_paths": allowed, "limit": limit},
+                {"query": _fts_query(query), "tenant_id": str(tenant_id), "allowed_paths": allowed, "limit": candidate_limit},
             ).mappings().all()
         elif is_sqlite:
             pattern = f"%{query.strip()}%"
@@ -295,7 +298,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                     "AND d.path IN :allowed_paths "
                     "ORDER BY c.seq LIMIT :limit"
                 ).bindparams(bindparam("allowed_paths", expanding=True)),
-                {"pattern": pattern, "tenant_id": str(tenant_id), "allowed_paths": allowed, "limit": limit},
+                {"pattern": pattern, "tenant_id": str(tenant_id), "allowed_paths": allowed, "limit": candidate_limit},
             ).mappings().all()
         else:
             pattern = f"%{query.strip()}%"
@@ -313,7 +316,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
             ).mappings().all()
         # unicode61 将连续汉字视为一个 token，整句提问往往无法命中只包含主题词的文档。
         # 当 FTS/完整短语命中不足时，用有界 CJK 三字片段补召回；仍在 SQL 层先过滤授权路径。
-        if len(rows) < limit:
+        if len(rows) < candidate_limit:
             terms = _cjk_fallback_terms(query)
             if terms:
                 match_conditions = [
@@ -327,7 +330,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                 params: dict[str, Any] = {
                     "tenant_id": str(tenant_id),
                     "allowed_paths": allowed,
-                    "limit": limit - len(rows),
+                    "limit": candidate_limit - len(rows),
                 }
                 for index, term in enumerate(terms):
                     escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -434,7 +437,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                 self.embedding_client.last_error = "EmbeddingError"
                 self.last_degradation_reason = "Embedding query failed; lexical retrieval remains available"
         self._refresh_mode()
-        return results
+        return results[:limit]
 
     def search_messages(self, db: Any, *, tenant_id: UUID, user_id: UUID | None, query: str, top_k: int = 5, conversation_id: UUID | None = None) -> list[KnowledgeChunk]:
         return self.search_messages_db(

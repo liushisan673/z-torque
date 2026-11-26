@@ -168,7 +168,7 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
         system_prompt = (system_prompt + "\n\n" if system_prompt else "") + "\n\n".join(blocks)
     # §2.1 强制引用：使用本地检索片段/文件附件回答时，必须标注可回查坐标。
     # 校验侧见 services/citation_guard.py；不在提示词里靠"请不要编造"软约束。
-    citation_rule = "[引用约束] 使用检索片段或文件附件回答时，每个事实必须标注 [chunk:<chunk_id>] 或 [source:<path>#page=<n>/sheet=<s>#row=<r>#col=<c>]；未标注引用将被系统判定为未通过校验。"
+    citation_rule = "[引用约束] 使用知识库或会话附件检索资料回答时，在相关段落末尾标注 [资料:文件名]；文件名必须来自检索上下文的来源清单。严禁向用户输出 chunk_id、UUID、内部文件路径或检索分数。内部引用 ID 仅供系统审计和追踪使用。"
     system_prompt = (system_prompt + "\n\n" if system_prompt else "") + citation_rule
     document_rule = (
         "[文件变更 ChangeSet] 禁止直接写/改/删文件。输出或改文档时调用 output_document 提交提案并填 purpose/risk，"
@@ -440,7 +440,7 @@ def _knowledge_excerpt(db: Session, item: File, query: str, *, max_chars: int = 
             coord = f"sheet={row.sheet}#row={row.row_no}#col={row.col_no}"
         else:
             coord = f"line={row.line_start}-{row.line_end}"
-        lines.append(f"[chunk:{row.id}] ({coord}) {row.text[:500]}")
+        lines.append(f"[资料:{item.original_name}] ({coord}) {row.text[:500]}")
     return "\n".join(lines)[:max_chars] or f"Attachment {item.original_name}: [no matching chunk]"
 
 
