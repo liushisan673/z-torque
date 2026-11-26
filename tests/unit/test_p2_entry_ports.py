@@ -78,32 +78,32 @@ def test_approval_request_creates_pending_confirmation_with_audit():
         db.rollback()
 
 
-def test_approval_resolve_approve_and_idempotent():
+def test_approval_resolve_approve_and_idempotent_for_requesting_user():
     with SessionLocal() as db:
         tenant, requester = _setup_user(db)
-        approver = User(tenant_id=tenant.id, username=f"u-{uuid4()}", password_hash=hash_password("pass"))
-        db.add(approver)
-        db.flush()
         provider = BuiltinApprovalProvider()
         confirmation = provider.request(db, tenant_id=tenant.id, requested_by_user_id=requester.id, reason="r", snapshot={})
         db.commit()
-        resolved = provider.resolve(db, tenant_id=tenant.id, confirmation_id=confirmation.id, user_id=approver.id, approved=True)
+        resolved = provider.resolve(db, tenant_id=tenant.id, confirmation_id=confirmation.id, user_id=requester.id, approved=True)
         assert resolved.status == "APPROVED"
         # 幂等：同方向重复裁决返回既有结果
-        again = provider.resolve(db, tenant_id=tenant.id, confirmation_id=confirmation.id, user_id=approver.id, approved=True)
+        again = provider.resolve(db, tenant_id=tenant.id, confirmation_id=confirmation.id, user_id=requester.id, approved=True)
         assert again.status == "APPROVED"
         db.rollback()
 
 
-def test_approval_resolve_rejects_self_approval():
+def test_approval_resolve_rejects_other_user():
     with SessionLocal() as db:
-        tenant, user = _setup_user(db)
+        tenant, requester = _setup_user(db)
+        other_user = User(tenant_id=tenant.id, username=f"u-{uuid4()}", password_hash=hash_password("pass"))
+        db.add(other_user)
+        db.flush()
         provider = BuiltinApprovalProvider()
-        confirmation = provider.request(db, tenant_id=tenant.id, requested_by_user_id=user.id, reason="r", snapshot={})
+        confirmation = provider.request(db, tenant_id=tenant.id, requested_by_user_id=requester.id, reason="r", snapshot={})
         db.commit()
         with pytest.raises(ApiError) as error:
-            provider.resolve(db, tenant_id=tenant.id, confirmation_id=confirmation.id, user_id=user.id, approved=True)
-        assert error.value.code == "AI_CONFIRMATION_SELF_APPROVAL"
+            provider.resolve(db, tenant_id=tenant.id, confirmation_id=confirmation.id, user_id=other_user.id, approved=True)
+        assert error.value.code == "AI_CONFIRMATION_NOT_FOUND"
         db.rollback()
 
 

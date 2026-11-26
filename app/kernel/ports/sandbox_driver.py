@@ -34,9 +34,10 @@ PATCH_PARTIAL = "PARTIAL"
 class SandboxScope:
     """不可变沙箱边界：路径白名单 + 权限模式 + 隔离形态。
 
-    - restricted：脚本仅可见技能自身目录（可信开发态），process 隔离即可；
-    - full：脚本可触及整个白名单根（工作区级写入），必须 container 隔离；
-      单机 exe 无容器时显式 `AI_CAPABILITY_UNAVAILABLE`，绝不静默降级为 process。
+    - restricted：约束脚本入口、cwd 与挂载白名单；process 模式不提供宿主机文件系统/网络隔离；
+      仅适用于可信脚本，不能把路径校验误认为 OS 沙箱。
+    - full：工作区级访问必须 container 隔离；单机 exe 无容器时显式
+      `AI_CAPABILITY_UNAVAILABLE`，绝不静默降级为 process。
     """
 
     allowed_roots: tuple[str, ...]

@@ -16,10 +16,8 @@ class _FakeModel:
         return [_FakeVector([0.1, 0.2, 0.3]) for _ in texts]
 
 
-def test_local_embedding_uses_cpu_model_without_http(monkeypatch, tmp_path):
-    (tmp_path / "onnx").mkdir()
-    (tmp_path / "onnx" / "model.onnx").write_bytes(b"model")
-    settings = SimpleNamespace(
+def _settings():
+    return SimpleNamespace(
         embedding_enabled=True,
         embedding_provider="local",
         embedding_base_url="",
@@ -28,8 +26,47 @@ def test_local_embedding_uses_cpu_model_without_http(monkeypatch, tmp_path):
         embedding_timeout_seconds=2,
         embedding_api_key=None,
     )
-    monkeypatch.setattr(embeddings, "get_settings", lambda: settings)
+
+
+def test_source_mode_auto_loads_model_when_cache_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(embeddings, "get_settings", _settings)
     monkeypatch.setattr(embeddings, "local_model_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(embeddings.sys, "frozen", False, raising=False)
+    client = embeddings.EmbeddingClient()
+    loaded = []
+
+    def load():
+        loaded.append(True)
+        client._local_model = _FakeModel()
+        return client._local_model
+
+    monkeypatch.setattr(client, "_load_local_model", load)
+    assert client.configured is True
+    assert client.ready is False
+    assert client.embed(["知识库语义检索"]) == [[0.1, 0.2, 0.3]]
+    assert client.ready is True
+    assert loaded == [True]
+    client.close()
+
+
+def test_packaged_mode_requires_bundled_model_assets(monkeypatch, tmp_path):
+    monkeypatch.setattr(embeddings, "get_settings", _settings)
+    monkeypatch.setattr(embeddings, "local_model_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(embeddings.sys, "frozen", True, raising=False)
+    client = embeddings.EmbeddingClient()
+
+    assert client.configured is False
+    with pytest.raises(embeddings.EmbeddingError):
+        client.embed(["测试"])
+    client.close()
+
+
+def test_local_embedding_uses_cpu_model_without_http(monkeypatch, tmp_path):
+    (tmp_path / "onnx").mkdir()
+    (tmp_path / "onnx" / "model.onnx").write_bytes(b"model")
+    monkeypatch.setattr(embeddings, "get_settings", _settings)
+    monkeypatch.setattr(embeddings, "local_model_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(embeddings.sys, "frozen", True, raising=False)
     client = embeddings.EmbeddingClient()
     monkeypatch.setattr(client, "_load_local_model", lambda: _FakeModel())
 
@@ -39,24 +76,4 @@ def test_local_embedding_uses_cpu_model_without_http(monkeypatch, tmp_path):
         [0.1, 0.2, 0.3],
         [0.1, 0.2, 0.3],
     ]
-    client.close()
-
-
-def test_local_embedding_fails_closed_when_assets_are_missing(monkeypatch, tmp_path):
-    settings = SimpleNamespace(
-        embedding_enabled=True,
-        embedding_provider="local",
-        embedding_base_url="",
-        embedding_model="BAAI/bge-small-zh-v1.5",
-        embedding_batch_size=8,
-        embedding_timeout_seconds=2,
-        embedding_api_key=None,
-    )
-    monkeypatch.setattr(embeddings, "get_settings", lambda: settings)
-    monkeypatch.setattr(embeddings, "local_model_cache_dir", lambda: tmp_path)
-    client = embeddings.EmbeddingClient()
-
-    assert client.configured is False
-    with pytest.raises(embeddings.EmbeddingError):
-        client.embed(["测试"])
     client.close()

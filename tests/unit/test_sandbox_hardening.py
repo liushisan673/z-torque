@@ -357,7 +357,7 @@ async def test_windows_runtime_refuses_untrusted_scripts_instead_of_pretending_i
     )
 
     with pytest.raises(ApiError) as excinfo:
-        await runtime.execute(manifest, {})
+        await runtime.execute(manifest, {}, approval_granted=True)
 
     assert excinfo.value.code == "AI_SKILL_WINDOWS_UNTRUSTED", "Windows 未声明可信必须 fail closed"
 

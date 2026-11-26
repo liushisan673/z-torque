@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent
 
@@ -42,7 +42,7 @@ packages = (
     "fastembed",
     "onnxruntime",
 )
-hiddenimports = []
+hiddenimports = collect_submodules("numpy")
 for package in packages:
     hiddenimports += [
         name for name in collect_submodules(package)
@@ -52,7 +52,7 @@ for package in packages:
 a = Analysis(
     [str(ROOT / "desktop_entry.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=collect_dynamic_libs("numpy"),
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

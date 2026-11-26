@@ -361,12 +361,25 @@ function useElapsed(startedAt: number | null, active: boolean): string {
  * - 等待人工确认自动展开（审批按钮在块内），其余状态交给用户点开；
  * - 展开后只列关键节点，工具参数/结果再折叠一层，必要时可查看完整事件。
  */
-export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen }: {
+export interface WaitingConfirmationSummary {
+  kind?: string;
+  title?: string;
+  script_name?: string;
+  script_file?: string;
+  sandbox_mode?: string;
+  sandbox_isolation?: string;
+}
+
+export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waitingSummary, canResolve = false }: {
   activeRun: ActiveRun;
   taskError: { message: string; code: string | null } | null;
   onResolve: (approved: boolean) => void;
   /** 显式指定初始展开态（历史链路点开时用）；缺省按等待审批决定 */
   initiallyOpen?: boolean;
+  /** 后端返回的脱敏确认摘要 */
+  waitingSummary?: WaitingConfirmationSummary | null;
+  /** 是否允许当前用户处理本确认单，由服务端判定 */
+  canResolve?: boolean;
 }) {
   const runStatusInfo = useMemo(() => runStatusInfoOf(activeRun), [activeRun]);
   const waitingToolName = useMemo(() => waitingToolNameOf(activeRun), [activeRun]);
@@ -455,15 +468,31 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen }: {
             </ol>
           )}
 
-          {/* 写入类工具等待审批：确认框内联在执行块中（批准/拒绝） */}
+          {/* 所有需要人工确认的操作统一在执行块中审批；等待时任务已释放执行位。 */}
           {activeRun.waiting && (
-            <div className="chat-run-confirm">
-              <p>工具「{waitingToolName ?? "未知工具"}」为写入操作，需人工审批后才会执行。</p>
+            <div className="chat-run-confirm" role="alert" aria-live="polite">
+              <p>
+                {waitingSummary?.kind === "md_script"
+                  ? <>即将执行 Python 脚本「{waitingSummary.script_name || "未命名 Skill"}」，批准后才会启动沙箱。</>
+                  : <>操作「{waitingToolName ?? "待审批操作"}」需要人工确认，批准后才会继续执行。</>}
+              </p>
+              {waitingSummary?.kind === "md_script" && (
+                <div className="chat-run-desc">
+                  {waitingSummary.script_file && <div>脚本文件：{waitingSummary.script_file}</div>}
+                  <div>权限范围：{waitingSummary.sandbox_mode === "full" ? "工作区级权限（必须容器隔离）" : "受限目录策略"}</div>
+                  <div>执行边界：{waitingSummary.sandbox_isolation === "container" ? "Docker 容器：无网络、只读根文件系统和资源上限" : "独立进程：共享服务账户的宿主机文件/网络权限，不是完整 OS 沙箱"}</div>
+                  <div>安全提示：批准仅授权本次执行，不会扩大权限或解除资源限制。</div>
+                </div>
+              )}
               {waitingConfirmArgs && <pre className="chat-confirm-args">{waitingConfirmArgs}</pre>}
-              <div className="chat-confirm-actions">
-                <button className="chat-btn-confirm" type="button" onClick={() => onResolve(true)}>批准执行</button>
-                <button className="chat-btn-reject" type="button" onClick={() => onResolve(false)}>拒绝</button>
-              </div>
+              {canResolve ? (
+                <div className="chat-confirm-actions">
+                  <button className="chat-btn-confirm" type="button" onClick={() => onResolve(true)}>批准执行</button>
+                  <button className="chat-btn-reject" type="button" onClick={() => onResolve(false)}>拒绝</button>
+                </div>
+              ) : (
+                <p className="chat-run-desc">当前操作需要你确认。请核对执行范围后再决定是否继续。</p>
+              )}
             </div>
           )}
 

@@ -181,8 +181,28 @@ def _self_check(data_dir: Path) -> int:
             print(f"  - {path}")
         return 2
     from app.main import app  # noqa: F401
+    from app.builtin_plugins.knowledge.embeddings import (
+        EmbeddingClient, EmbeddingError, local_model_assets_available, local_model_cache_dir,
+    )
 
-    print(f"Z-Torque desktop package check passed. Data directory: {data_dir}")
+    embedding = EmbeddingClient()
+    try:
+        vectors = embedding.embed(["Z-Torque 本地中文知识库模型自检"])
+        if len(vectors) != 1 or len(vectors[0]) != 512:
+            raise EmbeddingError("bundled model returned an unexpected vector shape")
+    except EmbeddingError as exc:
+        cause = exc.__cause__
+        detail = f"{type(cause).__name__}: {cause}" if cause is not None else str(exc)
+        print(
+            "Z-Torque package is missing a usable offline Embedding model: "
+            f"{detail}; cache={local_model_cache_dir()}; "
+            f"assets_available={local_model_assets_available()}"
+        )
+        return 2
+    finally:
+        embedding.close()
+
+    print(f"Z-Torque desktop package check passed (Chinese Embedding: 512 dimensions). Data directory: {data_dir}")
     return 0
 
 

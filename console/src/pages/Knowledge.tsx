@@ -314,7 +314,7 @@ export function KnowledgePage() {
       {stateView && (
         <Alert className="knowledge-state-alert" type={status?.search === "AVAILABLE" || status?.search === "READY" ? "success" : status?.search === "DEGRADED" ? "warning" : "error"} showIcon
           message={<Space><span>本地知识检索</span><Tag color={stateView.color}>{stateView.label}</Tag></Space>}
-          description={<Space direction="vertical" size={2}><span>{stateView.description}</span><span>{status?.embedding?.hybrid_search ? `混合检索已启用：${status.embedding.provider} / ${status.embedding.model}` : status?.embedding?.provider === "local" ? "内置中文向量模型未就绪，当前使用全文检索；请确认安装包包含模型资源后重启并重建索引。" : "语义 Embedding 未启用：当前使用全文检索；可在部署配置中启用兼容的 Embeddings 服务后重新索引。"}</span></Space>}
+          description={<Space direction="vertical" size={2}><span>{stateView.description}</span><span>{status?.embedding?.hybrid_search ? `混合检索已启用：${status.embedding.provider} / ${status.embedding.model}` : status?.embedding?.provider === "local" ? "内置中文向量模型尚未初始化；点击“检查并重建索引”可自动下载并初始化（首次需要网络），完成后启用语义混合检索。" : "语义 Embedding 未启用：当前使用全文检索；可在部署配置中启用兼容的 Embeddings 服务后重新索引。"}</span></Space>}
         />
       )}
       {uploading && <Card size="small" className="knowledge-upload-progress"><Space direction="vertical" style={{ width: "100%" }} size={6}><Typography.Text>正在上传资料…</Typography.Text><Progress percent={uploadProgress} size="small" /></Space></Card>}

@@ -90,7 +90,7 @@ async def test_windows_gate_total_switch_blocks_even_trusted(tmp_path):
         windows_process_enabled=False,
     )
     with pytest.raises(ApiError) as exc:
-        await runtime.execute(manifest, {})
+        await runtime.execute(manifest, {}, approval_granted=True)
     assert exc.value.code == "AI_CAPABILITY_UNAVAILABLE"
 
 
@@ -105,7 +105,7 @@ async def test_windows_gate_path_allowlist_forced(tmp_path):
         allowed_roots=[str(tmp_path / "other-root")],
     )
     with pytest.raises(ApiError) as exc:
-        await runtime.execute(manifest, {})
+        await runtime.execute(manifest, {}, approval_granted=True)
     assert exc.value.code == "AI_SANDBOX_DENIED"
 
 
