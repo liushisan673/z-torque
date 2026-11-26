@@ -63,3 +63,22 @@ def test_knowledge_search_fills_top_k_from_available_source(monkeypatch):
 
     assert len(results) == 5
     assert all(item.source.startswith("/docs/") for item in results)
+
+
+def test_answer_citations_hide_internal_chunk_ids():
+    chunk_id = str(uuid4())
+    chunk = KnowledgeChunk(
+        source="/docs/book-policy.pdf",
+        content="图书借阅规则",
+        metadata={"chunk_id": chunk_id, "file_name": "图书借阅规则.pdf", "page_no": 3},
+    )
+
+    answer = knowledge_service.ensure_answer_citations(
+        f"借阅期限为三十天。[chunk:{chunk_id}]",
+        [chunk],
+    )
+
+    assert f"[chunk:{chunk_id}]" not in answer
+    assert "图书借阅规则.pdf" in answer
+    assert "[资料:图书借阅规则.pdf]" in answer
+    assert "第 3 页/幻灯片" in answer
