@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 
 from app.core.errors import ApiError
-from app.api.routes.confirmations import _request_summary
+from app.api.routes.confirmations import _dump, _request_summary
 from app.kernel.skill_confirmation import assert_distinct_approver
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.md_skill import parse_skill
@@ -121,3 +121,26 @@ Run the demo script.
         await runtime.execute(published_manifest, {})
     assert excinfo.value.code == "AI_SKILL_VERSION_DRIFT"
     assert excinfo.value.status_code == 409
+
+
+def test_confirmation_response_only_allows_admin_to_approve_another_users_request():
+    requester_id = uuid4()
+    other_admin_id = uuid4()
+    row = SimpleNamespace(
+        id=uuid4(),
+        status="PENDING",
+        requested_by_user_id=requester_id,
+        confirmed_by_user_id=None,
+        reason="MD-Skill Python 脚本执行需要人工确认",
+        task_id=uuid4(),
+        skill_version_id=uuid4(),
+        tool_version_id=None,
+        resolved_at=None,
+        request_snapshot={"execution_kind": "md_script", "script_name": "demo"},
+    )
+    requester_view = _dump(row, "requester", viewer_user_id=requester_id, viewer_is_admin=True)
+    admin_view = _dump(row, "requester", viewer_user_id=other_admin_id, viewer_is_admin=True)
+    non_admin_view = _dump(row, "requester", viewer_user_id=other_admin_id, viewer_is_admin=False)
+    assert requester_view["can_resolve"] is False
+    assert admin_view["can_resolve"] is True
+    assert non_admin_view["can_resolve"] is False
