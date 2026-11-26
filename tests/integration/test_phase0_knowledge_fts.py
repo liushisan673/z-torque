@@ -345,7 +345,7 @@ def test_search_matches_legacy_windows_relative_doc_path(tmp_path, monkeypatch):
     tenant_id, _ = _bootstrap()
     provider = SqliteKnowledgeProvider()
     storage_key = "data/files/legacy-book.md"
-    legacy_doc_path = r"data\\files\\legacy-book.md"
+    legacy_doc_path = r"data\files\legacy-book.md"
 
     class Store:
         def local_path(self, key):
