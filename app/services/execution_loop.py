@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from app.config import get_settings
 from app.core.errors import ApiError
+from app.core.servertime import ensure_utc
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import (
     ModelContentPart,
@@ -188,7 +189,7 @@ class AgentExecutionLoop:
                 raise ApiError("AI_TASK_NOT_CANCELABLE", "task cancellation requested", 409)
             timeout = request.timeout_seconds
             if deadline_at is not None:
-                timeout = min(timeout, (deadline_at - datetime.now(timezone.utc)).total_seconds())
+                timeout = min(timeout, (ensure_utc(deadline_at) - datetime.now(timezone.utc)).total_seconds())
                 if timeout <= 0:
                     raise ApiError("AI_TASK_TIMEOUT", "task deadline exceeded", 504)
             if round_number == 1 and seeded is not None:
