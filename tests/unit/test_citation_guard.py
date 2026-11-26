@@ -26,3 +26,12 @@ def test_citation_guard_accepts_source_location_and_rejects_fabricated_location(
     )
     assert validate_citations("Fact [资料:book.pdf（第 12 页）]", [chunk])["citation_valid"] is True
     assert validate_citations("Fact [资料:book.pdf（第 99 页）]", [chunk])["citation_valid"] is False
+
+
+def test_citation_guard_rejects_mixed_real_and_fabricated_references():
+    chunk = KnowledgeChunk(
+        source="book.pdf", content="source text",
+        metadata={"file_name": "book.pdf", "page_no": 2},
+    )
+    answer = "Fact [资料:book.pdf] and [资料:missing.pdf]"
+    assert validate_citations(answer, [chunk])["citation_valid"] is False
