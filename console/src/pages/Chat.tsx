@@ -1932,7 +1932,7 @@ export function ChatPage() {
                       <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
                     </div>
                   ) : (
-                    <p className="chat-panel-status-meta">本次操作由当前用户发起，不能自行审批。请联系其他租户管理员处理。</p>
+                    <p className="chat-panel-status-meta">确认权限暂不可用，请刷新页面后重试。</p>
                   )}
                 </div>
               )}
