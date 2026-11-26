@@ -341,9 +341,9 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waiti
             {waitingSummary?.kind === "md_script" && (
               <div className="chat-run-desc">
                 {waitingSummary.script_file && <div>脚本文件：{waitingSummary.script_file}</div>}
-                <div>执行范围：{waitingSummary.sandbox_mode === "full" ? "完整工作区（受限容器）" : "Skill 目录（受限模式）"}</div>
-                <div>隔离方式：{waitingSummary.sandbox_isolation === "container" ? "Docker 容器" : "独立进程"}</div>
-                <div>安全提示：批准仅授权本次执行，不会扩大文件访问权限或解除资源限制。</div>
+                <div>权限范围：{waitingSummary.sandbox_mode === "full" ? "工作区级权限（必须容器隔离）" : "受限目录策略"}</div>
+                <div>执行边界：{waitingSummary.sandbox_isolation === "container" ? "Docker 容器：无网络、只读根文件系统和资源上限" : "独立进程：共享服务账户的宿主机文件/网络权限，不是完整 OS 沙箱"}</div>
+                <div>安全提示：批准仅授权本次执行，不会扩大权限或解除资源限制。</div>
               </div>
             )}
             {waitingConfirmArgs && <pre className="chat-confirm-args">{waitingConfirmArgs}</pre>}
