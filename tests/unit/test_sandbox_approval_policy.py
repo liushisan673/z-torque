@@ -7,6 +7,8 @@ from app.core.errors import ApiError
 from app.api.routes.confirmations import _request_summary
 from app.kernel.skill_confirmation import assert_distinct_approver
 from app.kernel.skill_gateway import SkillGateway
+from app.kernel.md_skill import parse_skill
+from app.kernel.md_skill_runtime import MdSkillRuntime
 
 
 def test_confirmation_requester_cannot_approve_own_request_even_as_admin():
@@ -76,3 +78,46 @@ def test_approved_script_resume_requires_identical_script_and_arguments():
             arguments={"count": 4},
         )
     assert excinfo.value.code == "AI_SANDBOX_DENIED"
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_modified_files_after_skill_version_was_published(tmp_path):
+    skill_root = tmp_path / "demo"
+    scripts = skill_root / "scripts"
+    scripts.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text(
+        """---
+name: demo
+description: demo script
+implementation: md_script
+version: 1
+input_schema:
+  type: object
+  properties: {}
+output_schema:
+  type: object
+allow_scripts: true
+required_permissions: []
+windows_trusted: true
+---
+Run the demo script.
+""",
+        encoding="utf-8",
+    )
+    script = scripts / "main.py"
+    script.write_text('print("{}")\n', encoding="utf-8")
+    published_manifest = parse_skill(tmp_path, "demo")
+
+    # 发布后有人直接替换了脚本文件；旧 SkillVersion 快照不得执行新内容。
+    script.write_text('print("{\\"changed\\": true}")\n', encoding="utf-8")
+    runtime = MdSkillRuntime(
+        tmp_path,
+        enabled=True,
+        sandbox_driver=object(),
+        windows_process_enabled=True,
+        allowed_roots=[str(tmp_path)],
+    )
+    with pytest.raises(ApiError) as excinfo:
+        await runtime.execute(published_manifest, {})
+    assert excinfo.value.code == "AI_SKILL_VERSION_DRIFT"
+    assert excinfo.value.status_code == 409
