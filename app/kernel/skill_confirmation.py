@@ -99,7 +99,8 @@ def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID,
         if item.status == desired:
             return item
         raise ApiError("AI_REQUEST_INVALID", "confirmation is already resolved", 422)
-    if item.requested_by_user_id == user_id and not is_admin_user(db, tenant_id=tenant_id, user_id=user_id):
+    # 发起人与审批人必须是不同用户；管理员身份不能绕过自审隔离。
+    if item.requested_by_user_id == user_id:
         raise ApiError("AI_CONFIRMATION_SELF_APPROVAL", "requester cannot resolve own confirmation", 403)
     item.status = "APPROVED" if approved else "REJECTED"
     item.confirmed_by_user_id = user_id
