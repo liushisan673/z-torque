@@ -57,6 +57,15 @@ class EmbeddingClient:
         return bool(self.settings.embedding_base_url.strip() and self.settings.embedding_model.strip())
 
     @property
+    def ready(self) -> bool:
+        """模型资源可用或已完成加载；源码首次运行前保持未就绪状态。"""
+        if not self.configured:
+            return False
+        if self.provider == "local":
+            return self._local_model is not None or local_model_assets_available()
+        return True
+
+    @property
     def model(self) -> str:
         return str(self.settings.embedding_model or DEFAULT_LOCAL_MODEL).strip()
 
