@@ -15,6 +15,7 @@ from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import transition_task
 from app.kernel.task.states import TaskStatus
 from app.models import Confirmation, Conversation, Message, Outbox, Task, TaskCheckpoint
+from app.security.permissions import is_admin_user
 
 
 class BuiltinApprovalProvider(ApprovalProvider):
@@ -104,7 +105,9 @@ def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID,
         if item.status == desired:
             return item
         raise ApiError("AI_REQUEST_INVALID", "confirmation is already resolved", 422)
-    # 发起人与审批人必须是不同用户；管理员身份不能绕过自审隔离。
+    # 社区版审批人限定为租户管理员；再执行独立的发起人/审批人隔离。
+    if not is_admin_user(db, tenant_id=tenant_id, user_id=user_id):
+        raise ApiError("AI_PERMISSION_DENIED", "only tenant administrators can resolve confirmations", 403)
     assert_distinct_approver(item.requested_by_user_id, user_id)
     item.status = "APPROVED" if approved else "REJECTED"
     item.confirmed_by_user_id = user_id
