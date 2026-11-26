@@ -1,25 +1,20 @@
-"""结构化文件解析（Phase 0 §2.1 前置依赖）。
+"""多格式结构化文档解析：保留文档结构与可回查位置。
 
-兼容旧路径：`parse_file()` 仍返回整段 `extracted_text`（截断语义不变）。
-新增 `parse_file_structured()` 输出带坐标的 blocks：
-- txt/md/csv → line_start/line_end（1-based）
-- pdf → page_no（1-based，逐页）
-- xlsx → sheet + row_no + col_no（逐非空单元格）
-
-坐标不丢失是 FTS5 chunk 生成「可回查引用」的前提；超限在 ParsedFile.truncated 标记，
-由索引层写 doc.truncated + audit，不做静默截断。
+支持 TXT/Markdown/CSV/PDF/DOCX/XLSX/PPTX。Word/PPTX 按段落、标题、
+表格行和幻灯片组织；PDF 按页；表格按行；长文本按段落/句子边界拆分。
 """
 
 from __future__ import annotations
 
 import csv
+import re
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from app.kernel.ports.knowledge_provider import ParsedBlock, ParsedFile
 
-SUPPORTED = {".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx"}
+SUPPORTED = {".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx", ".pptx"}
 
 _LINES_PER_BLOCK = 40
 _MAX_PDF_PAGES = 100
@@ -28,41 +23,75 @@ _MAX_XLSX_SHEETS = 20
 _MAX_XLSX_ROWS = 10000
 _MAX_XLSX_COLS = 100
 _DEFAULT_MAX_BLOCKS = 4000
+_MAX_SEMANTIC_CHARS = 1400
 
 
-def _truncate_block(text: str, max_block_chars: int) -> tuple[str, bool]:
-    if len(text) <= max_block_chars:
-        return text, False
-    return text[:max_block_chars], True
+def _split_semantic(text: str, max_chars: int = _MAX_SEMANTIC_CHARS) -> list[str]:
+    """优先按段落/句子拆分，避免固定字符截断破坏语义。"""
+    normalized = re.sub(r"[ \t]+", " ", text.replace("\r\n", "\n").replace("\r", "\n")).strip()
+    if not normalized:
+        return []
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", normalized) if part.strip()]
+    if not paragraphs:
+        paragraphs = [normalized]
+    result: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        if len(paragraph) > max_chars:
+            sentences = re.split(r"(?<=[。！？!?；;])\s*", paragraph)
+            pieces = []
+            carry = ""
+            for sentence in sentences:
+                if not sentence:
+                    continue
+                if carry and len(carry) + len(sentence) > max_chars:
+                    pieces.append(carry)
+                    carry = ""
+                if len(sentence) > max_chars:
+                    for offset in range(0, len(sentence), max_chars):
+                        pieces.append(sentence[offset:offset + max_chars])
+                else:
+                    carry += sentence
+            if carry:
+                pieces.append(carry)
+        else:
+            pieces = [paragraph]
+        for piece in pieces:
+            if current and len(current) + len(piece) + 1 > max_chars:
+                result.append(current)
+                current = ""
+            current = f"{current}\n{piece}".strip() if current else piece
+    if current:
+        result.append(current)
+    return result
 
 
 def _text_blocks(path: Path, *, limit: int):
-    """按行流式分块；只读取 max_blocks + 1 个 block，避免整文件读入内存。"""
-    block_lines: list[str] = []
-    block_start = 1
-    emitted = 0
+    """文本按段落语义分块，同时保留近似行号范围。"""
+    buffer: list[str] = []
+    start = 1
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_no, line in enumerate(handle, start=1):
-            block_lines.append(line.rstrip("\r\n"))
-            if len(block_lines) < _LINES_PER_BLOCK:
-                continue
-            yield ParsedBlock("\n".join(block_lines), line_start=block_start, line_end=line_no)
-            emitted += 1
-            if emitted >= limit:
-                return
-            block_start = line_no + 1
-            block_lines.clear()
-    if block_lines and emitted < limit:
-        yield ParsedBlock("\n".join(block_lines), line_start=block_start, line_end=block_start + len(block_lines) - 1)
+            buffer.append(line.rstrip("\r\n"))
+            if len(buffer) >= _LINES_PER_BLOCK:
+                text = "\n".join(buffer)
+                for piece in _split_semantic(text):
+                    yield ParsedBlock(piece, line_start=start, line_end=line_no)
+                start = line_no + 1
+                buffer.clear()
+        if buffer:
+            for piece in _split_semantic("\n".join(buffer)):
+                yield ParsedBlock(piece, line_start=start, line_end=start + len(buffer) - 1)
 
 
 def _csv_blocks(path: Path, *, limit: int):
-    """CSV 按行惰性读取；不再先构造最多 1 万行的完整 list。"""
     with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
         for index, row in enumerate(csv.reader(handle)):
-            if index >= min(_MAX_CSV_ROWS + 1, limit):
+            if index >= min(_MAX_CSV_ROWS, limit):
                 return
-            yield ParsedBlock("\t".join(row[:_MAX_XLSX_COLS]), line_start=index + 1, line_end=index + 1)
+            values = [str(value).strip() for value in row[:_MAX_XLSX_COLS]]
+            if any(values):
+                yield ParsedBlock(" | ".join(values), line_start=index + 1, line_end=index + 1)
 
 
 def _pdf_blocks(path: Path, *, limit: int):
@@ -72,98 +101,201 @@ def _pdf_blocks(path: Path, *, limit: int):
         raise ValueError("PDF parser unavailable") from exc
     reader = PdfReader(path)
     for index, page in enumerate(reader.pages):
-        if index >= limit:
+        if index >= min(limit, _MAX_PDF_PAGES):
             return
-        yield ParsedBlock(page.extract_text() or "", page_no=index + 1)
+        text = page.extract_text() or ""
+        for piece in _split_semantic(text):
+            yield ParsedBlock(piece, page_no=index + 1)
 
 
 _WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
+def _word_paragraph_text(paragraph) -> tuple[str, str | None]:
+    text = "".join(node.text or "" for node in paragraph.iter(f"{_WORD_NS}t")).strip()
+    style_node = paragraph.find(f"{_WORD_NS}pPr/{_WORD_NS}pStyle")
+    style = style_node.get(f"{_WORD_NS}val") if style_node is not None else None
+    return text, style
+
+
 def _docx_blocks(path: Path, *, limit: int):
-    """用标准库读取 docx 段落文本，按 40 行一块产出，保留行号坐标。"""
+    """按 Word 原始 body 顺序读取标题、段落与表格；标题会作为后续正文上下文。"""
     with zipfile.ZipFile(path) as archive:
         root = ET.fromstring(archive.read("word/document.xml"))
-    lines: list[str] = []
-    for paragraph in root.iter(f"{_WORD_NS}p"):
-        text = "".join(node.text or "" for node in paragraph.iter(f"{_WORD_NS}t")).strip()
-        if text:
-            lines.append(text)
-    for start in range(0, min(len(lines), limit * _LINES_PER_BLOCK), _LINES_PER_BLOCK):
-        chunk = lines[start:start + _LINES_PER_BLOCK]
-        yield ParsedBlock("\n".join(chunk), line_start=start + 1, line_end=start + len(chunk))
+    body = root.find(f"{_WORD_NS}body")
+    if body is None:
+        return
+    headings: list[str] = []
+    pending: list[str] = []
+    paragraph_no = 0
+    emitted = 0
+
+    def flush():
+        nonlocal emitted, pending
+        if not pending:
+            return
+        prefix = " / ".join(headings[-3:])
+        raw = (f"所属章节：{prefix}\n" if prefix else "") + "\n".join(pending)
+        for piece in _split_semantic(raw):
+            yield ParsedBlock(piece, line_start=max(1, paragraph_no - len(pending) + 1), line_end=paragraph_no)
+            emitted += 1
+            if emitted >= limit:
+                return
+        pending = []
+
+    for child in list(body):
+        if child.tag == f"{_WORD_NS}p":
+            text, style = _word_paragraph_text(child)
+            if not text:
+                continue
+            paragraph_no += 1
+            if style and style.lower().startswith("heading"):
+                yield from flush()
+                headings.append(text)
+                headings[:] = headings[-3:]
+            else:
+                pending.append(text)
+                if sum(map(len, pending)) >= _MAX_SEMANTIC_CHARS:
+                    yield from flush()
+            if emitted >= limit:
+                return
+        elif child.tag == f"{_WORD_NS}tbl":
+            yield from flush()
+            for row in child.findall(f"{_WORD_NS}tr"):
+                cells = []
+                for cell in row.findall(f"{_WORD_NS}tc"):
+                    value = " ".join(
+                        "".join(node.text or "" for node in para.iter(f"{_WORD_NS}t")).strip()
+                        for para in cell.findall(f"{_WORD_NS}p")
+                    ).strip()
+                    cells.append(value)
+                row_text = " | ".join(value for value in cells if value)
+                if row_text:
+                    prefix = " / ".join(headings[-3:])
+                    yield ParsedBlock((f"所属章节：{prefix}\n" if prefix else "") + row_text, line_start=max(1, paragraph_no), line_end=max(1, paragraph_no))
+                    emitted += 1
+                    if emitted >= limit:
+                        return
+    yield from flush()
+
+
+_PPT_NS = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+_A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+
+
+def _pptx_blocks(path: Path, *, limit: int):
+    """按幻灯片读取文本框和表格行，保留幻灯片序号。"""
+    with zipfile.ZipFile(path) as archive:
+        names = sorted(
+            (name for name in archive.namelist() if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)),
+            key=lambda name: int(re.search(r"slide(\d+)", name).group(1)),
+        )
+        for slide_no, name in enumerate(names[:limit], start=1):
+            root = ET.fromstring(archive.read(name))
+            slide_parts: list[str] = []
+            for shape in root.iter(f"{_PPT_NS}sp"):
+                paragraphs = []
+                for paragraph in shape.iter(f"{_A_NS}p"):
+                    value = "".join(node.text or "" for node in paragraph.iter(f"{_A_NS}t")).strip()
+                    if value:
+                        paragraphs.append(value)
+                if paragraphs:
+                    slide_parts.append("\n".join(paragraphs))
+            for table in root.iter(f"{_A_NS}tbl"):
+                for row in table.findall(f"{_A_NS}tr"):
+                    cells = []
+                    for cell in row.findall(f"{_A_NS}tc"):
+                        value = "".join(node.text or "" for node in cell.iter(f"{_A_NS}t")).strip()
+                        cells.append(value)
+                    row_text = " | ".join(value for value in cells if value)
+                    if row_text:
+                        slide_parts.append(row_text)
+            raw = "\n\n".join(slide_parts)
+            for piece in _split_semantic(raw):
+                yield ParsedBlock(f"幻灯片 {slide_no}\n{piece}", page_no=slide_no)
 
 
 def _xlsx_blocks(path: Path, *, limit: int):
-    """只产出需要的非空单元格；旧实现会先把 20×10000×100 个单元格装入 list。"""
+    """按行合并 Excel 单元格，并把列标题带入数据行，避免单元格脱离上下文。"""
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError("XLSX parser unavailable") from exc
-    # 存储层文件名为无扩展名 UUID，openpyxl 会按后缀拒收；传二进制流按内容校验
     emitted = 0
     with path.open("rb") as handle:
         workbook = load_workbook(handle, read_only=True, data_only=True)
         try:
             for sheet in workbook.worksheets[:_MAX_XLSX_SHEETS]:
+                header: list[str] = []
                 for row in sheet.iter_rows(max_row=_MAX_XLSX_ROWS, max_col=_MAX_XLSX_COLS):
-                    for cell in row:
-                        if cell.value is None or str(cell.value).strip() == "":
-                            continue
-                        yield ParsedBlock(str(cell.value), sheet=sheet.title, row_no=cell.row, col_no=cell.column)
-                        emitted += 1
-                        if emitted >= limit:
-                            return
+                    values = [str(cell.value).strip() if cell.value is not None else "" for cell in row]
+                    if not any(values):
+                        continue
+                    if not header:
+                        header = values
+                        yield ParsedBlock(f"工作表：{sheet.title}\n字段：{' | '.join(v or f'列{i + 1}' for i, v in enumerate(header))}", sheet=sheet.title, row_no=row[0].row, col_no=1)
+                    else:
+                        pairs = [f"{header[i] if i < len(header) and header[i] else f'列{i + 1}'}：{value}" for i, value in enumerate(values) if value]
+                        if pairs:
+                            yield ParsedBlock(f"工作表：{sheet.title}\n" + "；".join(pairs), sheet=sheet.title, row_no=row[0].row, col_no=1)
+                    emitted += 1
+                    if emitted >= limit:
+                        return
         finally:
             workbook.close()
 
 
 _BLOCK_PARSERS = {
-    ".txt": _text_blocks,
-    ".md": _text_blocks,
-    ".csv": _csv_blocks,
-    ".pdf": _pdf_blocks,
-    ".docx": _docx_blocks,
-    ".xlsx": _xlsx_blocks,
+    ".txt": _text_blocks, ".md": _text_blocks, ".csv": _csv_blocks,
+    ".pdf": _pdf_blocks, ".docx": _docx_blocks, ".xlsx": _xlsx_blocks, ".pptx": _pptx_blocks,
 }
 
+
 def parse_file_structured(
-    path: Path,
-    suffix: str,
-    max_chars: int,
-    *,
-    max_blocks: int = _DEFAULT_MAX_BLOCKS,
+    path: Path, suffix: str, max_chars: int, *, max_blocks: int = _DEFAULT_MAX_BLOCKS,
     max_block_chars: int = 2000,
 ) -> ParsedFile:
-    """解析文件并保留坐标；超限时截断并置 `truncated=True`（由调用方落 audit）。"""
     parser = _BLOCK_PARSERS.get(suffix.lower())
     if parser is None:
         raise ValueError("unsupported file type")
     blocks: list[ParsedBlock] = []
     truncated = False
-    hard_limit = min(
-        max_blocks,
-        _MAX_PDF_PAGES if suffix.lower() == ".pdf" else (
-            _MAX_CSV_ROWS if suffix.lower() == ".csv" else max_blocks
-        ),
-    )
-    # 额外读取一个 block 用于判断是否因 max_blocks 截断；解析器按需产出，不预先构造全量结果。
+    hard_limit = min(max_blocks, _MAX_PDF_PAGES if suffix.lower() == ".pdf" else (
+        _MAX_CSV_ROWS if suffix.lower() == ".csv" else max_blocks
+    ))
     for block in parser(path, limit=hard_limit + 1):
         if len(blocks) >= hard_limit:
             truncated = True
             break
-        text, block_truncated = _truncate_block(block.text, max_block_chars)
-        truncated = truncated or block_truncated
-        if not text.strip():
-            continue
-        blocks.append(ParsedBlock(text, block.page_no, block.sheet, block.row_no, block.col_no, block.line_start, block.line_end))
+        pieces = _split_semantic(block.text, max_block_chars)
+        for piece in pieces:
+            if len(blocks) >= hard_limit:
+                truncated = True
+                break
+            blocks.append(ParsedBlock(
+                piece, block.page_no, block.sheet, block.row_no, block.col_no,
+                block.line_start, block.line_end,
+            ))
+        if truncated:
+            break
     joined = "\n".join(block.text for block in blocks)
     if len(joined) > max_chars:
-        joined = joined[:max_chars]
-        truncated = True
+        remaining = max_chars
+        kept: list[ParsedBlock] = []
+        for block in blocks:
+            if remaining <= 0:
+                truncated = True
+                break
+            value = block.text[:remaining]
+            kept.append(ParsedBlock(value, block.page_no, block.sheet, block.row_no, block.col_no, block.line_start, block.line_end))
+            remaining -= len(value) + 1
+            if len(value) < len(block.text):
+                truncated = True
+                break
+        blocks = kept
+        joined = "\n".join(block.text for block in blocks)
     return ParsedFile(joined, tuple(blocks), truncated)
 
 
 def parse_file(path: Path, suffix: str, max_chars: int) -> str:
-    """兼容入口：返回整段 extracted_text（旧上传路径语义不变）。"""
     return parse_file_structured(path, suffix, max_chars).text
