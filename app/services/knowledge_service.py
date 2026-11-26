@@ -320,8 +320,20 @@ def ensure_answer_citations(answer: str, chunks: list) -> str:
         return answer
     # 兼容历史提示词/模型输出：清理内部标识，避免出现在持久化回复和复制内容中。
     clean_answer = re.sub(r"\[(?:chunk|source):[^\]\n]+\]", "", answer or "").strip()
-    if validate_citations(clean_answer, chunks)["citation_valid"]:
+    validation = validate_citations(clean_answer, chunks)
+    if validation["citation_valid"]:
         return clean_answer
+    # 删除模型编造的文件名/页码引用，只保留本轮检索真实返回的来源坐标。
+    allowed_citations = set()
+    for item in chunks:
+        meta = item.metadata or {}
+        allowed_citations.add(str(meta.get("file_name") or Path(item.source).name))
+        allowed_citations.add(_human_source_label(item))
+    clean_answer = re.sub(
+        r"\\[资料:([^\\]\\n]+)\\]",
+        lambda match: match.group(0) if match.group(1) in allowed_citations else "",
+        clean_answer,
+    ).strip()
     references = []
     for item in chunks:
         label = _human_source_label(item)
