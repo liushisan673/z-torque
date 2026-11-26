@@ -89,14 +89,17 @@ def pause_task_for_confirmation(db: Session, *, tenant_id: UUID, user_id: UUID, 
     return confirmation
 
 
+def _assert_confirmation_owner(item: Confirmation, user_id: UUID) -> None:
+    if item.requested_by_user_id != user_id:
+        raise ApiError("AI_CONFIRMATION_NOT_FOUND", "confirmation not found", 404)
+
+
 def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID, user_id: UUID, approved: bool) -> Confirmation:
     item = db.scalar(select(Confirmation).where(Confirmation.id == confirmation_id, Confirmation.tenant_id == tenant_id))
     if not item:
         raise ApiError("AI_CONFIRMATION_NOT_FOUND", "confirmation not found", 404)
-    # Z-Torque 当前为单机单用户产品：当前登录用户确认自己发起的本次操作即可。
-    # 此处仍校验发起人身份，避免跨用户/跨确认单处理。
-    if item.requested_by_user_id != user_id:
-        raise ApiError("AI_CONFIRMATION_NOT_FOUND", "confirmation not found", 404)
+    # 单机版只允许当前登录用户处理自己的确认记录。
+    _assert_confirmation_owner(item, user_id)
     if item.status != "PENDING":
         desired = "APPROVED" if approved else "REJECTED"
         if item.status == desired:
