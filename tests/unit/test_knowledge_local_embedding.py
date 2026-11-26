@@ -37,11 +37,14 @@ def test_source_mode_auto_loads_model_when_cache_is_empty(monkeypatch, tmp_path)
 
     def load():
         loaded.append(True)
-        return _FakeModel()
+        client._local_model = _FakeModel()
+        return client._local_model
 
     monkeypatch.setattr(client, "_load_local_model", load)
     assert client.configured is True
+    assert client.ready is False
     assert client.embed(["知识库语义检索"]) == [[0.1, 0.2, 0.3]]
+    assert client.ready is True
     assert loaded == [True]
     client.close()
 
