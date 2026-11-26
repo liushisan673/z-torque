@@ -19,7 +19,8 @@ def validate_citations(answer: str, chunks: list[KnowledgeChunk]) -> dict:
         allowed_names.add(file_name)
         location: list[str] = []
         if meta.get("page_no") is not None:
-            location.append(f"第 {meta['page_no']} 页")
+            page_label = "张幻灯片" if file_name.lower().endswith(".pptx") else "页"
+            location.append(f"第 {meta['page_no']} {page_label}")
         if meta.get("sheet"):
             location.append(f"工作表 {meta['sheet']}")
         if meta.get("row_no") is not None:
