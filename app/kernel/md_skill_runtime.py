@@ -19,7 +19,7 @@ from typing import Any
 from jsonschema import ValidationError, validate
 
 from app.core.errors import SKILL_WINDOWS_UNTRUSTED, ApiError
-from app.kernel.md_skill import MdSkillManifest, validate_input
+from app.kernel.md_skill import MdSkillManifest, parse_skill, validate_input
 from app.kernel.ports.sandbox_driver import SandboxDriver, SandboxScope
 
 
@@ -68,6 +68,18 @@ class MdSkillRuntime:
             raise ApiError("AI_SANDBOX_DENIED", "skill root is outside allowed sandbox roots", 403)
         if skill_root not in script.parents or script.suffix != ".py" or not script.is_file():
             raise ApiError("AI_SKILL_PATH_INVALID", "script path is invalid", 422)
+        # 发布版本必须不可变：磁盘上的 Skill 文件与发布快照指纹不一致时拒绝执行，
+        # 防止有人替换已发布脚本后借用旧版本审批继续运行新代码。
+        try:
+            current_manifest = parse_skill(self.root, manifest.relative_path)
+        except ApiError as exc:
+            raise ApiError("AI_SKILL_VERSION_DRIFT", "published MD-Skill files no longer match the published version", 409) from exc
+        if (
+            current_manifest.file_fingerprint != manifest.file_fingerprint
+            or current_manifest.script_files != manifest.script_files
+            or current_manifest.implementation != manifest.implementation
+        ):
+            raise ApiError("AI_SKILL_VERSION_DRIFT", "published MD-Skill files no longer match the published version", 409)
         if self._sandbox is None:
             # 能力缺失必须显式暴露：未装 sandbox_driver 插件时不允许执行脚本
             raise ApiError("AI_CAPABILITY_UNAVAILABLE", "no sandbox.driver implementation is resolved", 503)
