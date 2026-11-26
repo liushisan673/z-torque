@@ -125,13 +125,15 @@ async def test_run_passes_expected_docker_arguments(tmp_path):
     assert result == {"echo": {"q": 1}}
     argv = _logged_argv(tmp_path / "docker-calls.log")
     assert argv[0] == "run"
-    for flag in ("--rm", "-i", "--network", "--read-only", "--security-opt", "--memory", "--cpus", "--pids-limit", "-v", "-w"):
+    for flag in ("--rm", "-i", "--network", "--read-only", "--security-opt", "--cap-drop", "--user", "--memory", "--cpus", "--pids-limit", "-v", "-w"):
         assert flag in argv, flag
     assert argv[argv.index("--network") + 1] == "none"
     assert argv[argv.index("--memory") + 1] == "512m"
     assert argv[argv.index("--cpus") + 1] == "1.0"
     assert argv[argv.index("--pids-limit") + 1] == "128"
     assert argv[argv.index("--security-opt") + 1] == "no-new-privileges"
+    assert argv[argv.index("--cap-drop") + 1] == "ALL"
+    assert argv[argv.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     # workdir 以同名路径挂载且可写；其余白名单根只读
     assert argv[argv.index("-w") + 1] == str(root)
     mounts = [argv[i + 1] for i, item in enumerate(argv) if item == "-v"]
