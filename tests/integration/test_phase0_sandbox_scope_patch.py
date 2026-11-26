@@ -18,7 +18,7 @@ from app.builtin_plugins.sandbox_driver.process import ProcessSandboxDriver
 from app.config import get_settings
 from app.core.errors import ApiError
 from app.db.session import SessionLocal
-from app.kernel.md_skill import MdSkillManifest
+from app.kernel.md_skill import MdSkillManifest, parse_skill
 from app.kernel.md_skill_runtime import MdSkillRuntime
 from app.kernel.ports.sandbox_driver import SANDBOX_MODE_FULL, SandboxScope
 from app.kernel.security_context import SecurityContext
@@ -279,16 +279,28 @@ async def test_full_scope_never_silently_downgrades_to_process(tmp_path):
     skill_root = root / "demo"
     script = skill_root / "scripts" / "demo.py"
     script.parent.mkdir(parents=True, exist_ok=True)
+    (skill_root / "SKILL.md").write_text(
+        """---
+name: demo
+description: demo
+implementation: md_script
+version: 1
+input_schema:
+  type: object
+output_schema:
+  type: object
+allow_scripts: true
+required_permissions: []
+---
+Run demo.
+""",
+        encoding="utf-8",
+    )
     script.write_text("print('ok')", encoding="utf-8")
     driver = ProcessSandboxDriver(allowed_roots=[str(root)])
     full_scope = SandboxScope((str(root),), mode=SANDBOX_MODE_FULL, isolation="process")
     runtime = MdSkillRuntime(root, enabled=True, sandbox_driver=driver, allowed_roots=[str(root)])
-    manifest = MdSkillManifest(
-        name="demo", description="demo", implementation="md_script", declared_version=1,
-        input_schema={"type": "object"}, output_schema={"type": "object"}, allow_scripts=True,
-        required_permissions=[], instructions="", script_files=["scripts/demo.py"],
-        file_fingerprint="x" * 64, relative_path="demo",
-    )
+    manifest = parse_skill(root, "demo")
     with pytest.raises(ApiError) as exc:
         await runtime.execute(manifest, {}, scope=full_scope, approval_granted=True)
     assert exc.value.code == "AI_CAPABILITY_UNAVAILABLE"
