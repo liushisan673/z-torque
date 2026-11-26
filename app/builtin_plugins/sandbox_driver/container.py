@@ -248,6 +248,9 @@ async def run_containerized_process(
         "no-new-privileges",
         "--cap-drop",
         "ALL",
+        # 容器内不以 root 身份运行；沿用服务进程的 UID/GID，保持挂载目录权限语义。
+        "--user",
+        f"{os.getuid()}:{os.getgid()}",
         "--tmpfs",
         "/tmp:rw,nosuid,size=64m",
         "--cidfile",
