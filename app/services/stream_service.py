@@ -40,7 +40,9 @@ def _filter_internal_reference_delta(buffer: str, content: str, *, final: bool =
                 break
             pending = pending[end + 1:]
             continue
-        if any(marker.startswith(pending) for marker in _INTERNAL_REF_MARKERS) and not final:
+        if any(marker.startswith(pending) for marker in _INTERNAL_REF_MARKERS):
+            if final:
+                pending = ""
             break
         start = pending.find("[")
         if start < 0:
