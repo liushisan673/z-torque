@@ -99,3 +99,14 @@ def test_stream_filter_hides_internal_references_across_delta_boundaries():
     assert "[chunk:" not in output
     assert "[资料:规则.pdf]" in output
     assert output.startswith("回答依据")
+
+
+def test_storage_key_allowlist_includes_database_path_variants(tmp_path):
+    class Store:
+        def local_path(self, key):
+            return tmp_path / str(key).replace("\\\\", "/")
+
+    values = knowledge_service._storage_key_allowlist([r"data\\files\\book.pdf"], Store())
+    assert r"data\\files\\book.pdf" in values
+    assert "data/files/book.pdf" in values
+    assert str((tmp_path / "data/files/book.pdf").resolve()) in values
