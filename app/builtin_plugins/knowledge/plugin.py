@@ -70,11 +70,10 @@ def probe_fts5() -> bool:
 def _path_allowed(path: str, allowed_paths: list[str] | None) -> bool:
     if not allowed_paths:
         return False  # fail-closed：无白名单 = 不返回任何片段
-    resolved = Path(path).expanduser().resolve()
-    return any(
-        resolved == root or root in resolved.parents
-        for root in (Path(item).expanduser().resolve() for item in allowed_paths)
-    )
+    # 历史 DocRow.path 可能来自 Windows 反斜杠相对路径；统一分隔符后再 resolve。
+    resolved = Path(str(path).replace("\\", "/")).expanduser().resolve()
+    roots = (Path(str(item).replace("\\", "/")).expanduser().resolve() for item in allowed_paths)
+    return any(resolved == root or root in resolved.parents for root in roots)
 
 
 def _fts_query(query: str) -> str:
