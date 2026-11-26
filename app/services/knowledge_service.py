@@ -110,12 +110,7 @@ def allowed_paths_for_knowledge_base(request, db: Session, *, tenant_id: UUID, u
             File.status == "PARSED",
         )
     ).all()
-    allowed: set[str] = set()
-    for key in storage_keys:
-        raw = str(key)
-        local = Path(object_store.local_path(key)).expanduser().resolve()
-        allowed.update({raw, raw.replace("\\", "/"), raw.replace("/", "\\"), str(local)})
-    return sorted(allowed)
+    return _storage_key_allowlist(storage_keys, object_store)
 
 
 def search(
@@ -164,12 +159,36 @@ def search(
 
 
 def _storage_key_allowlist(storage_keys: list[str], object_store) -> list[str]:
-    """Build SQL-matchable path variants; provider still enforces resolved path containment."""
+    """Build SQL-matchable path variants; provider still enforces resolved path containment.
+
+    DocRow.path may be stored as a relative path (e.g. ``data\\files\\<key>``).
+    The SQL layer compares ``d.path IN :allowed_paths`` literally, so the
+    relative form must be included or every document chunk is filtered out.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    storage_root = Path(settings.file_storage_dir)
     allowed: set[str] = set()
     for key in storage_keys:
         raw = str(key)
         local = Path(object_store.local_path(key)).expanduser().resolve()
-        allowed.update({raw, raw.replace("\\", "/"), raw.replace("/", "\\"), str(local)})
+        candidates = {
+            raw,
+            raw.replace("\\", "/"),
+            raw.replace("/", "\\"),
+            str(local),
+            str(storage_root / raw),
+            str((storage_root / raw).as_posix()),
+        }
+        allowed.update(candidates)
+        for candidate in list(candidates):
+            try:
+                relative = Path(candidate).resolve().relative_to(Path.cwd().resolve())
+            except (ValueError, OSError):
+                continue
+            allowed.add(str(relative))
+            allowed.add(relative.as_posix())
     return sorted(allowed)
 
 
