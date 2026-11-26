@@ -36,3 +36,23 @@ def test_semantic_split_keeps_sentence_boundaries():
 def test_pptx_parser_is_registered():
     assert ".pptx" in file_parser.SUPPORTED
     assert ".pptx" in file_parser._BLOCK_PARSERS
+
+
+def test_pptx_parser_extracts_slide_text_and_location(tmp_path):
+    import zipfile
+
+    slide = """<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>图书借阅流程</a:t></a:r></a:p>
+      <a:p><a:r><a:t>读者提交借阅申请</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+    </p:sld>"""
+    path = tmp_path / "sample.pptx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("ppt/slides/slide1.xml", slide)
+
+    blocks = list(file_parser._pptx_blocks(path, limit=5))
+
+    assert blocks
+    assert blocks[0].page_no == 1
+    assert "图书借阅流程" in blocks[0].text
+    assert "读者提交借阅申请" in blocks[0].text
