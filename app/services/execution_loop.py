@@ -43,6 +43,16 @@ MAX_TOOL_RESULT_CHARS = 20_000
 # 站内 A2A 简单请求默认只派发一个专业 Agent；避免模型同轮/跨轮重复调度。
 MAX_A2A_DISPATCHES_PER_RUN = 1
 
+def _remaining_timeout(deadline_at: datetime | None, configured_timeout: float, *, now: datetime | None = None) -> float:
+    """Return the smaller configured/deadline timeout; DB naive timestamps are UTC."""
+    if deadline_at is None:
+        return configured_timeout
+    current = ensure_utc(now or datetime.now(timezone.utc))
+    remaining = (ensure_utc(deadline_at) - current).total_seconds()
+    return min(configured_timeout, remaining)
+
+
+
 
 def _serialize_message(m: ModelMessage) -> dict:
     """消息快照（JSON 可序列化）：审批恢复与决策轮种子共用。
