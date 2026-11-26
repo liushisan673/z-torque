@@ -100,15 +100,16 @@ def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID,
     item = db.scalar(select(Confirmation).where(Confirmation.id == confirmation_id, Confirmation.tenant_id == tenant_id))
     if not item:
         raise ApiError("AI_CONFIRMATION_NOT_FOUND", "confirmation not found", 404)
+    # 先鉴权再处理幂等重试，避免非审批人通过重复请求探测确认单状态。
+    # 社区版审批人限定为租户管理员；发起人（包括管理员）不得自审。
+    if not is_admin_user(db, tenant_id=tenant_id, user_id=user_id):
+        raise ApiError("AI_PERMISSION_DENIED", "only tenant administrators can resolve confirmations", 403)
+    assert_distinct_approver(item.requested_by_user_id, user_id)
     if item.status != "PENDING":
         desired = "APPROVED" if approved else "REJECTED"
         if item.status == desired:
             return item
         raise ApiError("AI_REQUEST_INVALID", "confirmation is already resolved", 422)
-    # 社区版审批人限定为租户管理员；再执行独立的发起人/审批人隔离。
-    if not is_admin_user(db, tenant_id=tenant_id, user_id=user_id):
-        raise ApiError("AI_PERMISSION_DENIED", "only tenant administrators can resolve confirmations", 403)
-    assert_distinct_approver(item.requested_by_user_id, user_id)
     item.status = "APPROVED" if approved else "REJECTED"
     item.confirmed_by_user_id = user_id
     item.resolved_at = datetime.now(timezone.utc)
