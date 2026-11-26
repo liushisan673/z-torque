@@ -27,7 +27,8 @@ def validate_citations(answer: str, chunks: list[KnowledgeChunk]) -> dict:
             location.append(f"第 {meta['row_no']} 行")
         if meta.get("line_start") is not None:
             end = meta.get("line_end") or meta["line_start"]
-            location.append(f"第 {meta['line_start']}-{end} 段")
+            unit = "段" if file_name.lower().endswith(".docx") else "行"
+            location.append(f"第 {meta['line_start']}-{end} {unit}")
         if location:
             allowed_names.add(f"{file_name}（{' · '.join(location)}）")
     valid = [name for name in citations if name in allowed_names]
