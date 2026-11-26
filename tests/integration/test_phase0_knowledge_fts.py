@@ -336,3 +336,35 @@ async def test_message_level_search_is_enabled_and_scoped_to_owner():
         audit = db.scalar(select(AuditLog).where(AuditLog.action == "KNOWLEDGE_MESSAGE_SEARCH"))
         assert audit is not None
         assert "query" not in audit.detail and len(audit.detail["query_hash"]) == 64
+
+
+def test_search_matches_legacy_windows_relative_doc_path(tmp_path, monkeypatch):
+    """SQL 白名单兼容历史 Windows 相对路径，且最终 resolve 校验仍能通过。"""
+    from app.services.knowledge_service import _storage_key_allowlist
+
+    tenant_id, _ = _bootstrap()
+    provider = SqliteKnowledgeProvider()
+    storage_key = "data/files/legacy-book.md"
+    legacy_doc_path = r"data\\files\\legacy-book.md"
+
+    class Store:
+        def local_path(self, key):
+            return Path.cwd() / str(key)
+
+    allowed = _storage_key_allowlist([storage_key], Store())
+    with SessionLocal.begin() as db:
+        provider.index_file(
+            db,
+            tenant_id=tenant_id,
+            file_id=uuid4(),
+            path=legacy_doc_path,
+            sha256="d" * 64,
+            parsed=ParsedFile("内能专题 热传递 热量 比热容", (ParsedBlock("内能专题 热传递 热量 比热容"),), False),
+            size_bytes=64,
+        )
+        results = provider.search_db(
+            db, tenant_id=tenant_id, query="内能专题 热传递", top_k=5,
+            filters={"allowed_paths": allowed},
+        )
+    assert results
+    assert results[0].source == legacy_doc_path
