@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from uuid import UUID
 
@@ -294,8 +295,12 @@ def ensure_answer_citations(answer: str, chunks: list) -> str:
     """校验用户可读的资料引用；缺失时补充真实来源，不把内部 Chunk ID 暴露给用户。"""
     from app.services.citation_guard import validate_citations
 
-    if not chunks or validate_citations(answer or "", chunks)["citation_valid"]:
+    if not chunks:
         return answer
+    # 兼容历史提示词/模型输出：清理内部标识，避免出现在持久化回复和复制内容中。
+    clean_answer = re.sub(r"\[(?:chunk|source):[^\]\n]+\]", "", answer or "").strip()
+    if validate_citations(clean_answer, chunks)["citation_valid"]:
+        return clean_answer
     references = []
     for item in chunks:
         meta = item.metadata or {}
@@ -303,4 +308,4 @@ def ensure_answer_citations(answer: str, chunks: list) -> str:
         references.append(f"- {_human_source_label(item)} [资料:{file_name}]")
     if not references:
         return answer
-    return (answer or "").rstrip() + "\n\n**参考资料**\n" + "\n".join(dict.fromkeys(references))
+    return clean_answer.rstrip() + "\n\n**参考资料**\n" + "\n".join(dict.fromkeys(references))
