@@ -80,7 +80,7 @@ def test_answer_citations_hide_internal_chunk_ids():
 
     assert f"[chunk:{chunk_id}]" not in answer
     assert "图书借阅规则.pdf" in answer
-    assert "[资料:图书借阅规则.pdf]" in answer
+    assert "[资料:图书借阅规则.pdf（第 3 页）]" in answer
     assert "第 3 页" in answer
 
     
