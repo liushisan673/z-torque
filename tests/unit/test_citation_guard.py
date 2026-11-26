@@ -17,3 +17,12 @@ def test_citation_guard_accepts_known_human_readable_sources():
 
 def test_citation_guard_does_not_require_citation_without_retrieval():
     assert validate_citations("General answer", [])["citation_valid"] is True
+
+
+def test_citation_guard_accepts_source_location_and_rejects_fabricated_location():
+    chunk = KnowledgeChunk(
+        source="book.pdf", content="source text",
+        metadata={"file_name": "book.pdf", "page_no": 12},
+    )
+    assert validate_citations("Fact [资料:book.pdf（第 12 页）]", [chunk])["citation_valid"] is True
+    assert validate_citations("Fact [资料:book.pdf（第 99 页）]", [chunk])["citation_valid"] is False
