@@ -173,7 +173,7 @@ def _docx_blocks(path: Path, *, limit: int):
                 row_text = " | ".join(value for value in cells if value)
                 if row_text:
                     prefix = " / ".join(headings[-3:])
-                    yield ParsedBlock((f"所属章节：{prefix}\n" if prefix else "") + row_text, line_start=max(1, paragraph_no), line_end=max(1, paragraph_no))
+                    yield ParsedBlock((f"所属章节：{prefix}\n" if prefix else "") + row_text)
                     emitted += 1
                     if emitted >= limit:
                         return
