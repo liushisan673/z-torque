@@ -270,7 +270,11 @@ def _human_source_label(item) -> str:
         location.append(f"第 {meta['row_no']} 行")
     if meta.get("line_start") is not None:
         end = meta.get("line_end") or meta["line_start"]
-        location.append(f"第 {meta['line_start']}-{end} 行")
+        location.append(
+            f"第 {meta['line_start']}-{end} 段"
+            if Path(label).suffix.lower() == ".docx"
+            else f"第 {meta['line_start']}-{end} 行"
+        )
     return label + (f"（{' · '.join(location)}）" if location else "")
 
 
