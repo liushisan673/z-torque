@@ -163,6 +163,16 @@ def search(
     return selected[:limit]
 
 
+def _storage_key_allowlist(storage_keys: list[str], object_store) -> list[str]:
+    """Build SQL-matchable path variants; provider still enforces resolved path containment."""
+    allowed: set[str] = set()
+    for key in storage_keys:
+        raw = str(key)
+        local = Path(object_store.local_path(key)).expanduser().resolve()
+        allowed.update({raw, raw.replace("\\", "/"), raw.replace("/", "\\"), str(local)})
+    return sorted(allowed)
+
+
 def allowed_paths_for_user(request, db: Session, *, tenant_id: UUID, user_id: UUID) -> list[str]:
     """检索 scope 绑定：只有当前用户拥有的已解析文件才进入白名单。"""
     from app.models import File
@@ -178,12 +188,7 @@ def allowed_paths_for_user(request, db: Session, *, tenant_id: UUID, user_id: UU
             File.status == "PARSED",
         )
     ).all()
-    allowed: set[str] = set()
-    for key in storage_keys:
-        raw = str(key)
-        local = Path(object_store.local_path(key)).expanduser().resolve()
-        allowed.update({raw, raw.replace("\\", "/"), raw.replace("/", "\\"), str(local)})
-    return sorted(allowed)
+    return _storage_key_allowlist(storage_keys, object_store)
 
 
 def allowed_paths_for_knowledge_bases(
@@ -218,15 +223,7 @@ def allowed_paths_for_knowledge_bases(
             File.status == "PARSED",
         )
     ).all()
-    # SQL 白名单必须兼容 DocRow.path 的历史存储形式：对象键相对路径、
-    # POSIX 分隔符、Windows 分隔符及解析后的绝对路径。最终仍由 provider
-    # 的 _path_allowed(resolve) 做真实路径边界校验，不能仅依赖字符串白名单。
-    allowed: set[str] = set()
-    for key in keys:
-        raw = str(key)
-        local = Path(store.local_path(key)).expanduser().resolve()
-        allowed.update({raw, raw.replace("\\", "/"), raw.replace("/", "\\"), str(local)})
-    return sorted(allowed)
+    return _storage_key_allowlist(keys, store)
 
 
 def retrieve_agent_knowledge(
