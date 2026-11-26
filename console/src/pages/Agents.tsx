@@ -14,6 +14,7 @@ import { GuideCallout } from "../components/GuideCallout";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { Pagination, usePager } from "../components/Pagination";
+import { VersionContentModal, type VersionContentSection } from "../components/VersionContentModal";
 import { useAuth } from "../stores/auth";
 
 // Agent 绑定技能：单个 Agent 版本最多引用的去重工具数（与后端发布闸门一致）
@@ -120,6 +121,7 @@ export function AgentsPage() {
 
   // 版本草稿编辑
   const [editing, setEditing] = useState<{ agentId: string; version: AgentVersion } | null>(null);
+  const [versionView, setVersionView] = useState<{ title: string; sections: VersionContentSection[] } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [modelId, setModelId] = useState("");
   const [skillGroups, setSkillGroups] = useState<SelectableSkillGroup[]>([]);
@@ -308,6 +310,24 @@ export function AgentsPage() {
       setBoundSkills([]);
     } finally {
       setLoadingSkills(false);
+    }
+  }
+
+  async function openVersionView(v: AgentVersion) {
+    try {
+      const skills = await request<BoundSkill[]>(`/api/z-torque/agents/${selectedId}/versions/${v.id}/skills`);
+      const cfg = v.config_snapshot ?? {};
+      setVersionView({
+        title: `智能体版本 v${v.version_number}`,
+        sections: [
+          { label: "版本信息", value: `版本号：v${v.version_number}\n状态：${statusInfo(v.status).label}\n发布时间：${fmtTime(v.published_at)}` },
+          { label: "模型", value: typeof cfg.model === "string" ? cfg.model : "—" },
+          { label: "系统规则", value: typeof cfg.system_prompt === "string" ? cfg.system_prompt : "—" },
+          { label: "绑定技能", value: skills.length ? skills.map((s) => `- ${s.skill_name} v${s.version_number}`).join("\n") : "—" },
+        ],
+      });
+    } catch (err) {
+      setError(errorText(err, "加载版本内容失败"));
     }
   }
 
@@ -713,58 +733,53 @@ export function AgentsPage() {
     });
   }, [agents, filter, keyword]);
 
-  // 详情操作按钮随状态变化（对齐文档 4.1）
+  // 详情操作右上角仅保留：新建版本 / 保存 / 发布 / 停用（停用后变删除）
   const detailActions = useMemo(() => {
     if (!selected) return null;
-    const isOfficial = sourceOf(selected, meId) === "official";
-    const status = selected.status.toUpperCase();
-    if (isOfficial) {
+    if (editing) {
       return (
         <>
-          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void copyAgent(selected.id)}>复制到我的</button>
-          <button className="btn btn-secondary btn-sm" onClick={() => void openDetail(selected)}>查看快照</button>
+          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void saveVersion()}>保存</button>
+          <button
+            className="btn btn-secondary btn-sm"
+            disabled={busy}
+            onClick={() => void publishVersion(editing.agentId, editing.version)}
+          >
+            发布
+          </button>
         </>
       );
     }
-    if (status === "ARCHIVED") {
+    if (sourceOf(selected, meId) === "official") return null;
+    if (selected.status.toUpperCase() === "ARCHIVED") {
       return (
-        <>
-          <button className="btn btn-secondary btn-sm" onClick={() => void openDetail(selected)}>查看快照</button>
-          <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmDelete({ id: selected.id, name: selected.name })}>删除</button>
-        </>
+        <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmDelete({ id: selected.id, name: selected.name })}>
+          删除
+        </button>
       );
     }
-    if (status === "DRAFT") {
-      return (
-        <>
-          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEdit(selected)}>继续编辑</button>
-          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建版本</button>
-          <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>归档</button>
-        </>
-      );
-    }
-    // 已发布
+    const draftVersion = versions.find((v) => v.status === "DRAFT") ?? null;
     return (
       <>
-        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEdit(selected)}>编辑信息</button>
-        <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>
-        {selected.is_default ? (
-          <button className="btn btn-secondary btn-sm" disabled title="当前已是默认智能体">当前默认</button>
-        ) : (
-          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void setDefaultAgent(selected)} title="设为默认后，外部接入未指定目标时优先使用">设为默认</button>
-        )}
+        <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建版本</button>
         <button
-          className="btn btn-primary btn-sm"
-          disabled={!selected.current_published_version_id}
-          onClick={() => navigate(`/chat?agentId=${selected.id}`)}
-          title="前往会话页，会自动选中该智能体"
+          className="btn btn-secondary btn-sm"
+          disabled={busy || !draftVersion}
+          title={draftVersion ? `发布草稿 v${draftVersion.version_number}` : "暂无可发布的草稿版本"}
+          onClick={() => { if (draftVersion) void publishVersion(selected.id, draftVersion); }}
         >
-          前往会话页
+          发布
         </button>
-        <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>归档</button>
+        <button className="agent-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>停用</button>
       </>
     );
-  }, [selected, busy]);
+  }, [selected, editing, versions, busy, meId]);
+
+  // 以下能力按新按钮规范从 UI 收起，保留实现以便后续按需恢复入口
+  void navigate;
+  void copyAgent;
+  void setDefaultAgent;
+  void openEdit;
 
   // M12 后列表统一分页：前端切片 + 公共分页条（左侧智能体列表与详情版本列表，均每页 10 条）
   const agentPager = usePager(filteredAgents, 10);
@@ -913,7 +928,7 @@ export function AgentsPage() {
                 </div>
               </div>
 
-              <div className="agent-detail-body" ref={detailBodyRef} onScroll={handleDetailScroll}>
+              <div className={`agent-detail-body${editing ? " version-edit-mode" : ""}`} ref={detailBodyRef} onScroll={handleDetailScroll}>
                 {loadingVersions ? (
                   <Loading />
                 ) : (
@@ -1007,7 +1022,7 @@ export function AgentsPage() {
                       </div>
                     )}
 
-                    <div className="agent-section">
+                    <div className="agent-section version-edit-field">
                       <h3>模型绑定</h3>
                       <div className="agent-form-grid">
                         <div className="agent-field">
@@ -1044,7 +1059,7 @@ export function AgentsPage() {
                       </div>
                     </div>
 
-                    <div className="agent-section">
+                    <div className="agent-section version-edit-field">
                       <h3>
                         知识库绑定
                         <span className="hint">Agent 只检索此版本绑定且当前用户有权访问的知识库</span>
@@ -1103,13 +1118,6 @@ export function AgentsPage() {
                       </div>
                     </div>
 
-                    {editing && (
-                      <div className="agent-section" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                        <button className="btn btn-secondary" disabled={busy} onClick={() => void saveVersion()}>保存草稿</button>
-                        <button className="btn btn-primary" disabled={busy} onClick={() => publishVersion(editing.agentId, editing.version)}>发布新版本</button>
-                        <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
-                      </div>
-                    )}
                   </div>
                     </section>
 
@@ -1187,21 +1195,7 @@ export function AgentsPage() {
                     <section id="agent-sec-versions" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="agent-section">
-                      <h3
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          gap: 8,
-                        }}
-                      >
-                        <span>版本历史</span>
-                        {sourceOf(selected, meId) !== "official" && selected.status !== "ARCHIVED" && (
-                          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>
-                            新建草稿
-                          </button>
-                        )}
-                      </h3>
+                      <h3>版本历史</h3>
                       {versions.length === 0 ? (
                         <div className="agent-readonly-banner">暂无版本。</div>
                       ) : (
@@ -1229,15 +1223,6 @@ export function AgentsPage() {
                                   </div>
                                 </div>
                                 <div className="v-actions">
-                                  {v.status === "DRAFT" && (
-                                    <>
-                                      <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void openEditor(selected.id, v)}>编辑</button>
-                                      <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => publishVersion(selected.id, v)}>发布</button>
-                                    </>
-                                  )}
-                                  {v.status !== "DRAFT" && (
-                                    <button className="btn btn-secondary btn-sm" onClick={() => void openEditor(selected.id, v)}>查看快照</button>
-                                  )}
                                   {!readOnly && !archived && (
                                     isCurrent ? (
                                       <button className="btn btn-secondary btn-sm" disabled title="当前发布版本不可归档，请先发布其他版本">归档</button>
@@ -1245,13 +1230,14 @@ export function AgentsPage() {
                                       <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void archiveVersion(selected.id, v.id)}>归档</button>
                                     )
                                   )}
+                                  <button className="btn btn-secondary btn-sm" onClick={() => void openVersionView(v)}>查看当前版本</button>
                                   {!readOnly && !isCurrent && (v.status === "PUBLISHED" || archived) && (
                                     <button
                                       className="btn btn-secondary btn-sm"
                                       disabled={busy}
                                       onClick={() => setConfirmRollback({ agentId: selected.id, versionId: v.id, label: `v${v.version_number}` })}
                                     >
-                                      回滚至此版本
+                                      回滚到此版本
                                     </button>
                                   )}
                                 </div>
@@ -1622,6 +1608,13 @@ export function AgentsPage() {
         </ul>
         <p style={{ color: "var(--text-muted)", fontSize: 13 }}>可先「返回修改」补全配置；确认无误也可仍按当前草稿发布。</p>
       </ConfirmDialog>
+
+      <VersionContentModal
+        open={versionView !== null}
+        title={versionView?.title ?? "版本内容"}
+        onClose={() => setVersionView(null)}
+        sections={versionView?.sections ?? []}
+      />
     </div>
   );
 }

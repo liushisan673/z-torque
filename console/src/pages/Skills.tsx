@@ -15,6 +15,7 @@ import { useAuth } from "../stores/auth";
 import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 // 列表统一分页：前端切片 + 公共分页条
 import { Pagination, usePager } from "../components/Pagination";
+import { VersionContentModal, type VersionContentSection } from "../components/VersionContentModal";
 
 // 选中记忆：跳转页面后返回时恢复上次选中的技能（sessionStorage 按标签页隔离）
 const SELECTED_KEY = "zt.skills.selectedId";
@@ -118,6 +119,8 @@ export function SkillsPage() {
   // 危险操作（停用 / 级联删除）统一走 ConfirmDialog，避免 window.confirm
   const [confirmArchive, setConfirmArchive] = useState<{ id: string; name: string } | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; name: string } | null>(null);
+  const [confirmVersionArchive, setConfirmVersionArchive] = useState<{ versionId: string; label: string } | null>(null);
+  const [confirmRollback, setConfirmRollback] = useState<{ versionId: string; label: string } | null>(null);
   const meId = user?.id;
   const [skills, setSkills] = useState<SkillListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -177,6 +180,7 @@ export function SkillsPage() {
 
   // 编辑草稿
   const [editing, setEditing] = useState<SkillVersionDetail | null>(null);
+  const [versionView, setVersionView] = useState<{ title: string; sections: VersionContentSection[] } | null>(null);
   const [editInstructions, setEditInstructions] = useState("");
   const [editOrchestration, setEditOrchestration] = useState("");
   const [editScript, setEditScript] = useState("");
@@ -307,6 +311,58 @@ export function SkillsPage() {
       return null;
     } finally {
       setLoadingVersion(false);
+    }
+  }
+
+  async function openVersionView(v: SkillVersionRef) {
+    try {
+      const [detailVersion, toolLinks] = await Promise.all([
+        request<SkillVersionDetail>(`/api/z-torque/skills-tools/skill-versions/${v.id}`),
+        request<SkillToolLink[]>(`/api/z-torque/skills-tools/skill-versions/${v.id}/tools`),
+      ]);
+      setVersionView({
+        title: `技能版本 v${v.version_number}`,
+        sections: [
+          { label: "版本信息", value: `版本号：v${v.version_number}\n状态：${statusInfo(v.status).label}\n发布时间：${fmtTime(v.published_at)}` },
+          { label: "操作手册", value: detailVersion.instructions ?? "—" },
+          { label: "调用提示", value: detailVersion.orchestration_hint ?? "—" },
+          { label: "脚本来源", value: detailVersion.script_source ?? "—", mono: true },
+          { label: "权限要求", value: detailVersion.required_permissions.length ? detailVersion.required_permissions.join("\n") : "—", mono: true },
+          { label: "绑定工具", value: toolLinks.length ? toolLinks.map((t) => `- ${t.tool_name} v${t.version_number}`).join("\n") : "—" },
+        ],
+      });
+    } catch (err) {
+      setError(errorText(err, "加载版本内容失败"));
+    }
+  }
+
+  async function archiveVersion(versionId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/skills-tools/skill-versions/${versionId}/archive`, { method: "POST" });
+      setConfirmVersionArchive(null);
+      await load();
+      if (versionDetail?.id === versionId) await loadVersionDetail(versionId);
+    } catch (err) {
+      setError(errorText(err, "归档版本失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rollbackVersion(versionId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/skills-tools/skill-versions/${versionId}/rollback`, { method: "POST" });
+      setConfirmRollback(null);
+      await load();
+      await loadVersionDetail(versionId);
+    } catch (err) {
+      setError(errorText(err, "回滚版本失败"));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -565,7 +621,8 @@ export function SkillsPage() {
         { method: "POST", body: {} },
       );
       if (selected) await openDetail(selected);
-      await loadVersionDetail(v.id);
+      const created = await loadVersionDetail(v.id);
+      if (created) openEditor(created);
       void load();
       toast("success", "已创建草稿版本");
     } catch (err) {
@@ -615,7 +672,26 @@ export function SkillsPage() {
     void doPublish(versionId, payload);
   }
 
-  // 编辑态发布：合并「保存草稿 / 发布」为单按钮，草稿表单随发布请求原子提交
+  // 编辑态保存：只写入草稿，不发布；发布仍由右上角「发布」完成
+  async function saveDraft() {
+    if (!editing) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/api/z-torque/skills-tools/skill-versions/${editing.id}`, { method: "PATCH", body: buildEditPayload() });
+      const versionId = editing.id;
+      setEditing(null);
+      await load();
+      await loadVersionDetail(versionId);
+      toast("success", "草稿已保存");
+    } catch (err) {
+      setError(errorText(err, "保存草稿失败"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 编辑态发布：草稿表单随发布请求原子提交
   async function saveAndPublish() {
     if (!editing) return;
     publishVersion(editing.id, buildEditPayload());
@@ -885,83 +961,64 @@ export function SkillsPage() {
   // 列表统一分页：前端切片 + 公共分页条（sessionStorage 选中恢复逻辑不受影响）
   const skillPager = usePager(filteredSkills, 10);
 
-  // 详情操作按钮（状态驱动，对齐 skill.html 按钮组）
+  // 详情右上角仅保留：新建版本 / 保存 / 发布 / 停用（停用后变删除）
   const detailActions = useMemo(() => {
     if (!selected) return null;
-    // MD-Skill 内容源自目录文件，平台侧不可编辑（改 name 会导致下次扫描建出重复技能）
-    const isMd = selected.skill_type === "MD_SKILL";
-    const isOfficial = sourceOf(selected, meId) === "official";
-    const verStatus = (selected.latest_version_status ?? "").toUpperCase();
-    if (isPendingEnable(selected)) {
+    if (editing) {
       return (
         <>
-          {/* 首次启用确认仅管理员可见（后端有权限校验，前端不暴露无权限操作） */}
-          {isAdminUser(user) && (
-            <button
-              className="skill-btn-success"
-              disabled={busy || !selected.latest_version_id}
-              onClick={() => void publishVersion(selected.latest_version_id!)}
-              title="发布扫描草稿，完成首次启用确认"
-            >
-              确认启用（管理员）
-            </button>
-          )}
-          <button className="btn btn-secondary btn-sm" onClick={() => scrollToSection("load")}>查看扫描状态</button>
-          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>忽略（停用）</button>
+          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void saveDraft()}>保存</button>
+          <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void saveAndPublish()}>发布</button>
         </>
       );
     }
-    if (isOfficial) {
-      return (
-        <>
-          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void copySkill(selected.id)}>复制到我的</button>
-          {versionDetail && (
-            <button className="btn btn-secondary btn-sm" onClick={() => void loadVersionDetail(versionDetail.id)}>查看快照</button>
-          )}
-        </>
-      );
-    }
+    if (sourceOf(selected, meId) === "official") return null;
     if ((selected.status ?? "").toUpperCase() === "ARCHIVED") {
       return (
-        <>
-          {versionDetail && (
-            <button className="btn btn-secondary btn-sm" onClick={() => void loadVersionDetail(versionDetail.id)}>查看快照</button>
-          )}
-          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => setConfirmDelete({ id: selected.id, name: selected.name })}>删除</button>
-        </>
+        <button className="skill-btn-danger-outline" disabled={busy} onClick={() => setConfirmDelete({ id: selected.id, name: selected.name })}>
+          删除
+        </button>
       );
     }
-    if (verStatus === "DRAFT") {
-      return (
-        <>
-          {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>基础信息</button>}
-          {!isMd && versionDetail && (
-            <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => openEditor(versionDetail)}>继续编辑</button>
-          )}
-          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void publishVersion(selected.latest_version_id!)}>发布</button>
-          <button className="skill-btn-danger-outline" disabled={busy} onClick={() => setConfirmArchive({ id: selected.id, name: selected.name })}>停用</button>
-        </>
-      );
-    }
-    // 已发布
+    const isMd = selected.skill_type === "MD_SKILL";
+    const isDraft = (selected.latest_version_status ?? "").toUpperCase() === "DRAFT";
+    const canPublish = isAdminUser(user) || !isPendingEnable(selected);
     return (
       <>
-        {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={openInfoEditor}>基础信息</button>}
-        {!isMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>新建草稿版本</button>}
-        {/* 原详情区引导卡片入口收敛为按钮：携带 bindSkill 跳智能体页（新建弹窗自动预选最新发布版本） */}
-        {sourceOf(selected, meId) === "mine" && (
-          <button
-            className="btn btn-primary btn-sm"
-            onClick={() => navigate(`/agents?bindSkill=${selected.id}`)}
-            title="智能体创建弹窗会自动预选该技能的最新发布版本"
-          >
-            前往智能体页绑定
-          </button>
-        )}
-        <button className="skill-btn-danger-outline" disabled={busy} onClick={() => void archiveSkill(selected.id)}>停用</button>
+        <button
+          className="btn btn-primary btn-sm"
+          disabled={busy || isMd}
+          title={isMd ? "MD-Skill 版本由目录扫描生成" : undefined}
+          onClick={() => void createVersion(selected.id)}
+        >
+          新建版本
+        </button>
+        <button
+          className="btn btn-secondary btn-sm"
+          disabled={busy || !selected.latest_version_id || !canPublish || !isDraft}
+          title={isDraft ? "发布当前草稿版本" : "暂无可发布的草稿版本"}
+          onClick={() => selected.latest_version_id && void publishVersion(selected.latest_version_id)}
+        >
+          发布
+        </button>
+        <button
+          className="skill-btn-danger-outline"
+          disabled={busy}
+          onClick={() => isDraft || isPendingEnable(selected)
+            ? setConfirmArchive({ id: selected.id, name: selected.name })
+            : void archiveSkill(selected.id)}
+        >
+          停用
+        </button>
       </>
     );
-  }, [selected, busy, versionDetail, user]);
+  }, [selected, editing, busy, versionDetail, user, meId]);
+
+  // 以下能力按新按钮规范从 UI 收起，保留实现以便后续按需恢复入口
+  void navigate;
+  void openInfoEditor;
+  void copySkill;
+  void openEditor;
 
   // 详情面包屑与展示路径
   const detailRelativePath = viewVersion?.relative_path ?? selected?.relative_path ?? null;
@@ -1215,7 +1272,7 @@ export function SkillsPage() {
                 </div>
               </div>
 
-              <div className="skill-detail-body" ref={detailBodyRef} onScroll={handleDetailScroll}>
+              <div className={`skill-detail-body${editing ? " version-edit-mode" : ""}`} ref={detailBodyRef} onScroll={handleDetailScroll}>
                 {loadingDetail || loadingVersion ? (
                   <Loading />
                 ) : (
@@ -1241,13 +1298,6 @@ export function SkillsPage() {
                       <div className="skill-alert skill-alert-info">
                         <span>ℹ</span>
                         <span>该技能为平台官方技能，资源只读；修改前请先复制到个人空间。</span>
-                      </div>
-                    )}
-
-                    {editing && (
-                      <div className="skill-section" style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-                        <button className="btn btn-primary" disabled={busy} onClick={() => void saveAndPublish()}>保存并发布</button>
-                        <button className="btn btn-secondary" onClick={() => setEditing(null)}>取消</button>
                       </div>
                     )}
 
@@ -1358,12 +1408,9 @@ export function SkillsPage() {
                     {/* 操作手册 */}
                     <section id="skill-sec-content" className="skill-anchor-section">
                   <div className="tab-panel">
-                    <div className="skill-section">
+                    <div className="skill-section version-edit-field">
                       <h3 style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         正文 · 操作手册
-                        {!detailIsMd && !editing && viewVersion?.status === "DRAFT" && (
-                          <button className="btn btn-secondary btn-sm" style={{ marginLeft: "auto" }} disabled={busy} onClick={() => openEditor(viewVersion)}>编辑</button>
-                        )}
                       </h3>
                       {editing ? (
                         <div className="skill-rules-editor">
@@ -1405,7 +1452,7 @@ export function SkillsPage() {
                     </div>
                     */}
                     {editing && (
-                      <div className="skill-section">
+                      <div className="skill-section version-edit-field">
                         <h3>版本参数</h3>
                         <div className="skill-form-grid">
                           <div className="skill-field full">
@@ -1609,27 +1656,14 @@ export function SkillsPage() {
                     <section id="skill-sec-versions" className="skill-anchor-section">
                   <div className="tab-panel">
                     <div className="skill-section">
-                      <h3
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          gap: 8,
-                        }}
-                      >
-                        <span>技能版本</span>
-                        {sourceOf(selected, meId) !== "official" && !detailPending && (
-                          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void createVersion(selected.id)}>
-                            新建草稿
-                          </button>
-                        )}
-                      </h3>
+                      <h3>技能版本</h3>
                       {!detail || detail.versions.length === 0 ? (
                         <div className="skill-readonly-banner">暂无版本。</div>
                       ) : (
                         <div className="skill-version-list">
                           {detail.versions.map((v) => {
                             const isCurrent = detail.current_published_version_id === v.id;
+                            const readOnly = sourceOf(selected, meId) === "official" || (selected.status ?? "").toUpperCase() === "ARCHIVED";
                             return (
                               <div key={v.id} className={`skill-version-item${isCurrent ? " current" : ""}`}>
                                 <div className="v-badge">v{v.version_number}</div>
@@ -1646,13 +1680,22 @@ export function SkillsPage() {
                                   </div>
                                 </div>
                                 <div className="v-actions">
-                                  {v.status === "DRAFT" ? (
-                                    <>
-                                      {!detailIsMd && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void loadVersionDetail(v.id).then((sv) => { if (sv) openEditor(sv); })}>编辑</button>}
-                                      <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void publishVersion(v.id)}>发布</button>
-                                    </>
-                                  ) : (
-                                    <button className="btn btn-secondary btn-sm" onClick={() => void loadVersionDetail(v.id)}>快照</button>
+                                  {!readOnly && v.status !== "ARCHIVED" && (
+                                    isCurrent ? (
+                                      <button className="btn btn-secondary btn-sm" disabled title="当前发布版本不可归档，请先发布其他版本">归档</button>
+                                    ) : (
+                                      <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setConfirmVersionArchive({ versionId: v.id, label: `v${v.version_number}` })}>归档</button>
+                                    )
+                                  )}
+                                  <button className="btn btn-secondary btn-sm" onClick={() => void openVersionView(v)}>查看当前版本</button>
+                                  {!readOnly && !isCurrent && (v.status === "PUBLISHED" || v.status === "ARCHIVED") && (
+                                    <button
+                                      className="btn btn-secondary btn-sm"
+                                      disabled={busy}
+                                      onClick={() => setConfirmRollback({ versionId: v.id, label: `v${v.version_number}` })}
+                                    >
+                                      回滚到此版本
+                                    </button>
                                   )}
                                 </div>
                               </div>
@@ -2115,6 +2158,35 @@ export function SkillsPage() {
         </ul>
         <p style={{ color: "var(--text-muted)", fontSize: 13 }}>可先「返回修改」补全指令内容；确认无误也可仍按当前草稿发布。</p>
       </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmVersionArchive !== null}
+        title="归档技能版本？"
+        confirmText="归档"
+        busy={busy}
+        onCancel={() => setConfirmVersionArchive(null)}
+        onConfirm={() => { if (confirmVersionArchive) void archiveVersion(confirmVersionArchive.versionId); }}
+      >
+        <p>版本 {confirmVersionArchive?.label ?? ""} 将归档且不可再被回滚引用。当前发布版本不可归档。</p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
+        open={confirmRollback !== null}
+        title="回滚到此版本？"
+        confirmText="回滚"
+        busy={busy}
+        onCancel={() => setConfirmRollback(null)}
+        onConfirm={() => { if (confirmRollback) void rollbackVersion(confirmRollback.versionId); }}
+      >
+        <p>将当前发布指针切换到版本 {confirmRollback?.label ?? ""}，该版本内容不会被修改。</p>
+      </ConfirmDialog>
+
+      <VersionContentModal
+        open={versionView !== null}
+        title={versionView?.title ?? "版本内容"}
+        onClose={() => setVersionView(null)}
+        sections={versionView?.sections ?? []}
+      />
     </div>
   );
 }

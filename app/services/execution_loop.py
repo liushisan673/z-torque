@@ -7,6 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import select, update
 
+from app.config import get_settings
 from app.core.errors import ApiError
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import (
@@ -20,13 +21,14 @@ from app.kernel.model_gateway import (
 )
 from app.kernel.ports.model_selector import ModelSelector, resolve_model_selection
 from app.kernel.ports.skill_executor import ExecutionResult
-from app.kernel.registry.active import call_optional
+from app.kernel.registry.active import call_optional, try_port
 from app.kernel.security_context import SecurityContext
 from app.kernel.skill_gateway import SkillGateway
 from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import append_task_event
 from app.models import Agent, AgentVersion, Message, Task, TaskCheckpoint
 from app.repositories import visible_owner_clause
+from app.services.chat_document import create_chat_document
 from app.services.context_governance import heal_context, sanitize_untrusted
 from app.services.function_calling import ToolMapping, repair_tool_message, validate_tool_calls
 from app.services.model_limits import effective_max_tokens
@@ -317,6 +319,60 @@ class AgentExecutionLoop:
                             "result": _brief(child_result.get("content") or child_result.get("error_message") or child_content),
                         },
                     )
+                    continue
+                if mapping.builtin_kind == "document_output":
+                    conversation_id = getattr(task, "conversation_id", None) if task is not None else None
+                    object_store = try_port("object.store")
+                    if conversation_id is None or object_store is None:
+                        tool_content = json.dumps({
+                            "status": "FAILED",
+                            "error_code": "AI_DOCUMENT_OUTPUT_UNAVAILABLE",
+                            "error_message": "文档输出需要会话上下文与对象存储能力",
+                        }, ensure_ascii=False)
+                    else:
+                        settings = get_settings()
+                        try:
+                            created = create_chat_document(
+                                db,
+                                tenant_id=ctx.tenant_id,
+                                user_id=ctx.user_id,
+                                conversation_id=conversation_id,
+                                object_store=object_store,
+                                max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+                                max_extracted_chars=settings.file_max_extracted_text,
+                                fmt=str(arguments.get("format", "md")),
+                                filename=str(arguments.get("filename", "document")),
+                                content=str(arguments.get("content", "")),
+                                task_id=getattr(task, "id", None),
+                                purpose=str(arguments.get("purpose", "")) or None,
+                                risk=str(arguments.get("risk", "")) or None,
+                                auto_keep=get_settings().file_change_auto_keep,
+                                trace_id=request.trace_id,
+                            )
+                            tool_content = json.dumps({"status": "SUCCEEDED", **created}, ensure_ascii=False)
+                            _progress_event(
+                                db,
+                                task,
+                                "TASK_TOOL_RESULT",
+                                f"tool {call.name} returned",
+                                trace_id=request.trace_id,
+                                payload={"tool_name": call.name, "status": "SUCCEEDED", "result": _brief(created.get("name"))},
+                            )
+                        except ApiError as exc:
+                            tool_content = json.dumps({
+                                "status": "FAILED",
+                                "error_code": exc.code,
+                                "error_message": exc.message,
+                            }, ensure_ascii=False)
+                            _progress_event(
+                                db,
+                                task,
+                                "TASK_TOOL_RESULT",
+                                f"tool {call.name} failed: {exc.code}",
+                                trace_id=request.trace_id,
+                                payload={"tool_name": call.name, "status": "FAILED", "error": exc.message},
+                            )
+                    messages.append(ModelMessage("tool", tool_content, tool_call_id=call.id))
                     continue
                 result: ExecutionResult = await self.skill_gateway.execute_async(
                     db,

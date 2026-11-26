@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Drawer, Popover, Select } from "antd";
+import { DeleteOutlined, SwapOutlined, ThunderboltOutlined, UploadOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
 import { request, uploadFile } from "../services/api";
 import type { FileContent, FileMetadata } from "../types";
+import { PatchReviewPanel } from "./PatchReview";
 
 // P1b-UX-1：能力/用量头部横条。全部文案对用户可读，不暴露
 // MCP / AVAILABLE / DEGRADED / UNAVAILABLE / token / unknown 等专业术语。
@@ -221,13 +223,59 @@ function compareText(before: string[], after: string[]): TextChange[] {
 
 export function FileCompareDrawer({ conversationId }: { conversationId: string | null }) {
   const [open, setOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<"changes" | "custom">("changes");
   const [files, setFiles] = useState<FileMetadata[]>([]);
   const [baseId, setBaseId] = useState<string | null>(null);
   const [compareFile, setCompareFile] = useState<FileMetadata | null>(null);
+  const [localBaseFile, setLocalBaseFile] = useState<FileMetadata | null>(null);
+  const [mode, setMode] = useState<"conversation" | "local">("conversation");
   const [uploading, setUploading] = useState(false);
+  const [uploadingBase, setUploadingBase] = useState(false);
+  const [baseOrigin, setBaseOrigin] = useState<"session" | "local">("session");
+  const [compareOrigin, setCompareOrigin] = useState<"local" | "session">("local");
   const [baseText, setBaseText] = useState<string | null>(null);
   const [compareTextValue, setCompareTextValue] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const uploadRef = useRef<HTMLInputElement>(null);
+  const localBaseRef = useRef<HTMLInputElement>(null);
+
+  function switchMode(next: "conversation" | "local") {
+    setMode(next);
+    setBaseText(null);
+    setCompareTextValue(null);
+    setError(null);
+  }
+
+  function removeLocalBaseFile() {
+    setLocalBaseFile(null);
+    setBaseText(null);
+    setError(null);
+    if (localBaseRef.current) localBaseRef.current.value = "";
+  }
+
+  function removeCompareFile() {
+    setCompareFile(null);
+    setCompareTextValue(null);
+    setError(null);
+    if (uploadRef.current) uploadRef.current.value = "";
+  }
+
+  function swapFiles() {
+    setBaseText(null);
+    setCompareTextValue(null);
+    setError(null);
+    if (mode === "local") {
+      setLocalBaseFile(compareFile);
+      setCompareFile(localBaseFile);
+      return;
+    }
+    if (!baseId || !compareFile) return;
+    const previousBase = files.find((file) => file.id === baseId) ?? null;
+    setBaseId(compareFile.id);
+    setBaseOrigin(compareOrigin);
+    setCompareFile(previousBase);
+    setCompareOrigin(baseOrigin);
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -243,13 +291,18 @@ export function FileCompareDrawer({ conversationId }: { conversationId: string |
     return item.content ?? "";
   }
 
-  async function runCompare() {
+  async function runCompare(overrideBaseId?: string, overrideCompareId?: string) {
     setError(null);
     setBaseText(null);
     setCompareTextValue(null);
-    if (!baseId || !compareFile) { setError("请先选择会话文件并上传要对比的文件"); return; }
+    const baseFileId = overrideBaseId ?? (mode === "conversation" ? baseId : localBaseFile?.id);
+    const compareId = overrideCompareId ?? compareFile?.id;
+    if (!baseFileId || !compareId) {
+      setError(mode === "local" ? "请上传两个本地文件" : "请先选择会话文件并上传要对比的文件");
+      return;
+    }
     try {
-      const [a, b] = await Promise.all([readContent(baseId), readContent(compareFile.id)]);
+      const [a, b] = await Promise.all([readContent(baseFileId), readContent(compareId)]);
       setBaseText(a);
       setCompareTextValue(b);
     } catch (err) {
@@ -257,6 +310,8 @@ export function FileCompareDrawer({ conversationId }: { conversationId: string |
     }
   }
 
+  const baseFileMeta = mode === "conversation" ? files.find((file) => file.id === baseId) ?? null : localBaseFile;
+  const baseName = baseFileMeta?.name ?? (mode === "conversation" && files.length === 0 ? "当前会话暂无文件" : "未选择文件");
   const rows = useMemo(
     () => (baseText !== null && compareTextValue !== null ? compareText(splitText(baseText), splitText(compareTextValue)) : []),
     [baseText, compareTextValue],
@@ -267,35 +322,141 @@ export function FileCompareDrawer({ conversationId }: { conversationId: string |
 
   return (
     <>
-      <Button size="small" type="text" title="文件对比" onClick={() => setOpen(true)}>文件对比</Button>
-      <Drawer title="文件对比" open={open} onClose={() => setOpen(false)} width="min(860px, 92vw)">
-        <div className="file-compare-hint">
-          当前会话产出的文件可直接选择；要对比的另一份文件需要你自己上传。系统还没有「直接生成文件」能力时，这里仍可用上传的文件做对比。
+      <Button className="file-compare-trigger" size="small" type="default" title="文件变更" icon={<SwapOutlined />} onClick={() => setOpen(true)}>文件变更</Button>
+      <Drawer title="文件变更" open={open} onClose={() => setOpen(false)} width="min(1120px, 94vw)">
+        <div className="file-compare-tabs">
+          <button type="button" className={activeTab === "changes" ? "active" : ""} onClick={() => setActiveTab("changes")}>文件变更</button>
+          <button type="button" className={activeTab === "custom" ? "active" : ""} onClick={() => setActiveTab("custom")}>自定义对比</button>
         </div>
-        <div className="file-compare-pickers">
-          <label>
-            当前会话文件
-            <Select size="small" value={baseId ?? undefined} options={files.map((file) => ({ label: file.name, value: file.id }))}
-              placeholder={files.length === 0 ? "当前会话暂无文件" : "选择文件"}
-              onChange={(value) => { setBaseId(value ?? null); setBaseText(null); }} style={{ width: "100%" }} />
-          </label>
-          <label>
-            对比文件（上传）
-            <input type="file" disabled={uploading} onChange={(event) => {
-              const file = event.target.files?.[0];
-              if (!file) return;
-              setUploading(true);
-              setError(null);
-              void uploadFile<FileMetadata>("/api/z-torque/files", file).then((meta) => {
-                setCompareFile(meta);
-                setCompareTextValue(null);
-              }).catch((err: unknown) => setError(err instanceof Error ? err.message : "上传失败"))
-                .finally(() => setUploading(false));
-              event.target.value = "";
-            }} />
-            {compareFile && <span className="file-compare-uploaded">{compareFile.name}</span>}
-          </label>
-          <Button type="primary" size="small" onClick={() => void runCompare()} disabled={!baseId || !compareFile}>开始对比</Button>
+        {activeTab === "changes" ? (
+          <PatchReviewPanel conversationId={conversationId} active={open} />
+        ) : (
+          <>
+        <div className="file-compare-hint">
+          支持 PDF、Word(.docx)、TXT、Markdown、CSV、Excel。可对比会话产出与本地文件，也可以直接上传两个本地文件互相对比。
+        </div>
+        <div className="file-compare-modes">
+          <button type="button" className={mode === "conversation" ? "active" : ""} onClick={() => switchMode("conversation")}>会话文件对比</button>
+          <button type="button" className={mode === "local" ? "active" : ""} onClick={() => switchMode("local")}>本地文件对比</button>
+        </div>
+        <div className="file-compare-workbench">
+          <section className="file-compare-panel">
+            <header className="file-compare-panel-head">
+              <span className={`file-compare-source ${baseOrigin}`}>{baseOrigin === "session" ? "会话文件" : "本地文件"}</span>
+              <strong>基准文件</strong>
+            </header>
+            <div className="file-compare-panel-body">
+              {mode === "conversation" ? (
+                <Select
+                  size="small"
+                  value={baseId ?? undefined}
+                  options={files.map((file) => ({ label: file.name, value: file.id }))}
+                  placeholder={files.length === 0 ? "当前会话暂无文件" : "选择文件"}
+                  onChange={(value) => { setBaseId(value ?? null); setBaseOrigin("session"); setBaseText(null); }}
+                  style={{ width: "100%" }}
+                />
+              ) : (
+                <>
+                  <label className="file-compare-upload-btn">
+                    <UploadOutlined />
+                    {uploadingBase ? "上传中…" : localBaseFile ? "重新选择" : "选择文件"}
+                    <input
+                      ref={localBaseRef}
+                      type="file"
+                      accept=".pdf,.docx,.txt,.md,.csv,.xlsx"
+                      disabled={uploadingBase}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        setUploadingBase(true);
+                        setError(null);
+                        void uploadFile<FileMetadata>("/api/z-torque/files", file).then((meta) => {
+                          setLocalBaseFile(meta);
+                          setBaseText(null);
+                        }).catch((err: unknown) => setError(err instanceof Error ? err.message : "上传失败"))
+                          .finally(() => setUploadingBase(false));
+                        event.target.value = "";
+                      }}
+                    />
+                  </label>
+                  {localBaseFile && (
+                    <button type="button" className="file-compare-remove" title="删除并重新选择" onClick={removeLocalBaseFile}>
+                      <DeleteOutlined />
+                    </button>
+                  )}
+                </>
+              )}
+              <div className="file-compare-file-name" title={baseName}>{baseName}</div>
+            </div>
+          </section>
+
+          <button
+            type="button"
+            className="file-compare-swap"
+            title="转换：交换基准文件与对比文件"
+            disabled={!baseFileMeta || !compareFile}
+            onClick={swapFiles}
+          >
+            <SwapOutlined />
+            <span>转换</span>
+          </button>
+
+          <section className="file-compare-panel">
+            <header className="file-compare-panel-head">
+              <span className={`file-compare-source ${compareOrigin}`}>{compareOrigin === "session" ? "会话文件" : "本地文件"}</span>
+              <strong>对比文件</strong>
+            </header>
+            <div className="file-compare-panel-body">
+              {compareOrigin === "session" && compareFile ? (
+                <div className="file-compare-session-file">来自当前会话</div>
+              ) : (
+                <>
+                  <label className="file-compare-upload-btn">
+                    <UploadOutlined />
+                    {uploading ? "上传中…" : compareFile ? "重新选择" : "选择文件"}
+                    <input
+                      ref={uploadRef}
+                      type="file"
+                      accept=".pdf,.docx,.txt,.md,.csv,.xlsx"
+                      disabled={uploading}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        setUploading(true);
+                        setError(null);
+                        void uploadFile<FileMetadata>("/api/z-torque/files", file).then((meta) => {
+                          setFiles((prev) => [meta, ...prev.filter((item) => item.id !== meta.id)]);
+                          setCompareFile(meta);
+                          setCompareOrigin("local");
+                          setCompareTextValue(null);
+                        }).catch((err: unknown) => setError(err instanceof Error ? err.message : "上传失败"))
+                          .finally(() => setUploading(false));
+                        event.target.value = "";
+                      }}
+                    />
+                  </label>
+                  {compareFile && (
+                    <button type="button" className="file-compare-remove" title="删除并重新选择" onClick={removeCompareFile}>
+                      <DeleteOutlined />
+                    </button>
+                  )}
+                </>
+              )}
+              <div className="file-compare-file-name" title={compareFile?.name}>{compareFile?.name ?? "未选择文件"}</div>
+            </div>
+          </section>
+        </div>
+        <div className="file-compare-actions">
+          <Button
+            type="primary"
+            size="small"
+            className="file-compare-run"
+            icon={<SwapOutlined />}
+            onClick={() => void runCompare()}
+            disabled={!baseFileMeta || !compareFile || uploading || uploadingBase}
+          >
+            开始对比
+          </Button>
         </div>
         {error && <div className="chat-split-pane-error">{error}</div>}
         {baseText !== null && compareTextValue !== null && (
@@ -315,53 +476,55 @@ export function FileCompareDrawer({ conversationId }: { conversationId: string |
             </details>
           </div>
         )}
+          </>
+        )}
       </Drawer>
     </>
   );
 }
 
 const GENERATION_PRESETS = [
-  { value: "concise", label: "简洁准确", hint: "回答简短直接，适合明确的小问题。" },
-  { value: "balanced", label: "平衡", hint: "速度与细节兼顾，适合大多数问题。" },
-  { value: "deep", label: "深度分析", hint: "回答更详细，适合复杂问题，等待时间更长。" },
-  { value: "creative", label: "创意发散", hint: "表达更自由，适合起名、文案和头脑风暴。" },
+  { value: "concise", label: "简洁", hint: "短问题，直接答" },
+  { value: "balanced", label: "平衡", hint: "默认推荐" },
+  { value: "deep", label: "深度", hint: "复杂问题，展开分析" },
+  { value: "creative", label: "创意", hint: "文案、起名更发散" },
 ];
 
-export function ComposerExtras({ agents, input, onInputChange, preset, onPresetChange }: { agents: Array<{ id: string; name: string }>; input: string; onInputChange: (value: string) => void; preset: string; onPresetChange: (value: string) => void }) {
-  const [showMentions, setShowMentions] = useState(false);
+export function ComposerExtras({ preset, onPresetChange }: { preset: string; onPresetChange: (value: string) => void }) {
+  const [showPresets, setShowPresets] = useState(false);
+  const presetLabel = GENERATION_PRESETS.find((item) => item.value === preset)?.label ?? "平衡";
+
   return (
-    <div className="phase1-composer-extras">
-      <Select
-        size="small"
-        value={preset}
-        options={GENERATION_PRESETS.map((item) => ({ label: item.label, value: item.value }))}
-        onChange={onPresetChange}
-        optionRender={(option) => {
-          const item = GENERATION_PRESETS.find((p) => p.value === option.value);
-          return <div className="phase1-preset-option"><strong>{option.label}</strong><span>{item?.hint}</span></div>;
-        }}
-        title="选择回答风格"
-      />
-      <Button size="small" type="text" onClick={() => setShowMentions((v) => !v)}>@ 提及</Button>
-      {showMentions && (
-        <div className="phase1-mention-list">
-          <div className="phase1-mention-hint">点击后将直接调用该智能体处理本条需求（一次仅可指定一个）。</div>
-          {agents.slice(0, 8).map((agent) => (
+    <Popover
+      open={showPresets}
+      onOpenChange={setShowPresets}
+      trigger="click"
+      placement="topLeft"
+      content={
+        <div className="chat-preset-menu">
+          {GENERATION_PRESETS.map((item) => (
             <button
-              key={agent.id}
+              key={item.value}
               type="button"
-              title={`将调用「${agent.name}」执行本条需求`}
-              onClick={() => {
-                const cleaned = input.replace(/@\[[^\]]*?\]/g, "").trim();
-                onInputChange(`${cleaned} @[agent:${agent.id}] `);
-                setShowMentions(false);
-              }}
+              className={`chat-preset-item${item.value === preset ? " active" : ""}`}
+              onClick={() => { onPresetChange(item.value); setShowPresets(false); }}
             >
-              @{agent.name}
+              <span className="chat-preset-item-text">
+                <strong>{item.label}</strong>
+                <em>{item.hint}</em>
+              </span>
+              {item.value === preset && <span className="chat-preset-check">✓</span>}
             </button>
           ))}
         </div>
-      )}
-    </div>
+      }
+    >
+      <button type="button" className="composer-preset-trigger">
+        <ThunderboltOutlined />
+        <span className="composer-preset-name">回答方式</span>
+        <strong>{presetLabel}</strong>
+        <span className="composer-preset-caret" aria-hidden="true">⌄</span>
+      </button>
+    </Popover>
   );
 }

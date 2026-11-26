@@ -1,10 +1,9 @@
-import { useState } from "react";
 import type { ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   AppstoreOutlined, AuditOutlined, CloudServerOutlined, DatabaseOutlined,
-  MenuFoldOutlined, MenuUnfoldOutlined, MoonOutlined, RobotOutlined,
-  SettingOutlined, SunOutlined, TeamOutlined, ToolOutlined, ApiOutlined,
+  MoonOutlined, RobotOutlined, SettingOutlined, SunOutlined, TeamOutlined,
+  ToolOutlined, ApiOutlined,
 } from "@ant-design/icons";
 import { useAuth } from "../stores/auth";
 import { useThemeMode } from "../theme/ThemeProvider";
@@ -76,7 +75,7 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
   const moreItems = items.filter((item) => item.section === "more");
   const { mode: theme, toggle, locale, setLocale, t } = useThemeMode();
   const location = useLocation();
-  const [collapsed, setCollapsed] = useState(false);
+  const collapsed = true;
   const label = (item: NavItem) => item.labelKey ? t(item.labelKey) : item.label;
   const groups = [
     { key: "operations", title: t("nav.group.operations"), items: moreItems.filter((item) => item.group === "operations") },
@@ -87,14 +86,9 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
   return (
     <aside className={`app-nav-sidebar${collapsed ? " is-collapsed" : ""}`} aria-label="主导航">
       <div className="app-nav-brand">
-        <span className="chat-logo">Z</span>
-        {!collapsed && <span className="app-nav-brand-copy"><strong>Z-Torque</strong><small>极矩 · AI 工作空间</small></span>}
+        <span className="chat-logo">苍擎</span>
+        {!collapsed && <span className="app-nav-brand-copy"><small>苍擎 · AI 工作空间</small></span>}
       </div>
-      <button className="app-nav-collapse" type="button" onClick={() => setCollapsed((value) => !value)}
-        title={collapsed ? "展开导航" : "收起导航"} aria-label={collapsed ? "展开导航" : "收起导航"}>
-        {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-        {!collapsed && <span>收起导航</span>}
-      </button>
       <nav className="app-nav-list">
         <div className="app-nav-group">
           {!collapsed && <div className="app-nav-group-title">工作空间</div>}

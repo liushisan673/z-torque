@@ -1,10 +1,7 @@
 // 会话执行块（run-block）共享模块：主 Chat 页与嵌入对话页（/embed/chat）共用。
-// 抽取自 Chat.tsx（chat.md 定稿：过程在上、结论在下；逐事件完整时间线，禁止合并删减），
-// 保证两端的实时链路展示永远一致。
-// 折叠外壳用 @ant-design/x `Think`（阶段13 第 4 批）：标题行/展开动画/进行中 spinner 由组件库提供，
-// 内部步骤行仍用 .chat-run-* / .chat-tool-* / .chat-confirm-*（逐事件链路是业务语义，不外借样式）。
+// 默认只展示一行「已处理 Xs · 当前动作」；展开后也只列关键节点，完整事件按需查看。
+// 样式统一走 .chat-run-* / .chat-tool-* / .chat-confirm-*。
 import { useEffect, useMemo, useState } from "react";
-import { Think } from "@ant-design/x";
 
 import { request } from "../services/api";
 
@@ -186,45 +183,165 @@ export function waitingConfirmArgsOf(activeRun: ActiveRun | null): string | null
   return null;
 }
 
-/**
- * 工具调用/返回的紧凑卡片。
- * 借鉴 DSH：默认只显示「工具名 + 结果摘要」，参数折叠在「详情」里，
- * 避免长 JSON 把执行链路撑开、把结论挤到屏幕外。
- */
-function ToolChip({ tool }: { tool: { name: string; args?: string | null; result?: string | null } }) {
-  const [openArgs, setOpenArgs] = useState(false);
-  const hasArgs = Boolean(tool.args);
+// ---- 摘要展示：默认收敛成关键节点，完整事件不占首屏 ----
+type DigestState = ReturnType<typeof runStepState>;
+
+interface DigestStep {
+  key: string;
+  label: string;
+  detail: string;
+  state: DigestState;
+  tool?: { name: string; args?: string | null; result?: string | null };
+}
+
+// 状态/流式框架事件：结论与状态徽标已覆盖，展开链路时不再重复占位
+const QUIET_EVENTS = new Set([
+  "TASK_CREATED", "TASK_QUEUED", "TASK_STARTED",
+  "TASK_MODEL_SUCCEEDED", "TASK_SUCCEEDED", "TASK_CANCEL_REQUESTED",
+  "TASK_APPROVAL_GRANTED", "TASK_APPROVAL_REJECTED",
+  "TASK_CHILD_COMPLETED", "TASK_WAITING_CHILD",
+  "LOCAL_UNDERSTAND", "LOCAL_SUMMARY",
+  "task.snapshot", "task.status", "task.delta", "task.done", "task.result",
+  "message.delta", "message.result", "message.done", "message.error",
+]);
+
+const COMPACT_LABEL: Record<string, string> = {
+  TASK_MODEL_STARTED: "模型推理",
+  TASK_MODEL_FAILED: "模型推理失败",
+  TASK_TOOL_CALL: "调用工具",
+  TASK_TOOL_RESULT: "工具返回",
+  "task.tool_call": "调用工具",
+  "task.tool_result": "工具返回",
+  TASK_WAITING_HUMAN: "等待确认",
+  "task.waiting_human": "等待确认",
+  TASK_FAILED: "执行失败",
+  TASK_TIMEOUT: "执行超时",
+  TASK_CANCELLED: "已取消",
+  LOCAL_STOPPED: "已停止",
+  "task.error": "执行出错",
+};
+
+function clipDetail(text: string, limit = 46): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > limit ? `${clean.slice(0, limit)}…` : clean;
+}
+
+function toolNameOf(s: TaskStep): string | null {
+  const p = s.payload as Record<string, unknown> | null;
+  return p && typeof p.tool_name === "string" ? p.tool_name : null;
+}
+
+function isToolCall(s: TaskStep): boolean {
+  return s.eventType === "TASK_TOOL_CALL" || s.eventType === "task.tool_call";
+}
+
+function isToolResult(s: TaskStep): boolean {
+  return s.eventType === "TASK_TOOL_RESULT" || s.eventType === "task.tool_result";
+}
+
+function buildDigest(steps: TaskStep[], activeRun: ActiveRun | null): DigestStep[] {
+  const consumed = new Set<number>();
+  const out: DigestStep[] = [];
+
+  for (let i = 0; i < steps.length; i += 1) {
+    if (consumed.has(i)) continue;
+    const s = steps[i];
+    if (QUIET_EVENTS.has(s.eventType)) continue;
+    const name = toolNameOf(s);
+
+    // 调用 + 返回合并成一条：既保留工具名，也不让两行长 JSON 撑开链路
+    if (isToolCall(s) && name) {
+      let result: TaskStep | null = null;
+      for (let j = i + 1; j < steps.length && j <= i + 3; j += 1) {
+        const candidate = steps[j];
+        if (consumed.has(j) || !isToolResult(candidate) || toolNameOf(candidate) !== name) continue;
+        result = candidate;
+        consumed.add(j);
+        break;
+      }
+      const failed = Boolean(result && (result.eventType.includes("FAILED") || toolCardOf(result)?.result?.includes("失败")));
+      const state: DigestState = result
+        ? (failed ? "fail" : "done")
+        : runStepState(s, i, steps.length, activeRun);
+      out.push({
+        key: `tool-${s.seq}`,
+        label: COMPACT_LABEL[s.eventType] ?? "调用工具",
+        detail: `${name}${result ? (failed ? " · 失败" : " · 完成") : " · 进行中"}`,
+        state,
+        tool: { name, args: toolCardOf(s)?.args, result: result ? toolCardOf(result)?.result : null },
+      });
+      continue;
+    }
+
+    if (isToolResult(s) && name) {
+      const failed = Boolean(s.eventType.includes("FAILED") || toolCardOf(s)?.result?.includes("失败"));
+      out.push({
+        key: `result-${s.seq}`,
+        label: COMPACT_LABEL[s.eventType] ?? "工具返回",
+        detail: `${name}${failed ? " · 失败" : " · 完成"}`,
+        state: failed ? "fail" : runStepState(s, i, steps.length, activeRun),
+        tool: { name, result: toolCardOf(s)?.result },
+      });
+      continue;
+    }
+
+    const label = COMPACT_LABEL[s.eventType] ?? eventLabel(s.eventType);
+    const raw = runStepDesc(s) || (s.summary && s.summary !== eventLabel(s.eventType) ? s.summary : "");
+    const detail = clipDetail(raw);
+    const state = runStepState(s, i, steps.length, activeRun);
+    const prev = out[out.length - 1];
+    // 连续同类进度（多轮推理）只保留最新一条，避免同一件事刷屏
+    if (prev && !prev.tool && prev.label === label && state !== "active") {
+      prev.detail = detail || prev.detail;
+      prev.state = state;
+      continue;
+    }
+    out.push({ key: `step-${s.seq}`, label, detail, state });
+  }
+  return out;
+}
+
+function headlineOf(digest: DigestStep[], activeRun: ActiveRun): string {
+  if (activeRun.waiting || activeRun.status === "WAITING_HUMAN") {
+    const tool = waitingToolNameOf(activeRun);
+    return tool ? `等待确认 · ${tool}` : "等待确认";
+  }
+  const current = [...digest].reverse().find((s) => s.state === "active" || s.state === "waiting" || s.state === "fail")
+    ?? digest[digest.length - 1];
+  if (!current) return TERMINAL.has(activeRun.status) ? "无关键步骤" : "正在准备";
+  return clipDetail([current.label, current.detail].filter(Boolean).join(" · "), 30);
+}
+
+/** 工具详情：折叠态只显示工具名，参数/结果点「详情」才展开。 */
+function ToolChip({ tool }: { tool: NonNullable<DigestStep["tool"]> }) {
+  const [open, setOpen] = useState(false);
+  const hasDetail = Boolean(tool.args || tool.result);
   return (
-    <div className="chat-tool-chip">
-      <div className="chat-tool-chip-head">
-        <span className="chat-tool-tag">工具</span>
+    <span className="chat-tool-chip">
+      <span className="chat-tool-chip-head">
         <span className="chat-tool-chip-name">{tool.name}</span>
-        {hasArgs && (
+        {hasDetail && (
           <button
             className="chat-tool-chip-toggle"
             type="button"
-            onClick={() => setOpenArgs((v) => !v)}
-            aria-expanded={openArgs}
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
           >
-            {openArgs ? "收起参数" : "参数"}
+            {open ? "收起" : "详情"}
           </button>
         )}
-      </div>
-      {tool.result && <div className="chat-tool-result">{tool.result}</div>}
-      {openArgs && tool.args && <pre className="chat-tool-args">{tool.args}</pre>}
-    </div>
+      </span>
+      {open && (
+        <span className="chat-tool-detail">
+          {tool.args && <pre className="chat-tool-args">参数：{tool.args}</pre>}
+          {tool.result && <pre className="chat-tool-result">结果：{tool.result}</pre>}
+        </span>
+      )}
+    </span>
   );
 }
 
-/**
- * 内联执行链路（借鉴 DSH 的 DisclosureRow）：
- *
- * - 折叠时只占一行：状态 + 步数 + 已进行时间，右侧 chevron 提示可展开；
- * - 执行中自动展开，进入终态后自动收起（结论回到首屏，不用滚）；
- * - 用户手动点过之后不再自动接管，避免"想看着却被自动收起"；
- * - 等待人工确认时保持展开，因为批准按钮在块内；
- * - 执行中每秒刷新「已进行 Ns」，用户能判断是卡住还是在跑（借鉴 DSH 的执行行）。
- */
+// 执行中每秒刷新「已进行 Ns」，用户不用展开链路也能判断是否卡住
 function useElapsed(startedAt: number | null, active: boolean): string {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -238,99 +355,121 @@ function useElapsed(startedAt: number | null, active: boolean): string {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
 }
 
+/**
+ * 内联执行链路：
+ * - 默认折叠成一行「已处理 Xs · 当前动作」，结论不被过程挤走；
+ * - 等待人工确认自动展开（审批按钮在块内），其余状态交给用户点开；
+ * - 展开后只列关键节点，工具参数/结果再折叠一层，必要时可查看完整事件。
+ */
 export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen }: {
   activeRun: ActiveRun;
   taskError: { message: string; code: string | null } | null;
   onResolve: (approved: boolean) => void;
-  /** 显式指定初始展开态（历史链路点开时用）；缺省按运行态自动决定 */
+  /** 显式指定初始展开态（历史链路点开时用）；缺省按等待审批决定 */
   initiallyOpen?: boolean;
 }) {
   const runStatusInfo = useMemo(() => runStatusInfoOf(activeRun), [activeRun]);
   const waitingToolName = useMemo(() => waitingToolNameOf(activeRun), [activeRun]);
   const waitingConfirmArgs = useMemo(() => waitingConfirmArgsOf(activeRun), [activeRun]);
+  const digest = useMemo(() => buildDigest(activeRun.steps, activeRun), [activeRun]);
+  const headline = useMemo(() => headlineOf(digest, activeRun), [digest, activeRun]);
 
-  // 运行中 / 等待确认 → 展开；终态 → 收起
   const live = runStatusInfo.cls === "run" || runStatusInfo.cls === "wait";
-  const [open, setOpen] = useState(initiallyOpen ?? true);
+  const autoOpen = activeRun.waiting || activeRun.status === "WAITING_HUMAN";
+  const [open, setOpen] = useState(initiallyOpen ?? autoOpen);
   const [userToggled, setUserToggled] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   // 新任务到来时恢复自动接管
   useEffect(() => {
     setUserToggled(false);
+    setShowAll(false);
   }, [activeRun.taskId]);
 
   useEffect(() => {
     if (userToggled) return;
-    setOpen(initiallyOpen ?? live);
-  }, [live, userToggled, initiallyOpen]);
+    setOpen(initiallyOpen ?? autoOpen);
+  }, [autoOpen, initiallyOpen, userToggled]);
 
-  const stepCount = activeRun.steps.length;
   const elapsed = useElapsed(activeRun.startedAt ?? null, live);
-  const meta = [stepCount === 0 ? "准备中" : `${stepCount} 步`, elapsed].filter(Boolean).join(" · ");
-
+  const timeText = elapsed ? `已处理 ${elapsed}` : "执行过程";
   const errorText = taskError ? `${taskError.message}${taskError.code ? `（${taskError.code}）` : ""}` : "";
 
   return (
     <div className={`chat-run-block ${runStatusInfo.cls}`}>
-      {/* 折叠外壳用 antd X Think：标题行、展开动画、进行中 spinner 由组件库承担 */}
-      <Think
-        className="chat-run-think"
-        title={
-          <span className="chat-run-head">
-            <span className="chat-run-name">执行过程</span>
-            <span className={`chat-run-status ${runStatusInfo.cls}`}>{runStatusInfo.label}</span>
-            <span className="chat-run-meta">{meta}</span>
-          </span>
-        }
-        loading={live}
-        blink={live}
-        expanded={open}
-        onExpand={(next) => {
+      <button
+        className="chat-run-toggle"
+        type="button"
+        onClick={() => {
           setUserToggled(true);
-          setOpen(next);
+          setOpen((v) => !v);
         }}
-        // 必须保持默认 destroyOnHidden=true：X 的 CSSMotion 收敛后只挂 leavedClassName
-        // （ant-think-content-hidden），而 @ant-design/x 并没有为它生成 display:none，
-        // 内容会重新显形 —— 表现就是"点一下能展开、再点收不起来"。卸载才是可靠的收起。
+        aria-expanded={open}
       >
-        {stepCount === 0 ? (
-          <div className="chat-run-empty"><span className="spinner" /> 正在创建任务…</div>
-        ) : (
-          <ol className="chat-run-steps">
-            {activeRun.steps.map((s, idx) => {
-              const cls = runStepState(s, idx, stepCount, activeRun);
-              const tool = toolCardOf(s);
-              return (
-                <li key={s.seq} className={`chat-run-step ${cls}`}>
-                  <span className={`chat-run-step-dot ${cls}`} aria-hidden="true" />
+        <span className={`chat-run-dot ${runStatusInfo.cls}`} aria-hidden="true" />
+        <span className="chat-run-toggle-label">{timeText}</span>
+        <span className="chat-run-headline">{headline}</span>
+        <span className={`chat-run-status ${runStatusInfo.cls}`}>{runStatusInfo.label}</span>
+        <span className={`chat-run-chevron ${open ? "open" : ""}`} aria-hidden="true" />
+      </button>
+
+      {open && (
+        <div className="chat-run-body">
+          {digest.length === 0 ? (
+            <div className="chat-run-empty">
+              {live ? <><span className="spinner" /> 正在准备…</> : "无关键步骤，可查看完整事件"}
+            </div>
+          ) : (
+            <ol className="chat-run-steps">
+              {digest.map((s) => (
+                <li key={s.key} className={`chat-run-step ${s.state}`}>
+                  <span className={`chat-run-step-dot ${s.state}`} aria-hidden="true" />
                   <div className="chat-run-step-main">
-                    <div className="chat-run-step-row">
-                      <span className="chat-run-label">{eventLabel(s.eventType)}</span>
-                      <span className="chat-run-time">{s.time}</span>
-                    </div>
-                    {runStepDesc(s) && <div className="chat-run-desc">{runStepDesc(s)}</div>}
-                    {tool && <ToolChip tool={tool} />}
+                    <span className="chat-run-label">{s.label}</span>
+                    {s.detail && (
+                      <>
+                        <span className="chat-run-sep">·</span>
+                        <span className="chat-run-desc">{s.detail}</span>
+                      </>
+                    )}
+                    {s.tool && <ToolChip tool={s.tool} />}
                   </div>
                 </li>
-              );
-            })}
-          </ol>
-        )}
+              ))}
+            </ol>
+          )}
 
-        {/* 写入类工具等待审批：确认框内联在执行块中（批准/拒绝） */}
-        {activeRun.waiting && (
-          <div className="chat-run-confirm">
-            <p>工具「{waitingToolName ?? "未知工具"}」为写入操作，需人工审批后才会执行。</p>
-            {waitingConfirmArgs && <pre className="chat-confirm-args">{waitingConfirmArgs}</pre>}
-            <div className="chat-confirm-actions">
-              <button className="chat-btn-confirm" type="button" onClick={() => onResolve(true)}>批准执行</button>
-              <button className="chat-btn-reject" type="button" onClick={() => onResolve(false)}>拒绝</button>
+          {activeRun.steps.length > digest.length && (
+            <button className="chat-run-more" type="button" onClick={() => setShowAll((v) => !v)}>
+              {showAll ? "收起完整事件" : `查看完整事件（${activeRun.steps.length}）`}
+            </button>
+          )}
+          {showAll && (
+            <ol className="chat-run-raw">
+              {activeRun.steps.map((s) => (
+                <li key={`raw-${s.seq}`}>
+                  <span>{eventLabel(s.eventType)}</span>
+                  <span>{clipDetail(s.summary, 80)}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+
+          {/* 写入类工具等待审批：确认框内联在执行块中（批准/拒绝） */}
+          {activeRun.waiting && (
+            <div className="chat-run-confirm">
+              <p>工具「{waitingToolName ?? "未知工具"}」为写入操作，需人工审批后才会执行。</p>
+              {waitingConfirmArgs && <pre className="chat-confirm-args">{waitingConfirmArgs}</pre>}
+              <div className="chat-confirm-actions">
+                <button className="chat-btn-confirm" type="button" onClick={() => onResolve(true)}>批准执行</button>
+                <button className="chat-btn-reject" type="button" onClick={() => onResolve(false)}>拒绝</button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {errorText && <div className="chat-run-error">{errorText}</div>}
-      </Think>
+          {errorText && <div className="chat-run-error">{errorText}</div>}
+        </div>
+      )}
 
       {/* 折叠态也要能看见失败原因，否则用户不知道"为什么没有结果" */}
       {!open && errorText && (

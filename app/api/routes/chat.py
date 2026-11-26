@@ -1,7 +1,9 @@
 from datetime import datetime, timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,6 +25,7 @@ from app.services.chat_application import (
     resolve_agent_mentions,
     resolve_chat_model_name,
 )
+from app.services.chat_document import create_chat_document
 from app.services.context_builder import build_agent_system_prompt, build_context
 from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens
@@ -132,3 +135,36 @@ async def chat_stream(payload: ChatRequest, request: Request, idempotency_key: s
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Trace-ID": request.state.trace_id},
     )
+
+
+class DocumentExportRequest(BaseModel):
+    conversation_id: UUID
+    format: str = "md"
+    filename: str = "document"
+    content: str
+    purpose: str | None = None
+    risk: str | None = None
+
+
+@router.post("/export-document", summary="会话内置文档输出（md/pdf/docx）")
+async def export_document(payload: DocumentExportRequest, request: Request, ctx=Depends(get_security_context), db: Session = Depends(get_db)):
+    """把用户填写的内容生成文件变更提案；用户 Keep 后才落地为会话附件。"""
+    settings = get_settings()
+    result = create_chat_document(
+        db,
+        tenant_id=ctx.tenant_id,
+        user_id=ctx.user_id,
+        conversation_id=payload.conversation_id,
+        object_store=request.app.state.port_registry.get("object.store"),
+        max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+        max_extracted_chars=settings.file_max_extracted_text,
+        fmt=payload.format,
+        filename=payload.filename,
+        content=payload.content,
+        purpose=payload.purpose,
+        risk=payload.risk,
+        auto_keep=settings.file_change_auto_keep,
+        trace_id=request.state.trace_id,
+    )
+    db.commit()
+    return success_response(request, result)

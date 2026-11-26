@@ -170,6 +170,11 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
     # 校验侧见 services/citation_guard.py；不在提示词里靠"请不要编造"软约束。
     citation_rule = "[引用约束] 使用检索片段或文件附件回答时，每个事实必须标注 [chunk:<chunk_id>] 或 [source:<path>#page=<n>/sheet=<s>#row=<r>#col=<c>]；未标注引用将被系统判定为未通过校验。"
     system_prompt = (system_prompt + "\n\n" if system_prompt else "") + citation_rule
+    document_rule = (
+        "[文件变更 ChangeSet] 禁止直接写/改/删文件。输出或改文档时调用 output_document 提交提案并填 purpose/risk，"
+        "等待用户 Keep/Cancel；回退也先生成反向提案。只说明目的与风险，不贴大段 diff。"
+    )
+    system_prompt = (system_prompt + "\n\n") + document_rule
     # 站内 A2A：系统智能体（用户设为默认，或未设置时的默认父）必须知道可把需求派发给专业智能体。
     from app.models import Agent as _Agent
 
@@ -183,6 +188,7 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
             "本版本一次请求仅允许一次站内 A2A 派发；不要在同一轮或后续轮次重复调用路由工具。"
             "没有匹配 Agent 时，应直接说明能力边界或向用户澄清，不得调用无关 Agent；不得虚构已调用或执行结果。"
             "收到 Agent 返回后，必须依据其结构化 status 判断成功或失败：status=FAILED 或 SKIPPED 时不得将其描述为成功完成；只总结返回内容，不得编造细节。"
+            "若用户的目标包含输出文档文件，收到 Agent 返回的内容后必须再调用 output_document 提交文件变更提案，不能只把内容贴在回复里。"
         )
         system_prompt = (system_prompt + "\n\n") + dispatch_rule
     return system_prompt

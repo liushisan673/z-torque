@@ -907,6 +907,102 @@ Chat 头部现在直接写着「外部工具 可用 / 知识检索 可用 / 模�
 - `ruff check .`：**All checks passed**。
 - 无迁移，alembic head 仍为 `b1c2d3e4f5a6`。
 
+---
+
+## 会话文件变更审查：Git 风格 diff + Keep / Undo — 已实现，待用户前端验收
+
+日期：2026-11-26
+状态：真实补丁产物接入前端审查；全量 pytest 752 passed / 24 skipped / 6 failed（失败均为既有工具目录/MCP 用例，与本项无关），相关 ruff 全绿，`npm run build` 通过；浏览器实测：打开抽屉、空态、样本变更 diff、统一/并排切换、Keep、Undo 真实写回、自定义对比 Tab 均正常。本地后端已按原命令重启并升级迁移到 `a6d2e8f4b7c1`，验证用临时数据已清理。
+
+### 三项最高约束遵守情况
+1. 单机安装：按会话 + 任务属主过滤，无租户矩阵、无跨租户逻辑。
+2. 内核 21 Port 冻结：未新增 Port；撤销复用 `SkillGateway.apply_patch`，只加 `record_artifact=False` 开关。
+3. exe 打包：无新 Python/Node 依赖；前端 diff 为自研行级 LCS，未引入 `diff/monaco/shiki`。
+
+### 改动文件清单
+新增：
+- `alembic/versions/a6d2e8f4b7c1_patch_artifact_review_state.py`：`zr_patch_artifact` 增 `base_dir / review_state / reviewed_at`。
+- `console/src/components/PatchReview.tsx`：变更文件列表、统一/并排 diff、Keep/Undo、刷新与状态标签。
+- `tests/integration/test_patch_artifact_review.py`：真实 HTTP 链路验收（列变更 → 详情 → Keep → Undo → 重复撤销拒绝）。
+
+修改：
+- `app/models/patch_artifact.py`：新增审查状态常量与三列。
+- `app/kernel/skill_gateway.py`：写入 artifact 时保存 `base_dir`；新增 `record_artifact=False` 供撤销复用，不造反向产物。
+- `app/api/routes/workspace.py`：新增 `/workspace/patch-artifacts` 列表、详情、`keep`、`undo`；审计 `PATCH_KEEP` / `PATCH_UNDO` 仍 metadata-only。
+- `console/src/types/index.ts`：新增 `PatchArtifactSummary / PatchArtifactDetail / PatchReviewState`。
+- `console/src/components/Phase1Panels.tsx`：`文件对比` 改为 `文件变更` 抽屉，默认审查视图；原手动对比保留为「自定义对比」Tab。
+- `console/src/index.css`：审查布局与 diff 样式。
+
+### 关键设计决定
+- 旧 `docs/question.md` 中“移除代码 Diff / 不暴露 diff 术语”以本次用户明确需求为准被覆盖；自定义对比保留但不再作为默认入口。
+- Undo 是真实写回：交换 `before_text/after_text`，`expected_hash = content_hash`；哈希冲突返回 409，最新版本之外/已过期/已撤销不允许撤销。
+- 24 小时 TTL 后未处理项显示「已过期」，不可撤销；审计不写入 diff 正文。
+- alembic head 更新为 `a6d2e8f4b7c1`。
+
+---
+
+## 会话文件变更升级为同名文件版本审查（Git 风格，支持各类输出文件）— 已实现，待用户前端验收
+
+日期：2026-11-26
+状态：用户澄清需求为「智能体再次输出同名文件（如 Word 优化版）应自动触发文件变更对比」，不是仅文本 patch；本轮补全文件版本链路。相关 ruff 全绿、`npm run build` 通过、相关集成测试 10 passed；全量 pytest 753 passed / 24 skipped / 6 failed（失败均为既有工具目录/MCP 用例，与本项无关）。浏览器实测同名 docx 两版自动生成变更、统一 diff、Keep、Undo 真实恢复上一版均正常。测试用文件与记录已清理，alembic head 更新为 `f7c2a9d4e6b8`，本地后端已重启。
+
+### 三项最高约束遵守情况
+1. 单机安装：按会话 + 用户属主过滤，无租户矩阵。
+2. 内核 21 Port 冻结：未新增 Port；文档输出仍走既有 `output_document` / `create_chat_document`，只在落库后追加版本记录。
+3. exe 打包：无新 Python/Node 依赖；diff 统计用标准库 `difflib`，前端用自研行级 LCS。
+
+### 改动文件清单
+新增：
+- `app/models/file_version_change.py` + `alembic/versions/f7c2a9d4e6b8_file_version_change.py`：`zr_file_version_change` 表，保存同名文件前后版本的可读文本、增删行数、审查状态。
+- `app/services/text_diff.py`：共享行级增删统计。
+- `tests/integration/test_file_version_change.py`：同名 docx 两次输出 → 列变更 → 详情 → Keep → Undo → 上一版恢复验收。
+
+修改：
+- `app/services/chat_document.py`：同名文件再次输出时，用 `extracted_text` 生成版本变更；审计只记元数据。
+- `app/services/execution_loop.py`：智能体输出文件时把 `task_id` 传入版本变更。
+- `app/api/routes/workspace.py`：新增 `/workspace/file-changes` 列表/详情/`keep`/`undo`；补丁产物 payload 补 `source` 字段。
+- `console/src/types/index.ts`、`console/src/components/PatchReview.tsx`、`console/src/index.css`：前端合并展示「文件版本」和「文本补丁」两类变更，按来源分发 Keep/Undo。
+
+### 关键设计决定
+- 触发条件：同一会话、同一用户、**同名文件**再次由 `output_document` / `chat/export-document` 输出，且正文不同；自动产生一条文件版本变更。旧文件本身不删除。
+- 对比对象是文件的 **extracted_text**（docx/pdf/md/txt 均为可读文本），不是二进制字节；因此可覆盖各类文件而非仅代码。
+- Keep：仅标记采纳，不改附件状态。
+- Undo：把新版本 `File.status` 置为 `DELETED`，上一版自动成为当前可见文件；非最新版本不可撤销。
+- 原「自定义对比」Tab 保持不变；原文本补丁变更仍保留，和文件版本变更在同一列表混合展示。
+
+---
+
+## ChangeSet 提案优先改造 + 文字类 diff 视图优化 — 已实现，待用户前端验收
+
+日期：2026-11-26
+状态：按用户给出的 ChangeSet 规则重做文件变更语义：智能体输出文档不再直接写盘，先生成提案，用户 Keep 才落地；Cancel 不写盘；回退基于历史快照生成反向提案后再确认。浏览器实测提案列表、目的/风险、文字化 diff、Keep 落地、回退提案均正常。相关 ruff 全绿，`npm run build` 通过，相关集成测试 11 passed；全量 pytest 754 passed / 24 skipped / 5 failed（剩余失败均为内置 output_document 与既有工具映射断言冲突，本轮未新增失败）。
+
+### 三项最高约束遵守情况
+1. 单机安装：按会话 + 用户属主过滤，无租户矩阵。
+2. 内核 21 Port 冻结：未新增 Port；提案服务只复用既有 object.store、document_export、audit。
+3. exe 打包：无新 Python/Node 依赖；提示词压缩后通过技能注入硬预算测试。
+
+### 改动文件清单
+新增：
+- `app/services/file_change_review.py`：ChangeSet 服务（propose / keep 落地 / cancel / 反向回退提案）。
+
+修改：
+- `app/models/file_version_change.py` + `alembic/versions/f7c2a9d4e6b8_file_version_change.py`：增加 `kind / fmt / purpose / risk / message_id` 与 `CANCELLED` 状态。
+- `app/services/chat_document.py`：文档输出改为生成提案，默认不写对象存储、不建 `File` 附件。
+- `app/services/context_builder.py`、`app/services/tool_mapping_builder.py`：注入精简 ChangeSet 规则，工具参数加 `purpose / risk`，说明改为“先提案后 Keep”。
+- `app/services/execution_loop.py`、`app/api/routes/chat.py`：传递任务 ID、目的、风险与旁路开关；导出接口同步提案语义。
+- `app/api/routes/workspace.py`：`/file-changes` 增加 `/cancel`，`/undo` 改为生成反向提案；`/keep` 才写盘并创建/切换附件。
+- `console/src/components/PatchReview.tsx`、`console/src/types/index.ts`、`console/src/components/MessageBubble.tsx`、`console/src/index.css`：采纳/放弃/回退按钮、目的与风险展示、消息提案标签、文字类 diff 样式（普通字体、默认隐藏行号、业务化变更标题）。
+- `tests/integration/test_file_version_change.py`：按提案语义重写验收。
+
+### 关键设计决定
+- Keep 前：`zr_file_version_change` 有提案正文，但对象存储和 `zr_file` 不变；消息气泡显示“变更提案 · 文件名”。
+- Keep 后：才调用 `build_document` + `object.store.put` 创建 `File`，并把助手消息切换为可下载附件。
+- Cancel：只标记 `CANCELLED`，原文件不变。
+- 回退：`/undo` 只生成 `ROLLBACK` 提案，仍需用户 Keep 才把当前版本置为 `DELETED` 并恢复上一版。
+- 旁路快速模式：`file_change_auto_keep` 配置默认 false，显式开启后才跳过确认。
+- diff 视图改为面向文字文档：默认无行号、普通字体、自动换行，保留统一/并排视图和可选行号。
+
 ### 下一步
 阶段五：i18n、主题/背景/字号进阶（§四第 6 项）。主题体系已有 `ThemeProvider`/`tokens.ts`/`antdTheme.ts` 可复用；需补轻量中英 i18n、用户可选背景/字号与统一设置页；不引入新 npm 依赖（`package.json` 不动），不破坏 antd 6 + ConfigProvider。
 

@@ -33,7 +33,7 @@ MEDIA_KIND_AUDIO = "audio"
 MEDIA_KIND_VIDEO = "video"
 MEDIA_KINDS = frozenset({MEDIA_KIND_IMAGE, MEDIA_KIND_FILE, MEDIA_KIND_AUDIO, MEDIA_KIND_VIDEO})
 
-_DOCUMENT_SUFFIXES = frozenset({".pdf", ".txt", ".md", ".csv", ".xlsx"})
+_DOCUMENT_SUFFIXES = frozenset({".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"})
 _IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
 _AUDIO_SUFFIXES = frozenset({".mp3", ".wav", ".ogg", ".amr", ".m4a"})
 _VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm"})
@@ -50,6 +50,7 @@ _SUFFIX_BY_MIME = {
     "text/markdown": ".md",
     "text/csv": ".csv",
     "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -70,6 +71,7 @@ _MIME_BY_SUFFIX = {
     ".md": "text/markdown",
     ".csv": "text/csv",
     ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -106,7 +108,7 @@ def signature_matches(suffix: str, head: bytes) -> bool:
         return True
     if suffix == ".pdf":
         return head.startswith(b"%PDF")
-    if suffix == ".xlsx":
+    if suffix in {".docx", ".xlsx"}:
         return head.startswith(b"PK\x03\x04")
     if suffix in {".jpg", ".jpeg"}:
         return head.startswith(b"\xff\xd8\xff")
@@ -178,7 +180,10 @@ def detect_suffix(head: bytes, kind: str, mime_type: str | None) -> str | None:
     if head.startswith(b"%PDF"):
         return ".pdf" if kind == MEDIA_KIND_FILE else None
     if head.startswith(b"PK\x03\x04"):
-        return ".xlsx" if kind == MEDIA_KIND_FILE else None
+        if kind != MEDIA_KIND_FILE:
+            return None
+        hinted = _SUFFIX_BY_MIME.get((mime_type or "").lower())
+        return hinted if hinted in {".docx", ".xlsx"} else ".xlsx"
     if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WAVE":
         return ".wav" if kind == MEDIA_KIND_AUDIO else None
     if head.startswith(b"OggS"):

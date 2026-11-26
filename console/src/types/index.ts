@@ -680,6 +680,51 @@ export interface FileStatus {
   error: string | null;
 }
 
+// ---- File change review ----
+export type PatchReviewState = "PENDING" | "KEPT" | "CANCELLED" | "UNDONE" | "EXPIRED";
+export type FileChangeSource = "patch" | "file";
+export type FileChangeKind = "CREATE" | "UPDATE" | "ROLLBACK" | null;
+
+export interface PatchArtifactSummary {
+  id: string;
+  source: FileChangeSource;
+  task_id: string | null;
+  path: string;
+  content_hash: string;
+  review_state: PatchReviewState;
+  kind?: FileChangeKind;
+  fmt?: string | null;
+  purpose?: string | null;
+  risk?: string | null;
+  created_at: string;
+  expires_at: string | null;
+  additions: number;
+  deletions: number;
+  can_undo: boolean;
+  can_keep?: boolean;
+  can_cancel?: boolean;
+  can_rollback?: boolean;
+}
+
+export interface PatchArtifactDetail extends PatchArtifactSummary {
+  before_text: string;
+  after_text: string;
+  base_dir: string | null;
+}
+
+export interface FileVersionChangeSummary extends PatchArtifactSummary {
+  name: string;
+  media_type: string;
+}
+
+export interface FileVersionChangeDetail extends PatchArtifactDetail {
+  name: string;
+  media_type: string;
+}
+
+export type ReviewItem = PatchArtifactSummary | FileVersionChangeSummary;
+export type ReviewDetail = PatchArtifactDetail | FileVersionChangeDetail;
+
 // ---- Confirmation ----
 export interface Confirmation {
   id: string;

@@ -12,6 +12,10 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import GUID, TenantModel
 
+PATCH_REVIEW_PENDING = "PENDING"
+PATCH_REVIEW_KEPT = "KEPT"
+PATCH_REVIEW_UNDONE = "UNDONE"
+
 
 class PatchArtifact(TenantModel):
     __tablename__ = "zr_patch_artifact"
@@ -22,3 +26,6 @@ class PatchArtifact(TenantModel):
     after_text: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    base_dir: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    review_state: Mapped[str] = mapped_column(String(16), nullable=False, default=PATCH_REVIEW_PENDING, server_default=PATCH_REVIEW_PENDING)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

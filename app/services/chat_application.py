@@ -120,11 +120,24 @@ def resolve_agent_mentions(db: Session, *, tenant_id: UUID, mentions: list[dict]
         return content, None, None
     if len(mentions) != 1 or mentions[0].get("type") != "agent":
         raise ApiError("AI_MENTION_INVALID", "只支持单条智能体提及", 400)
-    try:
-        target_agent_id = UUID(str(mentions[0].get("id") or ""))
-    except (ValueError, AttributeError) as exc:
-        raise ApiError("AI_MENTION_INVALID", "智能体提及格式不正确", 400) from exc
-    agent = db.get(Agent, target_agent_id)
+    raw_id = mentions[0].get("id")
+    raw_name = str(mentions[0].get("name") or "").strip()
+    if raw_id:
+        try:
+            target_agent_id = UUID(str(raw_id))
+        except (ValueError, AttributeError) as exc:
+            raise ApiError("AI_MENTION_INVALID", "智能体提及格式不正确", 400) from exc
+        agent = db.get(Agent, target_agent_id)
+    elif raw_name:
+        candidates = db.scalars(
+            select(Agent).where(Agent.tenant_id == tenant_id, Agent.name == raw_name, Agent.status == "ACTIVE")
+        ).all()
+        if len(candidates) != 1:
+            raise ApiError("AI_MENTION_AGENT_NOT_FOUND", "提及的智能体名称不唯一或不可用", 404)
+        agent = candidates[0]
+        target_agent_id = agent.id
+    else:
+        raise ApiError("AI_MENTION_INVALID", "智能体提及格式不正确", 400)
     if agent is None or agent.tenant_id != tenant_id or agent.status != "ACTIVE" or agent.current_published_version_id is None:
         raise ApiError("AI_MENTION_AGENT_NOT_FOUND", "提及的智能体不可用", 404)
     version = db.get(AgentVersion, agent.current_published_version_id)

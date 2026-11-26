@@ -6,7 +6,7 @@
 //   · 会话列表      → `Conversations`（creation 新建 + menu 更多操作）
 //   · 首启示例提问  → `Prompts`
 //   · 待发送附件    → `Attachments`（file-card 展示 + 移除）
-//   · 执行链路折叠  → `Think`（见 pages/chatRun.tsx，与 /embed/chat 共用）
+//   · 执行链路折叠  → 摘要条 + 关键节点（见 pages/chatRun.tsx，与 /embed/chat 共用）
 // 业务逻辑（流式、任务事件、归档、记忆摘要、任务面板）保持原样，只替换呈现层。
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ComponentRef } from "react";
@@ -64,10 +64,14 @@ const RENDER_STEP = 50;
 const CONV_KEY = "zt.chat.conversationId";
 const AGENT_KEY = "zt.chat.agentId";
 
-// @智能体：把结构化提及从输入框文本里分离，前端展示干净文本，后端按 mentions 直调目标智能体
-function parseAgentMentions(text: string): { text: string; mentions: Array<{ type: "agent"; id: string }> } {
-  const found = [...text.matchAll(/@\[agent:([0-9a-f-]{36})\]/gi)].map((match) => ({ type: "agent" as const, id: match[1] }));
-  const cleaned = text.replace(/@\[[^\]]*?\]/g, "").replace(/\s+/g, " ").trim();
+// @智能体：输入框展示的是智能体名称，发送时解析为结构化 mentions 并从正文移除
+function parseAgentMentions(text: string, agents: Array<{ id: string; name: string }>): { text: string; mentions: Array<{ type: "agent"; name: string }> } {
+  const names = agents.map((agent) => agent.name).filter(Boolean).sort((a, b) => b.length - a.length);
+  if (names.length === 0) return { text, mentions: [] };
+  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|");
+  const pattern = new RegExp(`@(${escaped})(?=\\s|$)`, "g");
+  const found = [...text.matchAll(pattern)].map((match) => ({ type: "agent" as const, name: match[1] }));
+  const cleaned = text.replace(pattern, "").replace(/\s+/g, " ").trim();
   return { text: cleaned || text, mentions: found.slice(0, 1) };
 }
 
@@ -110,6 +114,8 @@ export function ChatPage() {
   // 系统自带智能体：新会话永远绑定到它，与当前查看的会话所绑定的智能体解耦
   const [systemAgentId, setSystemAgentId] = useState<string>("");
   const [generationPreset, setGenerationPreset] = useState("balanced");
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -207,6 +213,24 @@ export function ChatPage() {
   const senderRef = useRef<SenderHandle | null>(null);
   // 能力条「去上传资料」复用输入框的附件选择器，避免再造一个上传入口
   const uploadInputRef = useRef<HTMLInputElement | null>(null);
+
+  function handleComposerChange(next: string) {
+    setInput(next);
+    const match = next.match(/(?:^|\s)@([^\s@]*)$/);
+    if (match) {
+      setMentionQuery(match[1]);
+      setMentionOpen(true);
+    } else {
+      setMentionOpen(false);
+      setMentionQuery("");
+    }
+  }
+
+  function selectMention(agent: { name: string }) {
+    setInput((prev) => prev.replace(/@[^\s@]*$/, `@${agent.name} `));
+    setMentionOpen(false);
+    setMentionQuery("");
+  }
 
   const loadAgentsAndConversations = useCallback(async () => {
     setError(null);
@@ -903,7 +927,7 @@ export function ChatPage() {
   async function sendMessage(opts?: { text?: string; parts?: { file_id: string }[]; fromRetry?: boolean }) {
     const fromRetry = opts?.fromRetry === true;
     const rawText = (opts?.text ?? input).trim();
-    const { text, mentions } = parseAgentMentions(rawText);
+    const { text, mentions } = parseAgentMentions(rawText, agents);
     if (!text || sending) return;
     setError(null);
     setModelMissing(false);
@@ -1656,13 +1680,6 @@ export function ChatPage() {
               files.slice(0, 3).forEach((file) => void handleUpload(file));
             }}
           >
-            <ComposerExtras
-              agents={agents.filter((agent) => agent.current_published_version_id && agent.id !== agentId)}
-              input={input}
-              onInputChange={setInput}
-              preset={generationPreset}
-              onPresetChange={setGenerationPreset}
-            />
             {sendQueue.length > 0 && (
               <div className="chat-queue-list">
                 <span className="chat-queue-title">排队中：{sendQueue.length}（刷新页面后不保留）</span>
@@ -1674,12 +1691,29 @@ export function ChatPage() {
                 ))}
               </div>
             )}
+            {mentionOpen && (
+              <div className="chat-mention-popover">
+                <div className="chat-mention-title">输入 @ 选择智能体（一次仅可指定一个）</div>
+                {agents
+                  .filter((agent) => agent.current_published_version_id && agent.name.toLowerCase().includes(mentionQuery.toLowerCase()))
+                  .slice(0, 8)
+                  .map((agent) => (
+                    <button key={agent.id} type="button" onClick={() => selectMention(agent)}>
+                      @{agent.name}
+                    </button>
+                  ))}
+                {agents.filter((agent) => agent.current_published_version_id && agent.name.toLowerCase().includes(mentionQuery.toLowerCase())).length === 0 && (
+                  <div className="chat-mention-empty">没有匹配的智能体</div>
+                )}
+              </div>
+            )}
             <Sender
               ref={senderRef}
               className="chat-sender"
               value={input}
-              onChange={(next) => setInput(next)}
+              onChange={handleComposerChange}
               onSubmit={(text) => {
+                setMentionOpen(false);
                 if (!text.trim()) return;
                 if (busy) {
                   const parts = attachments.map((file) => ({ file_id: file.id }));
@@ -1696,35 +1730,38 @@ export function ChatPage() {
               disabled={agents.length === 0}
               placeholder="输入消息，Enter 发送，Shift+Enter 换行"
               header={
-                attachments.length > 0 || (uploading && uploadPercent !== null) ? (
-                  <div className="chat-pending">
-                    {/* 附件上传真实进度：XHR progress 事件驱动，上传完成后服务端解析期间显示「处理中」 */}
-                    {uploading && uploadPercent !== null && (
-                      <div className="chat-upload-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={uploadPercent}>
-                        <Progress percent={uploadPercent} size="small" showInfo={false} status={uploadPercent < 100 ? "active" : "normal"} />
-                        <span className="chat-upload-progress-text">{uploadPercent < 100 ? `上传中 ${uploadPercent}%` : "处理中…"}</span>
-                      </div>
-                    )}
-                    {attachments.length > 0 && (
-                      <Attachments
-                        items={attachments.map((f) => ({
-                          uid: f.id,
-                          name: f.name,
-                          size: f.size_bytes,
-                          status: "done" as const,
-                          type: "file" as const,
-                          onClick: () => void viewFile(f),
-                        }))}
-                        overflow="wrap"
-                        disabled
-                        onRemove={(item) => {
-                          setAttachments((prev) => prev.filter((x) => x.id !== String(item.uid)));
-                          return true;
-                        }}
-                      />
-                    )}
-                  </div>
-                ) : undefined
+                <div className="chat-sender-header-inner">
+                  <ComposerExtras preset={generationPreset} onPresetChange={setGenerationPreset} />
+                  {(attachments.length > 0 || (uploading && uploadPercent !== null)) && (
+                    <div className="chat-pending">
+                      {/* 附件上传真实进度：XHR progress 事件驱动，上传完成后服务端解析期间显示「处理中」 */}
+                      {uploading && uploadPercent !== null && (
+                        <div className="chat-upload-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={uploadPercent}>
+                          <Progress percent={uploadPercent} size="small" showInfo={false} status={uploadPercent < 100 ? "active" : "normal"} />
+                          <span className="chat-upload-progress-text">{uploadPercent < 100 ? `上传中 ${uploadPercent}%` : "处理中…"}</span>
+                        </div>
+                      )}
+                      {attachments.length > 0 && (
+                        <Attachments
+                          items={attachments.map((f) => ({
+                            uid: f.id,
+                            name: f.name,
+                            size: f.size_bytes,
+                            status: "done" as const,
+                            type: "file" as const,
+                            onClick: () => void viewFile(f),
+                          }))}
+                          overflow="wrap"
+                          disabled
+                          onRemove={(item) => {
+                            setAttachments((prev) => prev.filter((x) => x.id !== String(item.uid)));
+                            return true;
+                          }}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
               }
               prefix={
                 <Tooltip title={uploading ? "上传中…" : "上传附件"}>
@@ -2131,6 +2168,7 @@ export function ChatPage() {
           建议等本轮执行结束后再切换。
         </p>
       </ConfirmDialog>
+
     </div>
   );
 }

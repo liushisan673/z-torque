@@ -11,6 +11,7 @@ from app.core.servertime import iso_utc
 from app.db.session import get_db
 from app.kernel.skill_service import (
     archive_resource,
+    archive_skill_version,
     attach_tool,
     copy_skill,
     copy_tool,
@@ -23,6 +24,7 @@ from app.kernel.skill_service import (
     publish_skill_version,
     publish_tool_version,
     reorder_tool_bindings,
+    rollback_skill_version,
     set_skill_tool_bindings,
     update_skill,
     update_skill_version,
@@ -544,6 +546,18 @@ async def publish_skill(version_id: UUID, request: Request, payload: SkillVersio
             set_skill_tool_bindings(db, tenant_id=user.tenant_id, user_id=user.id, skill_version_id=version_id, bindings=bindings)
     item = publish_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id); db.commit()
     return out(request, {"id": str(item.id), "status": item.status, "snapshot_hash": item.snapshot_hash, "requires_confirmation": item.requires_confirmation})
+
+
+@router.post("/skill-versions/{version_id}/archive", summary="归档技能版本")
+async def archive_skill_version_route(version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item = archive_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id); db.commit()
+    return out(request, {"id": str(item.id), "status": item.status})
+
+
+@router.post("/skill-versions/{version_id}/rollback", summary="回滚技能当前发布指针")
+async def rollback_skill_version_route(version_id: UUID, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    item = rollback_skill_version(db, tenant_id=user.tenant_id, user_id=user.id, version_id=version_id); db.commit()
+    return out(request, {"id": str(item.id), "status": item.status})
 
 
 @router.patch("/skill-versions/{version_id}", summary="更新技能版本")

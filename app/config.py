@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     memory_long_context_max_items_per_scope: int = 10
     memory_long_context_max_chars: int = 6000
     file_max_extracted_text: int = 200000
+    # 旁路快速模式：默认关闭，所有文件变更必须先生成提案并由用户 Keep 后才落地。
+    file_change_auto_keep: bool = False
     file_parse_timeout: float = 30.0
     # §2.1 本地知识库：chunk 上限 + 总入库字节上限（超限标 truncated 并审计，不静默）
     knowledge_chunk_max_chars: int = 2000

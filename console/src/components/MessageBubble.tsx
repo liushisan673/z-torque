@@ -115,8 +115,10 @@ export function MessageBubble({
   const isExternal = m.sender_type === "EXTERNAL";
   const externalSource = isExternal ? String(m.source ?? "") : "";
   const failed = !isUser && m.status === "FAILED";
-  const parts = Array.isArray(m.content_parts) ? m.content_parts.filter((p) => p?.file_id) : [];
-  const hasAttachment = parts.length > 0;
+  const allParts = Array.isArray(m.content_parts) ? m.content_parts : [];
+  const parts = allParts.filter((p) => p?.file_id);
+  const proposalParts = allParts.filter((p) => String(p.type ?? "") === "file_change" && p.change_id);
+  const hasAttachment = parts.length > 0 || proposalParts.length > 0;
   // 占位文本只在没有附件时兜底显示
   const hidePlaceholder = hasAttachment && MEDIA_PLACEHOLDER_RE.test(m.content.trim());
   const showRegenerate = Boolean(onRegenerate) && !isUser && !isExternal && !failed && m.id === lastAssistantId && !busy;
@@ -135,6 +137,11 @@ export function MessageBubble({
       )}
       {hasAttachment && (
         <div className="chat-msg-files">
+          {proposalParts.map((p, i) => (
+            <span key={`proposal-${i}`} className="chat-msg-file-proposal" title="文件变更提案，待确认">
+              变更提案 · {String(p.file_name ?? "文件")}
+            </span>
+          ))}
           {parts.map((p, i) => {
             if (partKind(p) !== "file") return <MessageMedia key={i} part={p} />;
             const name = String(p.file_name ?? `附件 ${String(p.file_id).slice(0, 8)}`);

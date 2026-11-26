@@ -220,6 +220,35 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
                     "parameters": schema,
                 },
             })
+    # 平台内置默认技能：生成文件变更提案，只有用户 Keep 后才落地为会话附件。
+    # 子执行链（exclude_requires_confirmation=True）不暴露，避免重复生成文件。
+    if not exclude_requires_confirmation:
+        alias = "output_document"
+        suffix = 2
+        while alias in mappings:
+            alias = f"output_document_{suffix}"
+            suffix += 1
+        schema = {
+            "type": "object",
+            "properties": {
+                "format": {"type": "string", "enum": ["md", "pdf", "docx"], "description": "输出格式：md / pdf / docx"},
+                "filename": {"type": "string", "description": "文件名，不含扩展名也可以，系统会自动补全"},
+                "content": {"type": "string", "description": "修改后的完整文档正文，Markdown 内容会原样保留"},
+                "purpose": {"type": "string", "description": "本次改动目的，一句话描述，不要输出大段 diff"},
+                "risk": {"type": "string", "description": "本次改动风险，一句话描述；无风险可留空"},
+            },
+            "required": ["format", "filename", "content"],
+            "additionalProperties": False,
+        }
+        mappings[alias] = ToolMapping(alias, None, None, schema, original_name="output_document", builtin_kind="document_output")
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": alias,
+                "description": "系统内置文档技能：当用户需要新建或修改 Markdown/PDF/Word 文件时调用。传入修改后的完整正文，系统会自动生成文件变更提案并展示给用户评审；此时磁盘上的原文件不变，只有用户 Keep 后才会真正保存。不要直接写文件，不要在回复里输出大段 diff。",
+                "parameters": schema,
+            },
+        })
     # §2.4 稳定前缀：工具目录按 name 排序，保证同一会话内 prompt 只追加不改写。
     tools.sort(key=lambda item: item["function"]["name"])
     return mappings, tools

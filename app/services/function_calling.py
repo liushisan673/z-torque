@@ -36,6 +36,8 @@ class ToolMapping:
     dispatch_candidate_ids: tuple[UUID, ...] | None = None
     # 工具原始名；模型可能按系统提示直接输出原名而非 ASCII 别名
     original_name: str | None = None
+    # 系统内置工具标记：不对应 DB ToolVersion，由执行循环直接分派
+    builtin_kind: str | None = None
 
 
 def map_tool_calls(calls: list[ModelToolCall], mappings: dict[str, ToolMapping]) -> list[tuple[ToolMapping, dict[str, Any]]]:

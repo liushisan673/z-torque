@@ -454,6 +454,53 @@ def publish_skill_version(db: Session, *, tenant_id: UUID, user_id: UUID, versio
     return item
 
 
+def archive_skill_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UUID) -> SkillVersion:
+    item = db.get(SkillVersion, version_id)
+    if not item or item.tenant_id != tenant_id:
+        raise ApiError("AI_SKILL_VERSION_NOT_FOUND", "skill version not found", 404)
+    skill = _owned(db, Skill, tenant_id, user_id, item.skill_id)
+    if item.status == "ARCHIVED":
+        return item
+    if skill.current_published_version_id == item.id:
+        raise ApiError("AI_SKILL_VERSION_CURRENT", "current published version cannot be archived", 409)
+    item.status = "ARCHIVED"
+    record_audit(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=user_id,
+        action="SKILL_VERSION_ARCHIVED",
+        resource_type="SKILL_VERSION",
+        resource_id=item.id,
+        summary="skill version archived",
+        detail={"skill_id": str(skill.id), "version_number": item.version_number},
+    )
+    return item
+
+
+def rollback_skill_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UUID) -> SkillVersion:
+    """切换技能当前发布指针到历史版本，不修改版本快照内容。"""
+    item = db.get(SkillVersion, version_id)
+    if not item or item.tenant_id != tenant_id:
+        raise ApiError("AI_SKILL_VERSION_NOT_FOUND", "skill version not found", 404)
+    skill = _owned(db, Skill, tenant_id, user_id, item.skill_id)
+    if item.status not in {"PUBLISHED", "ARCHIVED"}:
+        raise ApiError("AI_SKILL_VERSION_NOT_ROLLBACKABLE", "only published or archived versions can be rolled back", 409)
+    if skill.current_published_version_id == item.id:
+        return item
+    skill.current_published_version_id = item.id
+    record_audit(
+        db,
+        tenant_id=tenant_id,
+        actor_user_id=user_id,
+        action="SKILL_VERSION_ROLLED_BACK",
+        resource_type="SKILL_VERSION",
+        resource_id=item.id,
+        summary="skill version rolled back",
+        detail={"skill_id": str(skill.id), "version_number": item.version_number},
+    )
+    return item
+
+
 def update_skill_version(db: Session, *, tenant_id: UUID, user_id: UUID, version_id: UUID, instructions: str | None = None, orchestration_hint: str | None = None, script_source: str | None = None, required_permissions: list[str] | None = None, requires_confirmation: bool | None = None) -> SkillVersion:
     item = db.get(SkillVersion, version_id)
     if not item or item.tenant_id != tenant_id:

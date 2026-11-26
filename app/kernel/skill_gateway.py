@@ -313,10 +313,12 @@ class SkillGateway:
         patches: list[dict[str, Any] | PatchSpec],
         base_dir: str | Path,
         task_id: UUID | None = None,
+        record_artifact: bool = True,
     ) -> dict[str, Any]:
         """事务式补丁的真实入口：gate → driver.apply_patch → artifact + metadata-only 审计。
 
         diff 正文只进 `zr_patch_artifact`（带 TTL）；审计仅记 artifact_id/hash/path/size。
+        `record_artifact=False` 用于用户撤销：复用同一事务写入口，但不为反向补丁再造一条审查记录。
         """
         specs = [item if isinstance(item, PatchSpec) else PatchSpec.from_dict(item) for item in patches]
         if not specs:
@@ -356,20 +358,24 @@ class SkillGateway:
         expires_at = utc_now() + timedelta(hours=24)
         committed: list[dict[str, Any]] = []
         for item in report.files:
-            artifact = PatchArtifact(
-                tenant_id=ctx.tenant_id, task_id=task_id, path=item.path,
-                before_text=item.before_text, after_text=item.after_text,
-                content_hash=item.after_hash, expires_at=expires_at,
-            )
-            db.add(artifact)
-            db.flush()
-            record_audit(
-                db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="PATCH_COMMIT",
-                resource_type="PATCH_ARTIFACT", resource_id=artifact.id, summary="patch committed",
-                detail={"artifact_id": str(artifact.id), "hash": item.after_hash, "path": item.path, "size": len(item.after_text.encode("utf-8"))},
-                trace_id=ctx.trace_id,
-            )
-            committed.append({"path": item.path, "hash": item.after_hash, "artifact_id": str(artifact.id)})
+            artifact_id: str | None = None
+            if record_artifact:
+                artifact = PatchArtifact(
+                    tenant_id=ctx.tenant_id, task_id=task_id, path=item.path,
+                    before_text=item.before_text, after_text=item.after_text,
+                    content_hash=item.after_hash, expires_at=expires_at,
+                    base_dir=str(base_dir),
+                )
+                db.add(artifact)
+                db.flush()
+                artifact_id = str(artifact.id)
+                record_audit(
+                    db, tenant_id=ctx.tenant_id, actor_user_id=ctx.user_id, action="PATCH_COMMIT",
+                    resource_type="PATCH_ARTIFACT", resource_id=artifact.id, summary="patch committed",
+                    detail={"artifact_id": artifact_id, "hash": item.after_hash, "path": item.path, "size": len(item.after_text.encode("utf-8"))},
+                    trace_id=ctx.trace_id,
+                )
+            committed.append({"path": item.path, "hash": item.after_hash, "artifact_id": artifact_id})
         return {"status": report.status, "files": committed}
 
     def _decrypt_secret(self, ciphertext: str) -> str:

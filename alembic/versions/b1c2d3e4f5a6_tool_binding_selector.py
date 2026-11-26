@@ -17,9 +17,15 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _has_column(table: str, column: str) -> bool:
+    return any(item.get("name") == column for item in sa.inspect(op.get_bind()).get_columns(table))
+
+
 def upgrade() -> None:
-    op.add_column("zr_skill_version_tool", sa.Column("selector", sa.JSON(), nullable=True))
-    op.add_column("zr_skill_version_tool", sa.Column("depends_on", sa.JSON(), nullable=True))
+    if not _has_column("zr_skill_version_tool", "selector"):
+        op.add_column("zr_skill_version_tool", sa.Column("selector", sa.JSON(), nullable=True))
+    if not _has_column("zr_skill_version_tool", "depends_on"):
+        op.add_column("zr_skill_version_tool", sa.Column("depends_on", sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:

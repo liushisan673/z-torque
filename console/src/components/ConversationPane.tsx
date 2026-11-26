@@ -247,7 +247,7 @@ export function ConversationPane({ conversations, currentId, onClose, generation
           <Bubble className="chat-bubble chat-bubble-live" placement="start" variant="borderless" shape="corner"
             classNames={{ body: "chat-bubble-body", content: "chat-bubble-content", header: "chat-bubble-header", footer: "chat-bubble-footer", avatar: "chat-bubble-avatar" }}
             avatar={<Avatar size={30} className="chat-avatar-ai">Z</Avatar>}
-            header={activeRun ? <RunBlock activeRun={activeRun} taskError={null} onResolve={() => undefined} initiallyOpen /> : undefined}
+            header={activeRun ? <RunBlock activeRun={activeRun} taskError={null} onResolve={() => undefined} /> : undefined}
             content={
               <div className="chat-md">
                 <Markdown remarkPlugins={[remarkGfm]}>{liveText ?? ""}</Markdown>

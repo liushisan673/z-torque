@@ -24,6 +24,35 @@ _CHUNK = "zr_knowledge_chunk"
 _FTS = "zr_knowledge_fts"
 
 
+def _table_exists(name: str) -> bool:
+    connection = op.get_bind()
+    if connection.dialect.name == "sqlite":
+        return bool(connection.exec_driver_sql("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).scalar())
+    return sa.inspect(connection).has_table(name)
+
+
+def _index_exists(table: str, index: str) -> bool:
+    connection = op.get_bind()
+    if connection.dialect.name == "sqlite":
+        return bool(
+            connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?",
+                (index, table),
+            ).scalar()
+        )
+    return any(item.get("name") == index for item in sa.inspect(connection).get_indexes(table))
+
+
+def _create_table(name: str, *columns) -> None:
+    if not _table_exists(name):
+        op.create_table(name, *columns)
+
+
+def _create_index(name: str, table: str, columns, unique: bool = False) -> None:
+    if not _index_exists(table, name):
+        op.create_index(name, table, columns, unique=unique)
+
+
 def _fts5_available() -> bool:
     connection = op.get_bind()
     if connection.dialect.name != "sqlite":
@@ -37,7 +66,7 @@ def _fts5_available() -> bool:
 
 
 def upgrade() -> None:
-    op.create_table(
+    _create_table(
         _DOC,
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column("tenant_id", sa.String(36), nullable=False),
@@ -53,9 +82,9 @@ def upgrade() -> None:
         sa.Column("indexed_at", sa.DateTime(), nullable=True),
     )
     for column in ("tenant_id", "file_id", "path", "status"):
-        op.create_index(f"ix_{_DOC}_{column}", _DOC, [column])
+        _create_index(f"ix_{_DOC}_{column}", _DOC, [column])
 
-    op.create_table(
+    _create_table(
         _CHUNK,
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column("tenant_id", sa.String(36), nullable=False),
@@ -73,22 +102,23 @@ def upgrade() -> None:
         sa.Column("token_count", sa.Integer(), nullable=False, server_default="0"),
     )
     for column in ("tenant_id", "doc_id"):
-        op.create_index(f"ix_{_CHUNK}_{column}", _CHUNK, [column])
-    op.create_index(f"ix_{_CHUNK}_doc_seq", _CHUNK, ["doc_id", "seq"], unique=True)
+        _create_index(f"ix_{_CHUNK}_{column}", _CHUNK, [column])
+    _create_index(f"ix_{_CHUNK}_doc_seq", _CHUNK, ["doc_id", "seq"], unique=True)
 
     # 应用侧双写：FTS 表独立于 chunk 表，避免 external-content 触发器在
     # 既有库/测试 create_all 路径下漏建导致索引空白。两种形态列集合一致。
-    if _fts5_available():
-        op.execute(
-            f"CREATE VIRTUAL TABLE {_FTS} USING fts5(chunk_id, text, tokenize='unicode61')"
-        )
-    else:
-        op.create_table(
-            _FTS,
-            sa.Column("chunk_id", sa.String(36), nullable=False),
-            sa.Column("text", sa.Text(), nullable=False),
-        )
-        op.create_index(f"ix_{_FTS}_text", _FTS, ["text"])
+    if not _table_exists(_FTS):
+        if _fts5_available():
+            op.execute(
+                f"CREATE VIRTUAL TABLE {_FTS} USING fts5(chunk_id, text, tokenize='unicode61')"
+            )
+        else:
+            op.create_table(
+                _FTS,
+                sa.Column("chunk_id", sa.String(36), nullable=False),
+                sa.Column("text", sa.Text(), nullable=False),
+            )
+            _create_index(f"ix_{_FTS}_text", _FTS, ["text"])
 
 
 def downgrade() -> None:

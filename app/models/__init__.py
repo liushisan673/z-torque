@@ -7,6 +7,7 @@ from app.models.connector import Connector, ConnectorTool
 from app.models.context_summary import ContextSummary
 from app.models.conversation import Conversation
 from app.models.file import File
+from app.models.file_version_change import FileVersionChange
 from app.models.identity import Permission, Role, Tenant, User, role_permission, user_role
 from app.models.knowledge import KnowledgeChunk, KnowledgeDoc
 from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseDocument
@@ -44,6 +45,7 @@ __all__ = [
     "ContextSummary",
     "Conversation",
     "File",
+    "FileVersionChange",
     "InboundWebhook",
     "InboundWebhookEvent",
     "KnowledgeBase",

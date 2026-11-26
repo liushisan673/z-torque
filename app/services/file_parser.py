@@ -13,11 +13,13 @@
 from __future__ import annotations
 
 import csv
+import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from app.kernel.ports.knowledge_provider import ParsedBlock, ParsedFile
 
-SUPPORTED = {".txt", ".md", ".csv", ".pdf", ".xlsx"}
+SUPPORTED = {".txt", ".md", ".csv", ".pdf", ".docx", ".xlsx"}
 
 _LINES_PER_BLOCK = 40
 _MAX_PDF_PAGES = 100
@@ -75,6 +77,23 @@ def _pdf_blocks(path: Path, *, limit: int):
         yield ParsedBlock(page.extract_text() or "", page_no=index + 1)
 
 
+_WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+
+def _docx_blocks(path: Path, *, limit: int):
+    """用标准库读取 docx 段落文本，按 40 行一块产出，保留行号坐标。"""
+    with zipfile.ZipFile(path) as archive:
+        root = ET.fromstring(archive.read("word/document.xml"))
+    lines: list[str] = []
+    for paragraph in root.iter(f"{_WORD_NS}p"):
+        text = "".join(node.text or "" for node in paragraph.iter(f"{_WORD_NS}t")).strip()
+        if text:
+            lines.append(text)
+    for start in range(0, min(len(lines), limit * _LINES_PER_BLOCK), _LINES_PER_BLOCK):
+        chunk = lines[start:start + _LINES_PER_BLOCK]
+        yield ParsedBlock("\n".join(chunk), line_start=start + 1, line_end=start + len(chunk))
+
+
 def _xlsx_blocks(path: Path, *, limit: int):
     """只产出需要的非空单元格；旧实现会先把 20×10000×100 个单元格装入 list。"""
     try:
@@ -104,6 +123,7 @@ _BLOCK_PARSERS = {
     ".md": _text_blocks,
     ".csv": _csv_blocks,
     ".pdf": _pdf_blocks,
+    ".docx": _docx_blocks,
     ".xlsx": _xlsx_blocks,
 }
 
