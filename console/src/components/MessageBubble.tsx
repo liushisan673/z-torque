@@ -116,7 +116,7 @@ export function MessageBubble({
   const externalSource = isExternal ? String(m.source ?? "") : "";
   const failed = !isUser && m.status === "FAILED";
   // 防御性清理历史回复/旧模型输出中的内部检索标识，避免 UUID 暴露在用户界面。
-  const displayContent = String(m.content ?? "").replace(/\[(?:chunk|source):[^\]\n]+\]/gi, "").replace(/[ \\t]{2,}/g, " ").trim();
+  const displayContent = String(m.content ?? "").replace(/\[(?:chunk|source):[^\]\n]+\]/gi, "").trim();
   const allParts = Array.isArray(m.content_parts) ? m.content_parts : [];
   const parts = allParts.filter((p) => p?.file_id);
   const proposalParts = allParts.filter((p) => String(p.type ?? "") === "file_change" && p.change_id);
