@@ -429,11 +429,16 @@ class TaskRuntime:
             if exc.code == "AI_TASK_NOT_CANCELABLE":
                 return self._cancel_running_task(db, task_id)
             return self._fail_model_task(db, task, exc.code, exc.message)
-        except Exception:
-            # 先回滚失败事务（如落库约束冲突），否则后续 transition 会因 PendingRollbackError 二次崩溃
+        except Exception as exc:
+            # 保留完整堆栈在服务端日志；任务记录写入异常类型与摘要，便于本地单机排障。
+            # 面向用户的失败气泡仍使用通用文案，不泄露文件路径、凭据或内部堆栈。
             db.rollback()
             logger.exception("chat task %s failed", task_id)
-            return self._fail_model_task(db, task, "AI_TASK_FAILED", "chat task failed")
+            diagnostic = f"internal execution error: {type(exc).__name__}: {str(exc)[:500]}"
+            return self._fail_model_task(
+                db, task, "AI_TASK_FAILED", diagnostic,
+                public_message="执行过程中发生内部错误，请查看任务详情或服务日志后重试",
+            )
         if response.tool_calls:
             return self._fail_model_task(db, task, "AI_TOOL_MAPPING_INVALID", "tool execution requires an agent tool mapping")
         if not response.content:
@@ -783,7 +788,7 @@ class TaskRuntime:
         return {"task_id": str(task.id), "status": result.status}
 
     @staticmethod
-    def _fail_model_task(db, task: Task, code: str, message: str) -> dict:
+    def _fail_model_task(db, task: Task, code: str, message: str, *, public_message: str | None = None) -> dict:
         task.error_code = code
         task.error_message = message
         # 幂等容错：重复收尾（如 recover 重放）时任务可能已是终态，跳过状态迁移只补失败气泡
@@ -792,17 +797,17 @@ class TaskRuntime:
         # 失败以模型气泡输出：写一条 ASSISTANT 失败消息（幂等复用，避免重复收尾时唯一约束冲突）；
         # 无会话任务没有可挂载的消息载体，失败原因只落在 task.error_code / error_message
         if task.conversation_id is not None:
-            fail_text = f"抱歉，这次执行没有成功：{message or code}。您可以稍后重试。"
+            fail_text = f"抱歉，这次执行没有成功：{public_message or message or code}。您可以稍后重试。"
             result_message = db.query(Message).filter(Message.task_id == task.id, Message.sender_type == "ASSISTANT").first()
             if result_message is not None:
                 result_message.content = fail_text
                 result_message.status = "FAILED"
                 result_message.error_code = code
-                result_message.error_message = message
+                result_message.error_message = public_message or message
             else:
                 db.add(Message(
                     tenant_id=task.tenant_id, conversation_id=task.conversation_id, sender_type="ASSISTANT",
-                    content=fail_text, status="FAILED", task_id=task.id, error_code=code, error_message=message,
+                    content=fail_text, status="FAILED", task_id=task.id, error_code=code, error_message=public_message or message,
                 ))
         conversation = db.get(Conversation, task.conversation_id)
         if conversation is not None:

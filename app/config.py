@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     knowledge_chunk_max_chars: int = 2000
     knowledge_max_chunks_per_file: int = 4000
     knowledge_max_total_bytes: int = 50 * 1024 * 1024
-    knowledge_top_k: int = 5
+    knowledge_top_k: int = 8
     # 默认使用随 Windows 安装包分发的本地中文 ONNX 模型；外部 Provider 仍可通过环境变量覆盖。
     embedding_enabled: bool = True
     embedding_provider: str = "local"

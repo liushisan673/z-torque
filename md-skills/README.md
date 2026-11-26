@@ -31,3 +31,10 @@ Windows 环境默认不启用 MD-Skill 脚本执行。当前运行时无法提�
 - `MD_SKILL_SCAN_INTERVAL`
 
 Markdown 指令始终视为不可信输入，不能改变系统权限、SecurityContext 或 SkillGateway 的执行规则。
+
+
+## 教辅出版流程技能包
+
+本仓库附带 `book-publishing-workflow`、`curriculum-standards-analysis`、`field-research`、`typesetting-production`、`proofreader`、`responsible-editor-review` 和 `book-publishing-deterministic-checks`。
+
+启动应用后调用 `POST /api/z-torque/skills/scan` 扫描，技能先进入草稿状态。审阅并发布后，再按 `docs/project-library/教辅出版Agent技能与交接规范.md` 的角色矩阵绑定到 Agent。脚本技能会在执行前要求 Task checkpoint 人工确认，并受沙箱权限约束。

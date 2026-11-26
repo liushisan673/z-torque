@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from app.config import get_settings
 from app.core.errors import ApiError
+from app.core.servertime import ensure_utc
 from app.kernel.audit.service import record_audit
 from app.kernel.model_gateway import (
     ModelContentPart,
@@ -41,6 +42,16 @@ MAX_TOOL_CALLS_PER_ROUND = 8
 MAX_TOOL_RESULT_CHARS = 20_000
 # 站内 A2A 简单请求默认只派发一个专业 Agent；避免模型同轮/跨轮重复调度。
 MAX_A2A_DISPATCHES_PER_RUN = 1
+
+def _remaining_timeout(deadline_at: datetime | None, configured_timeout: float, *, now: datetime | None = None) -> float:
+    """Return the smaller configured/deadline timeout; DB naive timestamps are UTC."""
+    if deadline_at is None:
+        return configured_timeout
+    current = ensure_utc(now or datetime.now(timezone.utc))
+    remaining = (ensure_utc(deadline_at) - current).total_seconds()
+    return min(configured_timeout, remaining)
+
+
 
 
 def _serialize_message(m: ModelMessage) -> dict:
@@ -188,7 +199,7 @@ class AgentExecutionLoop:
                 raise ApiError("AI_TASK_NOT_CANCELABLE", "task cancellation requested", 409)
             timeout = request.timeout_seconds
             if deadline_at is not None:
-                timeout = min(timeout, (deadline_at - datetime.now(timezone.utc)).total_seconds())
+                timeout = min(timeout, (ensure_utc(deadline_at) - datetime.now(timezone.utc)).total_seconds())
                 if timeout <= 0:
                     raise ApiError("AI_TASK_TIMEOUT", "task deadline exceeded", 504)
             if round_number == 1 and seeded is not None:

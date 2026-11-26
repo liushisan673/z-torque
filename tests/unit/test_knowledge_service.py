@@ -80,7 +80,7 @@ def test_answer_citations_hide_internal_chunk_ids():
 
     assert f"[chunk:{chunk_id}]" not in answer
     assert "图书借阅规则.pdf" in answer
-    assert "[资料:图书借阅规则.pdf]" in answer
+    assert "[资料:图书借阅规则.pdf（第 3 页）]" in answer
     assert "第 3 页" in answer
 
     
@@ -99,3 +99,26 @@ def test_stream_filter_hides_internal_references_across_delta_boundaries():
     assert "[chunk:" not in output
     assert "[资料:规则.pdf]" in output
     assert output.startswith("回答依据")
+
+
+def test_storage_key_allowlist_includes_database_path_variants(tmp_path):
+    class Store:
+        def local_path(self, key):
+            return tmp_path / str(key).replace("\\", "/")
+
+    values = knowledge_service._storage_key_allowlist(["data/files/book.pdf"], Store())
+    assert "data/files/book.pdf" in values
+    assert r"data\files\book.pdf" in values
+    assert str((tmp_path / "data/files/book.pdf").resolve()) in values
+
+
+def test_answer_citations_remove_fabricated_page_locations():
+    chunk = KnowledgeChunk(
+        source="/docs/book.pdf", content="source text",
+        metadata={"file_name": "book.pdf", "page_no": 3},
+    )
+    answer = knowledge_service.ensure_answer_citations(
+        "事实 [资料:book.pdf（第 99 页）]", [chunk],
+    )
+    assert "第 99 页" not in answer
+    assert "[资料:book.pdf（第 3 页）]" in answer
