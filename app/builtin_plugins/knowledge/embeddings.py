@@ -17,15 +17,20 @@ class EmbeddingError(RuntimeError):
     pass
 
 
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
 def local_model_cache_dir() -> Path:
-    """开发环境读取仓库模型缓存；PyInstaller onedir 读取随包分发的资源目录。"""
+    """源码运行使用仓库缓存；PyInstaller onedir 使用随包分发的只读资源目录。"""
     frozen_root = getattr(sys, "_MEIPASS", None)
-    if frozen_root:
+    if _is_frozen() and frozen_root:
         return Path(frozen_root) / "models" / "embedding-cache"
     return Path(__file__).resolve().parents[3] / "models" / "embedding-cache"
 
 
 def local_model_assets_available() -> bool:
+    """只在冻结安装包中要求模型预置；源码模式允许首次使用时由 FastEmbed 下载。"""
     cache = local_model_cache_dir()
     return cache.is_dir() and any(cache.rglob("*.onnx"))
 
@@ -47,7 +52,8 @@ class EmbeddingClient:
         if not self.settings.embedding_enabled:
             return False
         if self.provider == "local":
-            return local_model_assets_available()
+            # 开发环境首次运行自动下载模型；冻结安装包必须确实包含模型资源，禁止运行时联网。
+            return not _is_frozen() or local_model_assets_available()
         return bool(self.settings.embedding_base_url.strip() and self.settings.embedding_model.strip())
 
     @property
@@ -62,10 +68,14 @@ class EmbeddingClient:
     def _load_local_model(self):
         if self._local_model is None:
             cache = local_model_cache_dir()
-            if not any(cache.rglob("*.onnx")):
+            if _is_frozen() and not local_model_assets_available():
+                self.last_error = "ModelAssetsMissing"
                 raise EmbeddingError("bundled local embedding model assets are missing")
-            os.environ["HF_HUB_OFFLINE"] = "1"
-            os.environ["TRANSFORMERS_OFFLINE"] = "1"
+            # 源码开发模式允许首次调用时下载到仓库缓存；桌面安装包严格离线加载。
+            cache.mkdir(parents=True, exist_ok=True)
+            if _is_frozen():
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
             try:
                 from fastembed import TextEmbedding
 
@@ -95,7 +105,7 @@ class EmbeddingClient:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         if not self.configured:
-            raise EmbeddingError("embedding is disabled, not configured, or local model assets are missing")
+            raise EmbeddingError("embedding is disabled, not configured, or bundled model assets are missing")
         if not texts:
             return []
         batch_size = max(1, min(int(self.settings.embedding_batch_size), 128))
