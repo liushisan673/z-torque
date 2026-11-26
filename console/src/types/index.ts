@@ -693,6 +693,7 @@ export interface Confirmation {
   resolved_at: unknown | null;
   /** 展示用：发起人用户名（后端 join 返回，管理员视角用于区分他人确认单） */
   requested_by_username?: string | null;
+  request_summary?: { kind?: string; title?: string; script_name?: string; script_file?: string; sandbox_mode?: string; sandbox_isolation?: string } | null;
 }
 
 // ---- Chat / Task SSE 事件 ----
