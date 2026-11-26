@@ -297,7 +297,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                     "AND d.path IN :allowed_paths "
                     "ORDER BY c.seq LIMIT :limit"
                 ).bindparams(bindparam("allowed_paths", expanding=True)),
-                {"pattern": pattern, "tenant_id": str(tenant_id), "allowed_paths": allowed, "limit": limit},
+                {"pattern": pattern, "tenant_id": str(tenant_id), "allowed_paths": allowed, "limit": candidate_limit},
             ).mappings().all()
         else:
             pattern = f"%{query.strip()}%"
