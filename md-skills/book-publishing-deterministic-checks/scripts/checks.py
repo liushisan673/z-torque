@@ -33,7 +33,7 @@ elif action == "error_rate":
 elif action == "duplicate_check":
     texts = payload.get("texts") or []
     def normalize(value):
-        return re.sub(r"\\s+", "", str(value)).lower()
+        return re.sub(r"\s+", "", str(value)).lower()
     seen = {}
     duplicates = []
     for index, value in enumerate(texts):
