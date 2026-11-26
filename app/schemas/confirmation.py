@@ -21,5 +21,6 @@ class ConfirmationResponse(BaseModel):
     requested_by_username: str | None = None
     # 仅返回可安全展示的执行摘要，不暴露原始参数、脚本正文或沙箱绝对路径。
     request_summary: dict | None = None
+    can_resolve: bool = False
 
     model_config = {"from_attributes": True}
