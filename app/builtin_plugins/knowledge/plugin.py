@@ -248,6 +248,7 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
                 continue
             try:
                 parsed = parse_file_structured(path, Path(item.original_name).suffix, settings.file_max_extracted_text, max_blocks=settings.knowledge_max_chunks_per_file, max_block_chars=settings.knowledge_chunk_max_chars)
+                item.extracted_text = parsed.text
                 self.index_file(db, tenant_id=tenant_id, file_id=item.id, path=str(path), sha256=item.sha256, parsed=parsed, size_bytes=item.size_bytes)
                 indexed += 1
             except Exception:  # noqa: BLE001 - 单个存量文件失败不影响整体回填
