@@ -69,4 +69,5 @@ async def resolve(confirmation_id: UUID, payload: ConfirmationResolveRequest, re
     row = provider.resolve(db, tenant_id=user.tenant_id, confirmation_id=confirmation_id, user_id=user.id, approved=payload.approved)
     db.commit()
     db.refresh(row)
+    username = db.scalar(select(User.username).where(User.id == row.requested_by_user_id))
     return success_response(request, _dump(row, username))
