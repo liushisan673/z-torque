@@ -15,7 +15,6 @@ from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import transition_task
 from app.kernel.task.states import TaskStatus
 from app.models import Confirmation, Conversation, Message, Outbox, Task, TaskCheckpoint
-from app.security.permissions import is_admin_user
 
 
 class BuiltinApprovalProvider(ApprovalProvider):
@@ -90,21 +89,14 @@ def pause_task_for_confirmation(db: Session, *, tenant_id: UUID, user_id: UUID, 
     return confirmation
 
 
-def assert_distinct_approver(requested_by_user_id: UUID, confirmer_user_id: UUID) -> None:
-    """发起人不得审批自己的请求；管理员也不例外。"""
-    if requested_by_user_id == confirmer_user_id:
-        raise ApiError("AI_CONFIRMATION_SELF_APPROVAL", "requester cannot resolve own confirmation", 403)
-
-
 def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID, user_id: UUID, approved: bool) -> Confirmation:
     item = db.scalar(select(Confirmation).where(Confirmation.id == confirmation_id, Confirmation.tenant_id == tenant_id))
     if not item:
         raise ApiError("AI_CONFIRMATION_NOT_FOUND", "confirmation not found", 404)
-    # 先鉴权再处理幂等重试，避免非审批人通过重复请求探测确认单状态。
-    # 社区版审批人限定为租户管理员；发起人（包括管理员）不得自审。
-    if not is_admin_user(db, tenant_id=tenant_id, user_id=user_id):
-        raise ApiError("AI_PERMISSION_DENIED", "only tenant administrators can resolve confirmations", 403)
-    assert_distinct_approver(item.requested_by_user_id, user_id)
+    # Z-Torque 当前为单机单用户产品：当前登录用户确认自己发起的本次操作即可。
+    # 此处仍校验发起人身份，避免跨用户/跨确认单处理。
+    if item.requested_by_user_id != user_id:
+        raise ApiError("AI_CONFIRMATION_NOT_FOUND", "confirmation not found", 404)
     if item.status != "PENDING":
         desired = "APPROVED" if approved else "REJECTED"
         if item.status == desired:
