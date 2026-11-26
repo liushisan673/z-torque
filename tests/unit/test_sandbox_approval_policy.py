@@ -7,23 +7,24 @@ from app.api.routes.confirmations import _dump, _request_summary
 from app.core.errors import ApiError
 from app.kernel.md_skill import parse_skill
 from app.kernel.md_skill_runtime import MdSkillRuntime
+from app.kernel.skill_confirmation import _assert_confirmation_owner
 from app.kernel.skill_gateway import SkillGateway
 
 
 def test_single_user_can_approve_own_confirmation():
     user_id = uuid4()
-    row = SimpleNamespace(
-        requested_by_user_id=user_id,
-        status="PENDING",
-    )
-    assert row.requested_by_user_id == user_id
-    assert row.status == "PENDING"
+    row = SimpleNamespace(requested_by_user_id=user_id, status="PENDING")
+    _assert_confirmation_owner(row, user_id)
 
 
 def test_confirmation_cannot_be_resolved_by_another_user():
     requester_id = uuid4()
     other_user_id = uuid4()
-    assert requester_id != other_user_id
+    row = SimpleNamespace(requested_by_user_id=requester_id, status="PENDING")
+    with pytest.raises(ApiError) as excinfo:
+        _assert_confirmation_owner(row, other_user_id)
+    assert excinfo.value.code == "AI_CONFIRMATION_NOT_FOUND"
+    assert excinfo.value.status_code == 404
 
 
 def test_script_approval_summary_is_safe_and_does_not_expose_arguments():
