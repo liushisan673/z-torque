@@ -139,8 +139,8 @@ def test_mcp_tool_call_failure_is_mapped_not_raised():
 
 
 @pytest.mark.asyncio
-async def test_confirmation_visibility_is_scoped_to_requester_or_admin():
-    """P1-11：普通成员看不到他人确认单（工具入参），管理员可见且能识别发起人。"""
+async def test_confirmation_visibility_is_scoped_to_current_user():
+    """单机单用户模式：其他普通成员与管理员都不能读取当前用户的确认单。"""
     tenant = _make_tenant()
     owner = _make_user(tenant.id)
     peer = _make_user(tenant.id)
@@ -167,10 +167,11 @@ async def test_confirmation_visibility_is_scoped_to_requester_or_admin():
         peer_list = await client.get("/api/z-torque/confirmations", headers=peer_headers)
         admin_list = await client.get("/api/z-torque/confirmations", headers=admin_headers)
         peer_detail = await client.get(f"/api/z-torque/confirmations/{confirmation_id}", headers=peer_headers)
+        admin_detail = await client.get(f"/api/z-torque/confirmations/{confirmation_id}", headers=admin_headers)
 
     assert [item["id"] for item in owner_list.json()["data"]] == [str(confirmation_id)]
     assert str(confirmation_id) not in [item["id"] for item in peer_list.json()["data"]]
     assert peer_detail.status_code == 404
 
-    admin_items = [item for item in admin_list.json()["data"] if item["id"] == str(confirmation_id)]
-    assert admin_items and admin_items[0]["requested_by_username"] == owner["username"]
+    assert str(confirmation_id) not in [item["id"] for item in admin_list.json()["data"]]
+    assert admin_detail.status_code == 404

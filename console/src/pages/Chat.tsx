@@ -167,6 +167,34 @@ export function ChatPage() {
 
   // 任务链路内联执行块（run-block）：任务事件实时驱动步骤逐条增加
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
+  const [pendingConfirmationSummary, setPendingConfirmationSummary] = useState<Confirmation["request_summary"]>(null);
+  const [pendingConfirmationCanResolve, setPendingConfirmationCanResolve] = useState(false);
+
+  // 等待人工确认时拉取服务端脱敏摘要；不把原始参数、脚本正文或绝对路径送到前端。
+  useEffect(() => {
+    if (!waitingConfirm) {
+      setPendingConfirmationSummary(null);
+      setPendingConfirmationCanResolve(false);
+      return;
+    }
+    const targetTaskId = activeRun?.taskId ?? task?.id;
+    if (!targetTaskId) return;
+    let alive = true;
+    void request<Confirmation[]>("/api/z-torque/confirmations")
+      .then((items) => {
+        if (!alive) return;
+        const pending = items.find((item) => item.task_id === targetTaskId && item.status === "PENDING");
+        setPendingConfirmationSummary(pending?.request_summary ?? null);
+        setPendingConfirmationCanResolve(Boolean(pending?.can_resolve));
+      })
+      .catch(() => {
+        if (alive) {
+          setPendingConfirmationSummary(null);
+          setPendingConfirmationCanResolve(false);
+        }
+      });
+    return () => { alive = false; };
+  }, [waitingConfirm, activeRun?.taskId, task?.id]);
   // 任务完成后最终结论的打字机文本（来源 task.done 的 result.content）
   const [runAnswer, setRunAnswer] = useState<string | null>(null);
   // 当前这一轮助手回复的开始时间（过程块与结论共用同一时间戳）
@@ -1140,6 +1168,8 @@ export function ChatPage() {
       }
       await request(`/api/z-torque/confirmations/${confId}/resolve`, { method: "POST", body: { approved } });
       setWaitingConfirm(false);
+      setPendingConfirmationSummary(null);
+      setPendingConfirmationCanResolve(false);
       // 内联执行块同步解除挂起（事件流随后推送批准/重放事件）
       setActiveRun((prev) => (prev ? { ...prev, waiting: false } : prev));
     } catch (err) {
@@ -1165,6 +1195,21 @@ export function ChatPage() {
       setConfRecord(c);
     } catch (err) {
       setError(errorText(err, "加载确认详情失败"));
+    }
+  }
+
+  async function resolveConfirmationRecord(id: string, approved: boolean) {
+    setError(null);
+    try {
+      const updated = await request<Confirmation>(`/api/z-torque/confirmations/${id}/resolve`, {
+        method: "POST",
+        body: { approved },
+      });
+      setConfRecord(updated);
+      const list = await request<Confirmation[]>("/api/z-torque/confirmations");
+      setConfList(list);
+    } catch (err) {
+      setError(errorText(err, "审批处理失败"));
     }
   }
 
@@ -1606,6 +1651,8 @@ export function ChatPage() {
                         activeRun={activeRun}
                         taskError={task?.id === activeRun.taskId && task.error_message ? { message: taskErrorText(task.error_message, task.error_code), code: task.error_code } : null}
                         onResolve={(approved) => void resolveConfirm(approved)}
+                        waitingSummary={pendingConfirmationSummary}
+                        canResolve={pendingConfirmationCanResolve}
                       />
                     ) : undefined}
                     // Bubble 在 loading 时不渲染 header/footer（源码：`if (loading) return loadingRender()`），
@@ -1871,10 +1918,22 @@ export function ChatPage() {
               {waitingConfirm && (
                 <div className="chat-confirm-box">
                   <p>当前任务已暂停并释放执行位。批准后将从检查点继续；等待期间，你可以切换到其他会话继续处理任务，返回本会话后再完成审批。</p>
-                  <div className="chat-confirm-actions">
-                    <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>确认</button>
-                    <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
-                  </div>
+                  {pendingConfirmationSummary?.kind === "md_script" && (
+                    <div className="chat-panel-status-meta">
+                      <strong>{pendingConfirmationSummary.title || "Python 脚本执行"}</strong>
+                      <span> · {pendingConfirmationSummary.script_name || "未命名 Skill"}</span>
+                      {pendingConfirmationSummary.script_file && <span> · {pendingConfirmationSummary.script_file}</span>}
+                      <span> · {pendingConfirmationSummary.sandbox_isolation === "container" ? "容器隔离" : "独立进程"}</span>
+                    </div>
+                  )}
+                  {pendingConfirmationCanResolve ? (
+                    <div className="chat-confirm-actions">
+                      <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>批准执行</button>
+                      <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
+                    </div>
+                  ) : (
+                    <p className="chat-panel-status-meta">确认权限暂不可用，请刷新页面后重试。</p>
+                  )}
                 </div>
               )}
 
@@ -2023,7 +2082,23 @@ export function ChatPage() {
             <div className="text-sm"><span className="text-muted">确认人：</span>{confRecord.confirmed_by_user_id ?? "—"}</div>
             {confRecord.skill_version_id && <div className="text-sm"><span className="text-muted">技能版本：</span>{confRecord.skill_version_id}</div>}
             {confRecord.tool_version_id && <div className="text-sm"><span className="text-muted">工具版本：</span>{confRecord.tool_version_id}</div>}
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            {confRecord.request_summary?.kind === "md_script" && (
+              <div className="chat-confirm-box">
+                <strong>{confRecord.request_summary.title || "Python 脚本执行"}</strong>
+                <div className="text-sm">Skill：{confRecord.request_summary.script_name || "未命名 Skill"}</div>
+                {confRecord.request_summary.script_file && <div className="text-sm">脚本文件：{confRecord.request_summary.script_file}</div>}
+                <div className="text-sm">范围：{confRecord.request_summary.sandbox_mode === "full" ? "完整工作区" : "Skill 目录"}</div>
+                <div className="text-sm">隔离：{confRecord.request_summary.sandbox_isolation === "container" ? "Docker 容器" : "独立进程"}</div>
+                <div className="text-sm">审批不会解除沙箱路径和资源限制。</div>
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              {confRecord.status === "PENDING" && confRecord.can_resolve && (
+                <>
+                  <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirmationRecord(confRecord.id, true)}>批准并继续</button>
+                  <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirmationRecord(confRecord.id, false)}>拒绝并终止</button>
+                </>
+              )}
               <button className="btn btn-secondary btn-sm" onClick={() => setConfRecord(null)}>关闭</button>
             </div>
           </div>

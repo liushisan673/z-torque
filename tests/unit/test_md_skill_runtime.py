@@ -11,7 +11,7 @@ from app.kernel.md_skill_runtime import MdSkillRuntime
 async def test_script_runtime_is_unavailable_by_default():
     manifest = parse_skill(Path("md-skills"), "data-analysis")
     with pytest.raises(ApiError) as exc:
-        await MdSkillRuntime("md-skills").execute(manifest, {"values": [1, 2]})
+        await MdSkillRuntime("md-skills").execute(manifest, {"values": [1, 2]}, approval_granted=True)
     assert exc.value.code == "AI_CAPABILITY_UNAVAILABLE"
 
 
@@ -19,5 +19,5 @@ async def test_script_runtime_is_unavailable_by_default():
 async def test_script_runtime_validates_input_before_execution():
     manifest = parse_skill(Path("md-skills"), "data-analysis")
     with pytest.raises(ApiError) as exc:
-        await MdSkillRuntime("md-skills").execute(manifest, {"values": "not-array"})
+        await MdSkillRuntime("md-skills").execute(manifest, {"values": "not-array"}, approval_granted=True)
     assert exc.value.code == "AI_PARAM_INVALID"
