@@ -803,11 +803,11 @@ class TaskRuntime:
                 result_message.content = fail_text
                 result_message.status = "FAILED"
                 result_message.error_code = code
-                result_message.error_message = message
+                result_message.error_message = public_message or message
             else:
                 db.add(Message(
                     tenant_id=task.tenant_id, conversation_id=task.conversation_id, sender_type="ASSISTANT",
-                    content=fail_text, status="FAILED", task_id=task.id, error_code=code, error_message=message,
+                    content=fail_text, status="FAILED", task_id=task.id, error_code=code, error_message=public_message or message,
                 ))
         conversation = db.get(Conversation, task.conversation_id)
         if conversation is not None:
