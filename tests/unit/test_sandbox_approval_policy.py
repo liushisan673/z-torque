@@ -130,9 +130,9 @@ Run the demo script.
     assert excinfo.value.status_code == 409
 
 
-def test_confirmation_response_only_allows_admin_to_approve_another_users_request():
+def test_confirmation_response_allows_requesting_local_user_to_resolve():
     requester_id = uuid4()
-    other_admin_id = uuid4()
+    unrelated_user_id = uuid4()
     row = SimpleNamespace(
         id=uuid4(),
         status="PENDING",
@@ -146,6 +146,6 @@ def test_confirmation_response_only_allows_admin_to_approve_another_users_reques
         request_snapshot={"execution_kind": "md_script", "script_name": "demo"},
     )
     requester_view = _dump(row, "requester", viewer_user_id=requester_id)
-    unrelated_user_view = _dump(row, "requester", viewer_user_id=other_admin_id)
+    unrelated_user_view = _dump(row, "requester", viewer_user_id=unrelated_user_id)
     assert requester_view["can_resolve"] is True
     assert unrelated_user_view["can_resolve"] is False
