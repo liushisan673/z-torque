@@ -26,10 +26,10 @@ def test_structured_parser_stops_after_one_over_limit_block(tmp_path, monkeypatc
 
 
 def test_semantic_split_keeps_sentence_boundaries():
-    text = "第一句说明规则。第二句说明例外。\\n\\n第三段补充流程。"
+    text = "第一句说明规则。第二句说明例外。\n\n第三段补充流程。"
     pieces = file_parser._split_semantic(text, max_chars=12)
     assert pieces
-    assert "".join(pieces).replace("\\n", "") == text.replace("\\n\\n", "").replace("\\n", "")
+    assert "".join(pieces).replace("\n", "") == text.replace("\n\n", "").replace("\n", "")
     assert all(len(piece) <= 12 for piece in pieces)
 
 
