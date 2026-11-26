@@ -10,6 +10,7 @@
 - 脚本输出必须符合 Skill 的 `output_schema`。
 - 执行有超时、标准输出字节数、路径白名单和 POSIX 资源限制。
 - 未装配 `sandbox.driver`、脚本能力关闭、路径越界或隔离能力不匹配时，必须 fail-closed。
+- `MdSkillRuntime` 本身也要求 Gateway 显式传入已批准状态；绕过 SkillGateway 的直接调用会被拒绝。
 
 ## 2. 执行前审批
 
@@ -42,6 +43,7 @@
 - 容器使用 `--network none`、只读根文件系统、`no-new-privileges`、丢弃 Linux capabilities。
 - 工作目录按策略挂载，临时目录使用受限 tmpfs。
 - 配置内存、CPU 和 PID 上限。
+- 容器以服务进程的 UID/GID 运行，不以容器 root 身份执行脚本。
 - 容器不可用时启动失败，不允许静默回退到 process。
 
 `sandbox.full` 工作区级权限必须使用 container；process 模式不承接 full scope。
