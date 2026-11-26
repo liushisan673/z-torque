@@ -89,6 +89,12 @@ def pause_task_for_confirmation(db: Session, *, tenant_id: UUID, user_id: UUID, 
     return confirmation
 
 
+def assert_distinct_approver(requested_by_user_id: UUID, confirmer_user_id: UUID) -> None:
+    """发起人不得审批自己的请求；管理员也不例外。"""
+    if requested_by_user_id == confirmer_user_id:
+        raise ApiError("AI_CONFIRMATION_SELF_APPROVAL", "requester cannot resolve own confirmation", 403)
+
+
 def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID, user_id: UUID, approved: bool) -> Confirmation:
     item = db.scalar(select(Confirmation).where(Confirmation.id == confirmation_id, Confirmation.tenant_id == tenant_id))
     if not item:
@@ -99,8 +105,7 @@ def resolve_confirmation(db: Session, *, tenant_id: UUID, confirmation_id: UUID,
             return item
         raise ApiError("AI_REQUEST_INVALID", "confirmation is already resolved", 422)
     # 发起人与审批人必须是不同用户；管理员身份不能绕过自审隔离。
-    if item.requested_by_user_id == user_id:
-        raise ApiError("AI_CONFIRMATION_SELF_APPROVAL", "requester cannot resolve own confirmation", 403)
+    assert_distinct_approver(item.requested_by_user_id, user_id)
     item.status = "APPROVED" if approved else "REJECTED"
     item.confirmed_by_user_id = user_id
     item.resolved_at = datetime.now(timezone.utc)
