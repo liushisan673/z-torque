@@ -109,6 +109,8 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
             self.last_degradation_reason = "SQLite FTS5 unavailable; lexical LIKE fallback in use"
         elif self.embedding_client is None or not self.embedding_client.configured:
             self.last_degradation_reason = "Embedding is not enabled; lexical-only retrieval in use"
+        elif not self.embedding_client.ready:
+            self.last_degradation_reason = "Local Embedding model is not initialized; run index rebuild to prepare it"
         elif self.embedding_client.last_error:
             self.last_degradation_reason = "Embedding provider request failed"
         else:
@@ -120,12 +122,13 @@ class SqliteKnowledgeProvider(KnowledgeProvider):
 
     def embedding_status(self) -> dict:
         configured = bool(self.embedding_client and self.embedding_client.configured)
+        ready = bool(configured and self.embedding_client and self.embedding_client.ready)
         return {
-            "enabled": configured,
+            "enabled": ready,
             "provider": self.embedding_client.settings.embedding_provider if self.embedding_client else None,
             "model": self.embedding_client.model if configured else None,
-            "semantic_search": configured and self.vector_store is not None and not bool(self.embedding_client.last_error),
-            "hybrid_search": self.fts5 and configured and self.vector_store is not None and not bool(self.embedding_client.last_error),
+            "semantic_search": ready and self.vector_store is not None and not bool(self.embedding_client.last_error),
+            "hybrid_search": self.fts5 and ready and self.vector_store is not None and not bool(self.embedding_client.last_error),
         }
 
     def _vector_namespace(self, tenant_id: UUID, user_id: UUID) -> str:
