@@ -290,7 +290,7 @@ async def test_full_scope_never_silently_downgrades_to_process(tmp_path):
         file_fingerprint="x" * 64, relative_path="demo",
     )
     with pytest.raises(ApiError) as exc:
-        await runtime.execute(manifest, {}, scope=full_scope)
+        await runtime.execute(manifest, {}, scope=full_scope, approval_granted=True)
     assert exc.value.code == "AI_CAPABILITY_UNAVAILABLE"
 
 
