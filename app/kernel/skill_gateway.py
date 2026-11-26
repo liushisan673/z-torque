@@ -63,6 +63,7 @@ _SANDBOX_ACTION_BY_CODE = {
     "AI_SKILL_TIMEOUT": "SANDBOX_TIMEOUT",
     "AI_SKILL_VERSION_DRIFT": "SANDBOX_DENIED",
     "AI_SCRIPT_CONFIRMATION_CONTEXT_REQUIRED": "SANDBOX_DENIED",
+    "AI_SKILL_WINDOWS_UNTRUSTED": "SANDBOX_DENIED",
 }
 
 # 执行器/连接器可能抛出的运行期异常：统一映射为失败结果而非穿透为 500，
@@ -855,6 +856,8 @@ class SkillGateway:
                     return denied
                 if not manifest.windows_trusted:
                     denied = ExecutionResult(status="FAILED", error_code="AI_SKILL_WINDOWS_UNTRUSTED", error_message="skill did not declare windows_trusted")
+                    self._audit_sandbox_event(ctx=ctx, skill_version_id=skill.id, code=denied.error_code, message=denied.error_message)
+                    self._guard_record("MD_SCRIPT", denied)
                     self._log(db, tenant_id, user_id, skill, None, task_id, denied, trace_id=ctx.trace_id)
                     return denied
             if not resume_checkpoint_id:
@@ -864,6 +867,8 @@ class SkillGateway:
                         error_code="AI_SCRIPT_CONFIRMATION_CONTEXT_REQUIRED",
                         error_message="script execution requires a task context and an authenticated user for approval",
                     )
+                    self._audit_sandbox_event(ctx=ctx, skill_version_id=skill.id, code=denied.error_code, message=denied.error_message)
+                    self._guard_record("MD_SCRIPT", denied)
                     self._log(db, tenant_id, user_id, skill, None, task_id, denied, trace_id=ctx.trace_id)
                     return denied
                 script_file = manifest.script_files[0] if manifest.script_files else ""
