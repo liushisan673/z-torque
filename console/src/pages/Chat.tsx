@@ -1198,6 +1198,21 @@ export function ChatPage() {
     }
   }
 
+  async function resolveConfirmationRecord(id: string, approved: boolean) {
+    setError(null);
+    try {
+      const updated = await request<Confirmation>(`/api/z-torque/confirmations/${id}/resolve`, {
+        method: "POST",
+        body: { approved },
+      });
+      setConfRecord(updated);
+      const list = await request<Confirmation[]>("/api/z-torque/confirmations");
+      setConfList(list);
+    } catch (err) {
+      setError(errorText(err, "审批处理失败"));
+    }
+  }
+
   const usableAgents = useMemo(() => agents.filter((a) => a.current_published_version_id), [agents]);
   const currentAgent = useMemo(() => agents.find((a) => a.id === agentId), [agents, agentId]);
   const currentConversation = useMemo(() => conversations.find((c) => c.id === conversationId), [conversations, conversationId]);
@@ -2067,7 +2082,23 @@ export function ChatPage() {
             <div className="text-sm"><span className="text-muted">确认人：</span>{confRecord.confirmed_by_user_id ?? "—"}</div>
             {confRecord.skill_version_id && <div className="text-sm"><span className="text-muted">技能版本：</span>{confRecord.skill_version_id}</div>}
             {confRecord.tool_version_id && <div className="text-sm"><span className="text-muted">工具版本：</span>{confRecord.tool_version_id}</div>}
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            {confRecord.request_summary?.kind === "md_script" && (
+              <div className="chat-confirm-box">
+                <strong>{confRecord.request_summary.title || "Python 脚本执行"}</strong>
+                <div className="text-sm">Skill：{confRecord.request_summary.script_name || "未命名 Skill"}</div>
+                {confRecord.request_summary.script_file && <div className="text-sm">脚本文件：{confRecord.request_summary.script_file}</div>}
+                <div className="text-sm">范围：{confRecord.request_summary.sandbox_mode === "full" ? "完整工作区" : "Skill 目录"}</div>
+                <div className="text-sm">隔离：{confRecord.request_summary.sandbox_isolation === "container" ? "Docker 容器" : "独立进程"}</div>
+                <div className="text-sm">审批不会解除沙箱路径和资源限制。</div>
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              {confRecord.status === "PENDING" && confRecord.can_resolve && (
+                <>
+                  <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirmationRecord(confRecord.id, true)}>批准并继续</button>
+                  <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirmationRecord(confRecord.id, false)}>拒绝并终止</button>
+                </>
+              )}
               <button className="btn btn-secondary btn-sm" onClick={() => setConfRecord(null)}>关闭</button>
             </div>
           </div>
