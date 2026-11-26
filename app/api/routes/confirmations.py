@@ -15,9 +15,25 @@ from app.security.permissions import is_admin_user
 router = APIRouter(prefix="/confirmations", tags=["confirmations"])
 
 
+def _request_summary(row: Confirmation) -> dict:
+    """生成前端可展示的最小审批摘要；绝不返回原始脚本参数或绝对路径。"""
+    snapshot = row.request_snapshot if isinstance(row.request_snapshot, dict) else {}
+    if snapshot.get("execution_kind") == "md_script":
+        return {
+            "kind": "md_script",
+            "title": "Python 脚本执行",
+            "script_name": str(snapshot.get("script_name") or "未命名 Skill")[:120],
+            "script_file": str(snapshot.get("script_file") or "")[:160],
+            "sandbox_mode": str(snapshot.get("sandbox_mode") or "restricted")[:32],
+            "sandbox_isolation": str(snapshot.get("sandbox_isolation") or "process")[:32],
+        }
+    return {"kind": "tool", "title": "工具操作确认"}
+
+
 def _dump(row: Confirmation, username: str | None) -> dict:
     payload = ConfirmationResponse.model_validate(row).model_dump(mode="json")
     payload["requested_by_username"] = username
+    payload["request_summary"] = _request_summary(row)
     return payload
 
 
@@ -53,4 +69,4 @@ async def resolve(confirmation_id: UUID, payload: ConfirmationResolveRequest, re
     row = provider.resolve(db, tenant_id=user.tenant_id, confirmation_id=confirmation_id, user_id=user.id, approved=payload.approved)
     db.commit()
     db.refresh(row)
-    return success_response(request, ConfirmationResponse.model_validate(row).model_dump(mode="json"))
+    return success_response(request, _dump(row, username))
