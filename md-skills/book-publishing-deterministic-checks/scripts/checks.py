@@ -32,7 +32,7 @@ elif action == "error_rate":
     result = {"error_count": errors, "character_count": chars, "rate_per_10000": rate, "threshold_per_10000": threshold, "passed": rate <= threshold}
 elif action == "duplicate_check":
     texts = payload.get("texts") or []
-    normalize = lambda value: re.sub(r"\\s+", "", str(value)).lower()
+    normalize = lambda value: re.sub(r"\s+", "", str(value)).lower()
     seen = {}
     duplicates = []
     for index, value in enumerate(texts):
