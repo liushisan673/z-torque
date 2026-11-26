@@ -330,7 +330,7 @@ def ensure_answer_citations(answer: str, chunks: list) -> str:
         allowed_citations.add(str(meta.get("file_name") or Path(item.source).name))
         allowed_citations.add(_human_source_label(item))
     clean_answer = re.sub(
-        r"\\[资料:([^\\]\\n]+)\\]",
+        r"\[资料:([^\]\n]+)\]",
         lambda match: match.group(0) if match.group(1) in allowed_citations else "",
         clean_answer,
     ).strip()
