@@ -259,7 +259,11 @@ def _human_source_label(item) -> str:
     label = meta.get("file_name") or Path(item.source).name
     location = []
     if meta.get("page_no") is not None:
-        location.append(f"第 {meta['page_no']} 页/幻灯片")
+        location.append(
+            f"第 {meta['page_no']} 张幻灯片"
+            if Path(label).suffix.lower() == ".pptx"
+            else f"第 {meta['page_no']} 页"
+        )
     if meta.get("sheet"):
         location.append(f"工作表 {meta['sheet']}")
     if meta.get("row_no") is not None:
