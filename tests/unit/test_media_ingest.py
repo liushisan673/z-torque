@@ -132,9 +132,9 @@ def test_signature_matches_common_types():
 
 def test_pptx_is_supported_as_a_document_attachment():
     from app.services.media_ingest import (
-        MEDIA_KIND_FILE,
         _MIME_BY_SUFFIX,
         _SUFFIX_BY_KIND,
+        MEDIA_KIND_FILE,
         media_kind_for_suffix,
         signature_matches,
     )
