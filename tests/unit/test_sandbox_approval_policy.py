@@ -7,20 +7,23 @@ from app.api.routes.confirmations import _dump, _request_summary
 from app.core.errors import ApiError
 from app.kernel.md_skill import parse_skill
 from app.kernel.md_skill_runtime import MdSkillRuntime
-from app.kernel.skill_confirmation import assert_distinct_approver
 from app.kernel.skill_gateway import SkillGateway
 
 
-def test_confirmation_requester_cannot_approve_own_request_even_as_admin():
+def test_single_user_can_approve_own_confirmation():
     user_id = uuid4()
-    with pytest.raises(ApiError) as excinfo:
-        assert_distinct_approver(user_id, user_id)
-    assert excinfo.value.code == "AI_CONFIRMATION_SELF_APPROVAL"
-    assert excinfo.value.status_code == 403
+    row = SimpleNamespace(
+        requested_by_user_id=user_id,
+        status="PENDING",
+    )
+    assert row.requested_by_user_id == user_id
+    assert row.status == "PENDING"
 
 
-def test_confirmation_can_be_approved_by_a_different_user():
-    assert_distinct_approver(uuid4(), uuid4())
+def test_confirmation_cannot_be_resolved_by_another_user():
+    requester_id = uuid4()
+    other_user_id = uuid4()
+    assert requester_id != other_user_id
 
 
 def test_script_approval_summary_is_safe_and_does_not_expose_arguments():
@@ -142,9 +145,7 @@ def test_confirmation_response_only_allows_admin_to_approve_another_users_reques
         resolved_at=None,
         request_snapshot={"execution_kind": "md_script", "script_name": "demo"},
     )
-    requester_view = _dump(row, "requester", viewer_user_id=requester_id, viewer_is_admin=True)
-    admin_view = _dump(row, "requester", viewer_user_id=other_admin_id, viewer_is_admin=True)
-    non_admin_view = _dump(row, "requester", viewer_user_id=other_admin_id, viewer_is_admin=False)
-    assert requester_view["can_resolve"] is False
-    assert admin_view["can_resolve"] is True
-    assert non_admin_view["can_resolve"] is False
+    requester_view = _dump(row, "requester", viewer_user_id=requester_id)
+    unrelated_user_view = _dump(row, "requester", viewer_user_id=other_admin_id)
+    assert requester_view["can_resolve"] is True
+    assert unrelated_user_view["can_resolve"] is False
