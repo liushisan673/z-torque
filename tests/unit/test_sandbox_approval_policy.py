@@ -47,10 +47,11 @@ def test_script_approval_summary_is_safe_and_does_not_expose_arguments():
 
 
 def test_approved_script_resume_requires_identical_script_and_arguments():
+    skill_version_id = uuid4()
     checkpoint = SimpleNamespace(
         pending_call={
             "implementation": "md_script",
-            "skill_version_id": "skill-version-1",
+            "skill_version_id": str(skill_version_id),
             "script_file": "scripts/main.py",
             "script_fingerprint": "fingerprint-v1",
             "arguments": {"count": 3},
@@ -60,9 +61,18 @@ def test_approved_script_resume_requires_identical_script_and_arguments():
         script_files=["scripts/main.py"],
         file_fingerprint="fingerprint-v1",
     )
-    SkillGateway._check_approved_script(
+    assert SkillGateway._check_approved_script(
         checkpoint,
-        skill_version_id=__import__("uuid").UUID(int=1),
+        skill_version_id=skill_version_id,
         manifest=manifest,
         arguments={"count": 3},
-    ) if False else None
+    ) is None
+
+    with pytest.raises(ApiError) as excinfo:
+        SkillGateway._check_approved_script(
+            checkpoint,
+            skill_version_id=skill_version_id,
+            manifest=manifest,
+            arguments={"count": 4},
+        )
+    assert excinfo.value.code == "AI_SANDBOX_DENIED"
