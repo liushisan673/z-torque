@@ -167,6 +167,28 @@ export function ChatPage() {
 
   // 任务链路内联执行块（run-block）：任务事件实时驱动步骤逐条增加
   const [activeRun, setActiveRun] = useState<ActiveRun | null>(null);
+  const [pendingConfirmationSummary, setPendingConfirmationSummary] = useState<Confirmation["request_summary"]>(null);
+
+  // 等待人工确认时拉取服务端脱敏摘要；不把原始参数、脚本正文或绝对路径送到前端。
+  useEffect(() => {
+    if (!waitingConfirm) {
+      setPendingConfirmationSummary(null);
+      return;
+    }
+    const targetTaskId = activeRun?.taskId ?? task?.id;
+    if (!targetTaskId) return;
+    let alive = true;
+    void request<Confirmation[]>("/api/z-torque/confirmations")
+      .then((items) => {
+        if (!alive) return;
+        const pending = items.find((item) => item.task_id === targetTaskId && item.status === "PENDING");
+        setPendingConfirmationSummary(pending?.request_summary ?? null);
+      })
+      .catch(() => {
+        if (alive) setPendingConfirmationSummary(null);
+      });
+    return () => { alive = false; };
+  }, [waitingConfirm, activeRun?.taskId, task?.id]);
   // 任务完成后最终结论的打字机文本（来源 task.done 的 result.content）
   const [runAnswer, setRunAnswer] = useState<string | null>(null);
   // 当前这一轮助手回复的开始时间（过程块与结论共用同一时间戳）
@@ -1140,6 +1162,7 @@ export function ChatPage() {
       }
       await request(`/api/z-torque/confirmations/${confId}/resolve`, { method: "POST", body: { approved } });
       setWaitingConfirm(false);
+      setPendingConfirmationSummary(null);
       // 内联执行块同步解除挂起（事件流随后推送批准/重放事件）
       setActiveRun((prev) => (prev ? { ...prev, waiting: false } : prev));
     } catch (err) {
@@ -1606,6 +1629,7 @@ export function ChatPage() {
                         activeRun={activeRun}
                         taskError={task?.id === activeRun.taskId && task.error_message ? { message: taskErrorText(task.error_message, task.error_code), code: task.error_code } : null}
                         onResolve={(approved) => void resolveConfirm(approved)}
+                        waitingSummary={pendingConfirmationSummary}
                       />
                     ) : undefined}
                     // Bubble 在 loading 时不渲染 header/footer（源码：`if (loading) return loadingRender()`），
@@ -1871,6 +1895,14 @@ export function ChatPage() {
               {waitingConfirm && (
                 <div className="chat-confirm-box">
                   <p>当前任务已暂停并释放执行位。批准后将从检查点继续；等待期间，你可以切换到其他会话继续处理任务，返回本会话后再完成审批。</p>
+                  {pendingConfirmationSummary?.kind === "md_script" && (
+                    <div className="chat-panel-status-meta">
+                      <strong>{pendingConfirmationSummary.title || "Python 脚本执行"}</strong>
+                      <span> · {pendingConfirmationSummary.script_name || "未命名 Skill"}</span>
+                      {pendingConfirmationSummary.script_file && <span> · {pendingConfirmationSummary.script_file}</span>}
+                      <span> · {pendingConfirmationSummary.sandbox_isolation === "container" ? "容器隔离" : "独立进程"}</span>
+                    </div>
+                  )}
                   <div className="chat-confirm-actions">
                     <button className="chat-btn-confirm" type="button" onClick={() => void resolveConfirm(true)}>确认</button>
                     <button className="chat-btn-reject" type="button" onClick={() => void resolveConfirm(false)}>拒绝</button>
