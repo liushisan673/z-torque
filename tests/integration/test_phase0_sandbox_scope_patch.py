@@ -18,7 +18,7 @@ from app.builtin_plugins.sandbox_driver.process import ProcessSandboxDriver
 from app.config import get_settings
 from app.core.errors import ApiError
 from app.db.session import SessionLocal
-from app.kernel.md_skill import MdSkillManifest, parse_skill
+from app.kernel.md_skill import parse_skill
 from app.kernel.md_skill_runtime import MdSkillRuntime
 from app.kernel.ports.sandbox_driver import SANDBOX_MODE_FULL, SandboxScope
 from app.kernel.security_context import SecurityContext
