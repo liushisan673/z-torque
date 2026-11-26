@@ -142,4 +142,4 @@ def test_pptx_is_supported_as_a_document_attachment():
     assert ".pptx" in _SUFFIX_BY_KIND[MEDIA_KIND_FILE]
     assert media_kind_for_suffix(".pptx") == MEDIA_KIND_FILE
     assert _MIME_BY_SUFFIX[".pptx"] == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    assert signature_matches(".pptx", b"PK\\x03\\x04pptx")
+    assert signature_matches(".pptx", b"PK\x03\x04pptx")
