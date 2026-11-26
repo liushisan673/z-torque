@@ -247,7 +247,7 @@ export interface WaitingConfirmationSummary {
   sandbox_isolation?: string;
 }
 
-export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waitingSummary }: {
+export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waitingSummary, canResolve = false }: {
   activeRun: ActiveRun;
   taskError: { message: string; code: string | null } | null;
   onResolve: (approved: boolean) => void;
@@ -255,6 +255,8 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waiti
   initiallyOpen?: boolean;
   /** 后端返回的脱敏确认摘要，不包含脚本正文、原始参数或绝对路径 */
   waitingSummary?: WaitingConfirmationSummary | null;
+  /** 当前用户是否为非发起人的租户管理员，由服务端判定 */
+  canResolve?: boolean;
 }) {
   const runStatusInfo = useMemo(() => runStatusInfoOf(activeRun), [activeRun]);
   const waitingToolName = useMemo(() => waitingToolNameOf(activeRun), [activeRun]);
@@ -345,10 +347,14 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waiti
               </div>
             )}
             {waitingConfirmArgs && <pre className="chat-confirm-args">{waitingConfirmArgs}</pre>}
-            <div className="chat-confirm-actions">
-              <button className="chat-btn-confirm" type="button" onClick={() => onResolve(true)}>批准执行</button>
-              <button className="chat-btn-reject" type="button" onClick={() => onResolve(false)}>拒绝</button>
-            </div>
+            {canResolve ? (
+              <div className="chat-confirm-actions">
+                <button className="chat-btn-confirm" type="button" onClick={() => onResolve(true)}>批准执行</button>
+                <button className="chat-btn-reject" type="button" onClick={() => onResolve(false)}>拒绝</button>
+              </div>
+            ) : (
+              <p className="chat-run-desc">发起人不能审批自己的请求，请联系其他租户管理员处理。</p>
+            )}
           </div>
         )}
 
