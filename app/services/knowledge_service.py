@@ -178,7 +178,12 @@ def allowed_paths_for_user(request, db: Session, *, tenant_id: UUID, user_id: UU
             File.status == "PARSED",
         )
     ).all()
-    return [str(Path(object_store.local_path(key)).resolve()) for key in storage_keys]
+    allowed: set[str] = set()
+    for key in storage_keys:
+        raw = str(key)
+        local = Path(object_store.local_path(key)).expanduser().resolve()
+        allowed.update({raw, raw.replace("\\", "/"), raw.replace("/", "\\"), str(local)})
+    return sorted(allowed)
 
 
 def allowed_paths_for_knowledge_bases(
