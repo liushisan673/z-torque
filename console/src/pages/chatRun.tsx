@@ -255,7 +255,7 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waiti
   initiallyOpen?: boolean;
   /** 后端返回的脱敏确认摘要，不包含脚本正文、原始参数或绝对路径 */
   waitingSummary?: WaitingConfirmationSummary | null;
-  /** 当前用户是否为非发起人的租户管理员，由服务端判定 */
+  /** 当前登录用户是否为本次确认单的发起人，由服务端判定 */
   canResolve?: boolean;
 }) {
   const runStatusInfo = useMemo(() => runStatusInfoOf(activeRun), [activeRun]);
@@ -353,7 +353,7 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waiti
                 <button className="chat-btn-reject" type="button" onClick={() => onResolve(false)}>拒绝</button>
               </div>
             ) : (
-              <p className="chat-run-desc">发起人不能审批自己的请求，请联系其他租户管理员处理。</p>
+              <p className="chat-run-desc">当前操作需要你确认。请核对脚本与执行范围后再决定是否继续。</p>
             )}
           </div>
         )}
