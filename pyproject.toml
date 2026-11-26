@@ -22,7 +22,7 @@ dependencies = [
   "PyYAML==6.0.2",
   "uuid6==2025.0.1",
   "pypdf==6.21.1",
-  "openpyxl==3.1.5",
+  "openpyxl==3.1.5",\n  # PPTX extraction uses python-pptx for robust slide/table text parsing.\n  "python-pptx==1.0.2",
   # CPU-only local ONNX Embedding runtime; model weights are bundled by scripts/download_embedding_model.py.
   "fastembed==0.7.4",
 ]
