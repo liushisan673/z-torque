@@ -110,3 +110,15 @@ def test_storage_key_allowlist_includes_database_path_variants(tmp_path):
     assert "data/files/book.pdf" in values
     assert r"data\files\book.pdf" in values
     assert str((tmp_path / "data/files/book.pdf").resolve()) in values
+
+
+def test_answer_citations_remove_fabricated_page_locations():
+    chunk = KnowledgeChunk(
+        source="/docs/book.pdf", content="source text",
+        metadata={"file_name": "book.pdf", "page_no": 3},
+    )
+    answer = knowledge_service.ensure_answer_citations(
+        "事实 [资料:book.pdf（第 99 页）]", [chunk],
+    )
+    assert "第 99 页" not in answer
+    assert "[资料:book.pdf（第 3 页）]" in answer
