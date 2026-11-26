@@ -305,6 +305,22 @@ class SkillGateway:
         if raw is None or SandboxScope.from_dict(raw) != expected:
             raise ApiError("AI_SANDBOX_DENIED", "sandbox scope changed after approval", 403)
 
+    @staticmethod
+    def _check_approved_script(
+        checkpoint: TaskCheckpoint, *, skill_version_id: UUID, manifest: MdSkillManifest, arguments: dict[str, Any],
+    ) -> None:
+        """审批恢复时绑定原始脚本版本与输入；任何变化都必须重新审批。"""
+        pending = checkpoint.pending_call or {}
+        valid = (
+            pending.get("implementation") == "md_script"
+            and pending.get("skill_version_id") == str(skill_version_id)
+            and pending.get("script_file") == (manifest.script_files[0] if manifest.script_files else None)
+            and pending.get("script_fingerprint") == manifest.file_fingerprint
+            and pending.get("arguments") == arguments
+        )
+        if not valid:
+            raise ApiError("AI_SANDBOX_DENIED", "script or arguments changed after approval", 403)
+
     async def apply_patch(
         self,
         db: Session,
@@ -817,32 +833,66 @@ class SkillGateway:
                 self._log(db, tenant_id, user_id, skill, None, task_id, gated, trace_id=ctx.trace_id)
                 return gated
             if checkpoint is not None:
-                # 审批恢复：先校验 checkpoint 中冻结的 scope，防止审批后声明/参数被改
+                # 审批恢复：scope、技能版本、脚本文件指纹与原始输入必须全部保持一致。
                 try:
                     self._check_approved_scope(checkpoint, scope)
+                    self._check_approved_script(checkpoint, skill_version_id=skill.id, manifest=manifest, arguments=arguments)
                 except ApiError as exc:
                     self._audit_sandbox_denial(ctx=ctx, skill_version_id=skill.id, reason=exc.message, detail={"scope": scope.to_dict(), "checkpoint": str(checkpoint.id)})
                     denied = ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)
                     self._guard_record("MD_SCRIPT", denied)
                     self._log(db, tenant_id, user_id, skill, None, task_id, denied, trace_id=ctx.trace_id)
                     return denied
-            # Windows 有限解禁：每次 tool 调用都需人工确认（可信声明之外的一道闸门）。
-            # 只在实际由该技能执行脚本时挂起；已有审批 checkpoint（恢复执行）或 A2A
-            # 无 task 上下文时不在此重复挂起（A2A 自身走独立鉴权链路）。
-            if os.name == "nt" and task_id and user_id and not resume_checkpoint_id:
-                pending_call = {"skill_version_id": str(skill.id), "arguments": arguments, "implementation": "md_script", "sandbox_scope": scope.to_dict()}
+
+            # 脚本执行在所有平台统一要求人工确认。审批只允许执行被冻结的脚本与输入，
+            # 不会放宽 SandboxScope、路径白名单、平台可信声明或资源限制。
+            if os.name == "nt":
+                if not self._md_runtime.windows_process_enabled:
+                    denied = ExecutionResult(status="FAILED", error_code="AI_CAPABILITY_UNAVAILABLE", error_message="Windows process execution is disabled")
+                    self._log(db, tenant_id, user_id, skill, None, task_id, denied, trace_id=ctx.trace_id)
+                    return denied
+                if not manifest.windows_trusted:
+                    denied = ExecutionResult(status="FAILED", error_code="AI_SKILL_WINDOWS_UNTRUSTED", error_message="skill did not declare windows_trusted")
+                    self._log(db, tenant_id, user_id, skill, None, task_id, denied, trace_id=ctx.trace_id)
+                    return denied
+            if not resume_checkpoint_id:
+                if task_id is None or user_id is None:
+                    denied = ExecutionResult(
+                        status="FAILED",
+                        error_code="AI_SCRIPT_CONFIRMATION_CONTEXT_REQUIRED",
+                        error_message="script execution requires a task context and an authenticated user for approval",
+                    )
+                    self._log(db, tenant_id, user_id, skill, None, task_id, denied, trace_id=ctx.trace_id)
+                    return denied
+                script_file = manifest.script_files[0] if manifest.script_files else ""
+                pending_call = {
+                    "skill_version_id": str(skill.id),
+                    "arguments": arguments,
+                    "implementation": "md_script",
+                    "script_file": script_file,
+                    "script_fingerprint": manifest.file_fingerprint,
+                    "sandbox_scope": scope.to_dict(),
+                }
+                argument_hash = hashlib.sha256(json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
                 confirmation = pause_task_for_confirmation(
                     db,
                     tenant_id=tenant_id,
                     user_id=user_id,
                     task_id=task_id,
-                    reason="Windows 脚本执行需人工确认（技能 windows_trusted）",
-                    snapshot={"skill_version_id": str(skill.id), "implementation": "md_script", "windows_trusted": manifest.windows_trusted},
-                    execution_context={},
+                    reason="MD-Skill Python 脚本执行需要人工确认",
+                    snapshot={
+                        "execution_kind": "md_script",
+                        "skill_version_id": str(skill.id),
+                        "script_name": manifest.name,
+                        "script_file": script_file,
+                        "sandbox_mode": scope.mode,
+                        "sandbox_isolation": scope.isolation,
+                    },
+                    execution_context={"script_fingerprint": manifest.file_fingerprint, "sandbox_scope": scope.to_dict()},
                     completed_steps=[],
                     pending_steps=["md_script"],
                     pending_call=pending_call,
-                    idempotency_key=f"win-script:{skill.id}:{hashlib.sha256(json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()}",
+                    idempotency_key=f"md-script:{skill.id}:{manifest.file_fingerprint}:{argument_hash}",
                     skill_version_id=skill.id,
                     approval_provider=self._approvals,
                 )
@@ -853,6 +903,7 @@ class SkillGateway:
                 # 执行点二次校验：审批通过后到真正 spawn 之间再次确认 scope 未被篡改
                 if checkpoint is not None:
                     self._check_approved_scope(checkpoint, scope)
+                    self._check_approved_script(checkpoint, skill_version_id=skill.id, manifest=manifest, arguments=arguments)
                 data = await self._md_runtime.execute(manifest, arguments, scope=scope)
                 result = ExecutionResult(status="SUCCEEDED", data=data)
             except ApiError as exc:
