@@ -31,7 +31,7 @@ def validate_citations(answer: str, chunks: list[KnowledgeChunk]) -> dict:
         if location:
             allowed_names.add(f"{file_name}（{' · '.join(location)}）")
     valid = [name for name in citations if name in allowed_names]
-    ok = (not used) or bool(valid)
+    ok = (not used) or (bool(citations) and len(valid) == len(citations))
     return {
         "citation_valid": ok, "used_retrieval": used,
         "citations": citations, "action": "OK" if ok else "REJECTED",
