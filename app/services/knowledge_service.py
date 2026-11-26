@@ -305,8 +305,6 @@ def build_knowledge_context(chunks: list) -> str | None:
     ]
     for item in chunks:
         label = _human_source_label(item)
-        meta = item.metadata or {}
-        file_name = meta.get("file_name") or Path(item.source).name
         sections.append(
             f"[来源资料：{label}；引用标记：[资料:{label}]]\n"
             f"<untrusted_knowledge>\n{item.content[:4000]}\n</untrusted_knowledge>"
