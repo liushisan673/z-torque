@@ -110,7 +110,12 @@ def allowed_paths_for_knowledge_base(request, db: Session, *, tenant_id: UUID, u
             File.status == "PARSED",
         )
     ).all()
-    return [str(Path(object_store.local_path(key)).resolve()) for key in storage_keys]
+    allowed: set[str] = set()
+    for key in storage_keys:
+        raw = str(key)
+        local = Path(object_store.local_path(key)).expanduser().resolve()
+        allowed.update({raw, raw.replace("\\", "/"), raw.replace("/", "\\"), str(local)})
+    return sorted(allowed)
 
 
 def search(
@@ -208,7 +213,15 @@ def allowed_paths_for_knowledge_bases(
             File.status == "PARSED",
         )
     ).all()
-    return [str(Path(store.local_path(key)).resolve()) for key in keys]
+    # SQL 白名单必须兼容 DocRow.path 的历史存储形式：对象键相对路径、
+    # POSIX 分隔符、Windows 分隔符及解析后的绝对路径。最终仍由 provider
+    # 的 _path_allowed(resolve) 做真实路径边界校验，不能仅依赖字符串白名单。
+    allowed: set[str] = set()
+    for key in keys:
+        raw = str(key)
+        local = Path(store.local_path(key)).expanduser().resolve()
+        allowed.update({raw, raw.replace("\\", "/"), raw.replace("/", "\\"), str(local)})
+    return sorted(allowed)
 
 
 def retrieve_agent_knowledge(
