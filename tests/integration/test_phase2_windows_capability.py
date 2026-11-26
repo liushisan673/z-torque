@@ -82,7 +82,7 @@ async def test_windows_untrusted_skill_is_rejected(monkeypatch):
     monkeypatch.setattr(runtime_module, "os", SimpleNamespace(name="nt"))
     runtime = MdSkillRuntime(root=_ROOT, enabled=True, windows_process_enabled=True)
     with pytest.raises(ApiError) as exc:
-        await runtime.execute(_manifest(windows_trusted=False), {})
+        await runtime.execute(_manifest(windows_trusted=False), {}, approval_granted=True)
     assert exc.value.code == SKILL_WINDOWS_UNTRUSTED
     assert exc.value.status_code == 403
 
