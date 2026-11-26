@@ -23,6 +23,49 @@ from app.services.usage_service import record_usage_summary
 
 logger = logging.getLogger("z_torque.chat_stream")
 
+_INTERNAL_REF_MARKERS = ("[chunk:", "[source:")
+
+
+def _filter_internal_reference_delta(buffer: str, content: str, *, final: bool = False) -> tuple[str, str]:
+    """增量过滤内部引用标记；支持标记被模型拆分到多个 SSE delta 的情况。"""
+    pending = buffer + content
+    output: list[str] = []
+    while pending:
+        marker = next((item for item in _INTERNAL_REF_MARKERS if pending.startswith(item)), None)
+        if marker:
+            end = pending.find("]")
+            if end < 0:
+                if final:
+                    pending = ""
+                break
+            pending = pending[end + 1:]
+            continue
+        if any(marker.startswith(pending) for marker in _INTERNAL_REF_MARKERS) and not final:
+            break
+        start = pending.find("[")
+        if start < 0:
+            hold = 0
+            if not final:
+                for size in range(1, min(len(pending), max(map(len, _INTERNAL_REF_MARKERS)) - 1) + 1):
+                    suffix = pending[-size:]
+                    if any(marker.startswith(suffix) for marker in _INTERNAL_REF_MARKERS):
+                        hold = size
+            if hold:
+                output.append(pending[:-hold])
+                pending = pending[-hold:]
+            else:
+                output.append(pending)
+                pending = ""
+            break
+        if start:
+            output.append(pending[:start])
+            pending = pending[start:]
+            continue
+        output.append(pending[0])
+        pending = pending[1:]
+    return "".join(output), pending
+
+
 
 def _owned_stream_resources(db, *, tenant_id, user_id, conversation_id, user_message_id, agent_version_id):
     """流式写入前的属主收口（Phase 2 §四）：会话属主 + 消息归属该会话 + 版本属主可见。
@@ -77,12 +120,23 @@ async def stream_chat(*, gateway, request: ModelRequest, ctx: SecurityContext, c
         return sse_event(str(sequence), event, data)
 
     final_response = None
+    pending_reference = ""
     try:
         async for chunk in gateway.stream_response(request):
             if chunk.get("type") == "delta":
-                yield ev("message.delta", {"content": chunk.get("content")})
+                safe_delta, pending_reference = _filter_internal_reference_delta(
+                    pending_reference, str(chunk.get("content") or ""),
+                )
+                if safe_delta:
+                    yield ev("message.delta", {"content": safe_delta})
             elif chunk.get("type") == "final":
                 final_response = chunk.get("response")
+        if pending_reference:
+            safe_tail, pending_reference = _filter_internal_reference_delta(
+                pending_reference, "", final=True,
+            )
+            if safe_tail:
+                yield ev("message.delta", {"content": safe_tail})
     except ModelGatewayError as exc:
         yield ev("message.error", {"code": exc.code, "message": exc.message})
         try:
