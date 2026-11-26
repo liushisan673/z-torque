@@ -37,11 +37,13 @@ class MdSkillRuntime:
         self.windows_process_enabled = windows_process_enabled
         self.allowed_roots = [Path(item).expanduser().resolve() for item in (allowed_roots if allowed_roots is not None else [str(self.root)])]
 
-    async def execute(self, manifest: MdSkillManifest, arguments: dict[str, Any], *, scope: SandboxScope | None = None) -> dict[str, Any]:
+    async def execute(self, manifest: MdSkillManifest, arguments: dict[str, Any], *, scope: SandboxScope | None = None, approval_granted: bool = False) -> dict[str, Any]:
         """执行脚本：scope 由 SkillGateway 显式传入（不依赖 ContextVar/环境继承）。
 
         直构场景未传时以驱动声明的边界为准，仍是显式对象透传，不是隐式回退。
         """
+        if not approval_granted:
+            raise ApiError("AI_SCRIPT_APPROVAL_REQUIRED", "MD-Skill script execution requires an approved Task checkpoint", 403)
         validate_input(manifest, arguments)
         if manifest.implementation != "md_script" or not manifest.allow_scripts:
             raise ApiError("AI_SKILL_SCRIPT_DISABLED", "script execution is not enabled for this skill", 503)
