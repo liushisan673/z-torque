@@ -135,9 +135,10 @@ def _docx_blocks(path: Path, *, limit: int):
         if not pending:
             return
         prefix = " / ".join(headings[-3:])
-        raw = (f"所属章节：{prefix}\n" if prefix else "") + "\n".join(pending)
+        raw = "\n".join(pending)
         for piece in _split_semantic(raw):
-            yield ParsedBlock(piece, line_start=max(1, paragraph_no - len(pending) + 1), line_end=paragraph_no)
+            contextual = (f"所属章节：{prefix}\n" if prefix else "") + piece
+            yield ParsedBlock(contextual, line_start=max(1, paragraph_no - len(pending) + 1), line_end=paragraph_no)
             emitted += 1
             if emitted >= limit:
                 return
