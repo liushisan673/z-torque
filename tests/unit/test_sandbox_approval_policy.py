@@ -20,7 +20,7 @@ def test_confirmation_requester_cannot_approve_own_request_even_as_admin():
 
 
 def test_confirmation_can_be_approved_by_a_different_user():
-    assert_distinct_approver(uuid4(), uuid4()) is None
+    assert_distinct_approver(uuid4(), uuid4())
 
 
 def test_script_approval_summary_is_safe_and_does_not_expose_arguments():
