@@ -10,7 +10,6 @@ from app.core.responses import success_response
 from app.db.session import get_db
 from app.models import Confirmation, User
 from app.schemas.confirmation import ConfirmationResolveRequest, ConfirmationResponse
-from app.security.permissions import is_admin_user
 
 router = APIRouter(prefix="/confirmations", tags=["confirmations"])
 
@@ -30,31 +29,32 @@ def _request_summary(row: Confirmation) -> dict:
     return {"kind": "tool", "title": "工具操作确认"}
 
 
-def _dump(row: Confirmation, username: str | None, *, viewer_user_id=None, viewer_is_admin: bool = False) -> dict:
+def _dump(row: Confirmation, username: str | None, *, viewer_user_id=None) -> dict:
     payload = ConfirmationResponse.model_validate(row).model_dump(mode="json")
     payload["requested_by_username"] = username
     payload["request_summary"] = _request_summary(row)
     payload["can_resolve"] = bool(
-        viewer_is_admin and viewer_user_id is not None
-        and row.requested_by_user_id != viewer_user_id and row.status == "PENDING"
+        viewer_user_id is not None
+        and row.requested_by_user_id == viewer_user_id
+        and row.status == "PENDING"
     )
     return payload
 
 
 @router.get("", summary="获取确认列表")
 async def list_confirmations(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # 默认拒绝（契约 §5）：只有管理员与本单发起人可见，避免同租户成员读取他人工具入参
+    # 单机版只返回当前登录用户自己的确认记录。
     stmt = (
         select(Confirmation, User.username)
         .outerjoin(User, User.id == Confirmation.requested_by_user_id)
-        .where(Confirmation.tenant_id == user.tenant_id)
+        .where(
+            Confirmation.tenant_id == user.tenant_id,
+            Confirmation.requested_by_user_id == user.id,
+        )
     )
-    viewer_is_admin = is_admin_user(db, tenant_id=user.tenant_id, user_id=user.id)
-    if not viewer_is_admin:
-        stmt = stmt.where(Confirmation.requested_by_user_id == user.id)
     rows = db.execute(stmt.order_by(Confirmation.created_at.desc())).all()
     return success_response(request, [
-        _dump(row, username, viewer_user_id=user.id, viewer_is_admin=viewer_is_admin)
+        _dump(row, username, viewer_user_id=user.id)
         for row, username in rows
     ])
 
@@ -64,11 +64,10 @@ async def get_confirmation(confirmation_id: UUID, request: Request, user: User =
     row = db.scalar(select(Confirmation).where(Confirmation.id == confirmation_id, Confirmation.tenant_id == user.tenant_id))
     if row is None:
         raise ApiError("AI_CONFIRMATION_NOT_FOUND", "confirmation not found", 404)
-    if row.requested_by_user_id != user.id and not is_admin_user(db, tenant_id=user.tenant_id, user_id=user.id):
+    if row.requested_by_user_id != user.id:
         raise ApiError("AI_CONFIRMATION_NOT_FOUND", "confirmation not found", 404)
     username = db.scalar(select(User.username).where(User.id == row.requested_by_user_id))
-    viewer_is_admin = is_admin_user(db, tenant_id=user.tenant_id, user_id=user.id)
-    return success_response(request, _dump(row, username, viewer_user_id=user.id, viewer_is_admin=viewer_is_admin))
+    return success_response(request, _dump(row, username, viewer_user_id=user.id))
 
 
 @router.post("/{confirmation_id}/resolve", summary="处理确认请求")
@@ -79,4 +78,4 @@ async def resolve(confirmation_id: UUID, payload: ConfirmationResolveRequest, re
     db.commit()
     db.refresh(row)
     username = db.scalar(select(User.username).where(User.id == row.requested_by_user_id))
-    return success_response(request, _dump(row, username, viewer_user_id=user.id, viewer_is_admin=is_admin_user(db, tenant_id=user.tenant_id, user_id=user.id)))
+    return success_response(request, _dump(row, username, viewer_user_id=user.id))
