@@ -149,7 +149,7 @@ def _docx_blocks(path: Path, *, limit: int):
             if not text:
                 continue
             paragraph_no += 1
-            if style and style.lower().startswith("heading"):
+            if style and (style.lower().startswith(("heading", "标题")) or style.lower() in {"title", "subtitle"}):
                 yield from flush()
                 headings.append(text)
                 headings[:] = headings[-3:]
