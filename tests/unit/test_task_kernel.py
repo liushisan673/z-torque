@@ -168,11 +168,8 @@ def test_task_can_pause_for_approval_more_than_once():
             pending_call={"tool_version_id": "a"}, idempotency_key=f"{task.id}:a",
         )
     with SessionLocal.begin() as db:
-        # 他人审批通过（请求者不能自批）→ 任务回队 → worker 认领恢复 RUNNING
-        approver = User(tenant_id=tenant_id, username=f"u-{uuid4()}", password_hash=hash_password("pass"))
-        db.add(approver)
-        db.flush()
-        resolve_confirmation(db, tenant_id=tenant_id, confirmation_id=first.id, user_id=approver.id, approved=True)
+        # 当前登录用户本人确认 → 任务回队 → worker 认领恢复 RUNNING
+        resolve_confirmation(db, tenant_id=tenant_id, confirmation_id=first.id, user_id=user_id, approved=True)
         task = db.get(Task, task.id)
         assert task.status == TaskStatus.QUEUED
         transition_task(db, task, TaskStatus.RUNNING, "TASK_STARTED", "started")
