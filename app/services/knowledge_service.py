@@ -326,9 +326,8 @@ def ensure_answer_citations(answer: str, chunks: list) -> str:
         return clean_answer
     references = []
     for item in chunks:
-        meta = item.metadata or {}
-        file_name = meta.get("file_name") or Path(item.source).name
-        references.append(f"- {_human_source_label(item)} [资料:{_human_source_label(item)}]")
+        label = _human_source_label(item)
+        references.append(f"- {label} [资料:{label}]")
     if not references:
         return answer
     return clean_answer.rstrip() + "\n\n**参考资料**\n" + "\n".join(dict.fromkeys(references))
