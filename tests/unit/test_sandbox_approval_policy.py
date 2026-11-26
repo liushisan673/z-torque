@@ -118,7 +118,7 @@ Run the demo script.
         allowed_roots=[str(tmp_path)],
     )
     with pytest.raises(ApiError) as excinfo:
-        await runtime.execute(published_manifest, {})
+        await runtime.execute(published_manifest, {}, approval_granted=True)
     assert excinfo.value.code == "AI_SKILL_VERSION_DRIFT"
     assert excinfo.value.status_code == 409
 
