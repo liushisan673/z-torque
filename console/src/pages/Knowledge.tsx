@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Alert, Button, Card, Empty, Input, List, Modal, Popconfirm, Progress,
+  Button, Card, Empty, Input, List, Modal, Popconfirm, Progress,
   Select, Space, Table, Tag, Tooltip, Typography,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
@@ -284,6 +284,14 @@ export function KnowledgePage() {
     },
   ];
   const stateView = status ? knowledgeState(status.search) : null;
+  // 状态只用于语义提示：成功=绿点，降级=黄点，不可用=红点；不再整块着色
+  const stateTone = !status
+    ? "muted"
+    : status.search === "AVAILABLE" || status.search === "READY"
+      ? "success"
+      : status.search === "DEGRADED"
+        ? "warning"
+        : "danger";
   const parsedCount = files.filter((file) => file.status === "PARSED").length;
   const failedCount = files.filter((file) => file.status === "PARSE_FAILED").length;
   const processingCount = files.filter((file) => file.status === "UPLOADED").length;
@@ -293,14 +301,14 @@ export function KnowledgePage() {
     <div className="knowledge-page">
       <div className="knowledge-header">
         <div>
-          <div className="knowledge-title-row"><Typography.Title level={3}>知识库</Typography.Title>{stateView && <Tag color={stateView.color}>{stateView.label}</Tag>}</div>
+          <div className="knowledge-title-row"><Typography.Title level={3}>知识库</Typography.Title>{stateView && <span className={`knowledge-status-tag is-${stateTone}`}>{stateView.label}</span>}</div>
           <Typography.Paragraph type="secondary">集中管理本机资料、验证检索效果，并在工作台中检查智能体是否能正确引用资料。</Typography.Paragraph>
         </div>
         <Space wrap>
           <Select value={selectedBaseId || undefined} placeholder="选择知识库" style={{ width: 210 }} onChange={setSelectedBaseId} options={knowledgeBases.map((item) => ({ value: item.id, label: item.name }))} />
           <Button onClick={() => setCreateBaseOpen(true)}>新建知识库</Button>
           <Popconfirm title="删除当前知识库？" description="只删除知识库及其关联，原始文件不会删除。" onConfirm={() => void deleteKnowledgeBase()} disabled={!selectedBaseId}>
-            <Button danger disabled={!selectedBaseId}>删除知识库</Button>
+            <Button type="text" danger disabled={!selectedBaseId}>删除知识库</Button>
           </Popconfirm>
           <Button icon={<ReloadOutlined />} onClick={() => void load(true)} loading={refreshing}>刷新</Button>
           <Button type="primary" icon={<CloudUploadOutlined />} onClick={() => inputRef.current?.click()} loading={uploading} disabled={!selectedBaseId}>添加资料</Button>
@@ -308,15 +316,17 @@ export function KnowledgePage() {
         </Space>
       </div>
 
-      {knowledgeBases.length === 0 && <Alert type="info" showIcon message="先创建一个知识库" description="知识库创建后，可以上传资料并将同一份资料关联到多个智能体。" action={<Button size="small" type="primary" onClick={() => setCreateBaseOpen(true)}>创建知识库</Button>} />}
-      <section className="knowledge-workflow"><div><b>01</b><strong>选择知识库</strong><span>创建并管理知识集合</span></div><i>→</i><div><b>02</b><strong>添加资料</strong><span>上传并解析文件</span></div><i>→</i><div><b>03</b><strong>验证检索</strong><span>用真实问题测试</span></div><i>→</i><div><b>04</b><strong>工作台使用</strong><span>提问并核对引用</span></div><Button type="link" onClick={() => navigate("/chat")}>打开工作台</Button></section>
-
-      {stateView && (
-        <Alert className="knowledge-state-alert" type={status?.search === "AVAILABLE" || status?.search === "READY" ? "success" : status?.search === "DEGRADED" ? "warning" : "error"} showIcon
-          message={<Space><span>本地知识检索</span><Tag color={stateView.color}>{stateView.label}</Tag></Space>}
-          description={<Space direction="vertical" size={2}><span>{stateView.description}</span><span>{status?.embedding?.hybrid_search ? `混合检索已启用：${status.embedding.provider} / ${status.embedding.model}` : status?.embedding?.provider === "local" ? "内置中文向量模型尚未初始化；点击“检查并重建索引”可自动下载并初始化（首次需要网络），完成后启用语义混合检索。" : "语义 Embedding 未启用：当前使用全文检索；可在部署配置中启用兼容的 Embeddings 服务后重新索引。"}</span></Space>}
-        />
+      {knowledgeBases.length === 0 && (
+        <section className="knowledge-setup">
+          <div className="knowledge-setup-icon" aria-hidden><DatabaseOutlined /></div>
+          <div className="knowledge-setup-copy">
+            <strong>先创建一个知识库</strong>
+            <p>知识库创建后，可以上传资料并将同一份资料关联到多个智能体。</p>
+          </div>
+          <Button type="primary" onClick={() => setCreateBaseOpen(true)}>创建知识库</Button>
+        </section>
       )}
+      <section className="knowledge-workflow"><div><b>01</b><strong>选择知识库</strong><span>创建并管理知识集合</span></div><i>→</i><div><b>02</b><strong>添加资料</strong><span>上传并解析文件</span></div><i>→</i><div><b>03</b><strong>验证检索</strong><span>用真实问题测试</span></div><i>→</i><div><b>04</b><strong>工作台使用</strong><span>提问并核对引用</span></div><Button type="link" onClick={() => navigate("/chat")}>打开工作台</Button></section>
       {uploading && <Card size="small" className="knowledge-upload-progress"><Space direction="vertical" style={{ width: "100%" }} size={6}><Typography.Text>正在上传资料…</Typography.Text><Progress percent={uploadProgress} size="small" /></Space></Card>}
 
       <div className="knowledge-search-grid">
@@ -327,7 +337,9 @@ export function KnowledgePage() {
           </div>
           <Input.Search value={query} onChange={(event) => setQuery(event.target.value)} onSearch={() => void searchKnowledge()}
             placeholder="例如：项目的部署要求是什么？" enterButton="检索" loading={searching} size="large" />
-          {results !== null && (
+          {results === null ? (
+            <p className="knowledge-search-hint">输入问题后按 Enter 检索，命中的资料片段会显示在这里。</p>
+          ) : (
             <div className="knowledge-results">
               {results.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有找到相关内容，试试换一种问法或添加更多资料。" /> : (
                 <List dataSource={results} renderItem={(item, index) => (

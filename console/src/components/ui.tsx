@@ -80,8 +80,8 @@ export function StatusTag({ status }: { status: string }) {
 export function EmptyState({ title, hint }: { title: string; hint?: string }) {
   return (
     <div className="empty-state">
-      <div style={{ fontWeight: 600, color: "#4a5262" }}>{title}</div>
-      {hint && <div className="text-sm" style={{ marginTop: 4 }}>{hint}</div>}
+      <div className="empty-state-title">{title}</div>
+      {hint && <div className="empty-state-hint">{hint}</div>}
     </div>
   );
 }

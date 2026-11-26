@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { request, uploadFile } from "../services/api";
 import { errorText } from "../services/errorText";
-import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
+import { writeSelectedId } from "../services/selectionMemory";
 import type { SkillListItem, SkillDetail, SkillVersionDetail, SkillToolLink, SkillVersionRef, SelectableTool, SelectableToolGroup, SelectableToolResponse } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
@@ -12,7 +12,6 @@ import { useToast } from "../components/Toast";
 import { GuideCallout } from "../components/GuideCallout";
 import { isAdminUser } from "../components/AppTopbar";
 import { useAuth } from "../stores/auth";
-import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 // 列表统一分页：前端切片 + 公共分页条
 import { Pagination, usePager } from "../components/Pagination";
 import { VersionContentModal, type VersionContentSection } from "../components/VersionContentModal";
@@ -128,6 +127,8 @@ export function SkillsPage() {
   const [busy, setBusy] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 详情改为列表行点击后的弹窗，不再占用右侧栏
+  const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<SkillDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [versionDetail, setVersionDetail] = useState<SkillVersionDetail | null>(null);
@@ -152,8 +153,6 @@ export function SkillsPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [keyword, setKeyword] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  // 左右分栏宽度：拖拽把手调整，会话内保持，退出登录恢复默认
-  const listPane = usePaneWidth("skill", "--skill-list-w");
   // 顶部锚点导航：当前高亮区块；详情内容纵向滚动一次展示全部（无页签）
   const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
   const detailBodyRef = useRef<HTMLDivElement | null>(null);
@@ -210,15 +209,7 @@ export function SkillsPage() {
     void load();
   }, [load]);
 
-  // 默认展示列表第一项，避免主区空白；跳转回来时优先恢复上次选中（记忆 id 已不存在则回退第一项）
-  useEffect(() => {
-    if (loading || selectedId) return;
-    if (skills.length === 0) return;
-    const remembered = readSelectedId(SELECTED_KEY);
-    const target = (remembered && skills.find((s) => s.id === remembered)) || skills[0];
-    void openDetail(target);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, skills, selectedId]);
+  // 列表页不再预选第一项：详情由点击行打开弹窗
 
   // M12-3 B-4/B-5：/skills?bindTool=id1,id2 —— 连接器页批量登记完成后的引导跳转，
   // 直接打开新建技能向导并预填工具勾选；引导参数只消费一次（清除 query），
@@ -254,6 +245,7 @@ export function SkillsPage() {
   }, [detail, editing]);
 
   async function openDetail(s: SkillListItem) {
+    setDetailOpen(true);
     setSelectedId(s.id);
     writeSelectedId(SELECTED_KEY, s.id);
     setDetail(null);
@@ -1090,7 +1082,7 @@ export function SkillsPage() {
         </div>
       )}
 
-      <div className="skill-shell" style={listPane.style}>
+      <div className="skill-shell single">
         {/* 左侧列表 */}
         <aside className="skill-list-pane">
           <div className="skill-list-header">
@@ -1162,6 +1154,11 @@ export function SkillsPage() {
           </div>
 
           <div className="skill-list">
+            <div className="agent-list-columns" aria-hidden>
+              <span>名称</span>
+              <span>描述</span>
+              <span>类型 / 来源</span>
+            </div>
             {loading ? (
               <Loading />
             ) : filteredSkills.length === 0 ? (
@@ -1230,11 +1227,17 @@ export function SkillsPage() {
           <Pagination total={skillPager.total} page={skillPager.page} pageSize={skillPager.pageSize} onChange={skillPager.onChange} />
         </aside>
 
-        {/* 左右分栏拖拽把手 */}
-        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+        {/* 详情改为弹窗，列表独占整页 */}
+      </div>
 
-        {/* 右侧详情 */}
-        <section className="skill-detail-pane">
+      {/* 详情弹窗：列表行点击后打开，保留原有详情与全部操作 */}
+      <Modal
+        open={detailOpen && !!selected}
+        title="技能详情"
+        onClose={() => setDetailOpen(false)}
+        width={1000}
+      >
+        <section className="skill-detail-pane in-modal">
           {!selected ? (
             <div className="skill-detail-empty">
               <h2>选择左侧技能查看详情</h2>
@@ -1767,7 +1770,7 @@ export function SkillsPage() {
             </>
           )}
         </section>
-      </div>
+      </Modal>
 
       {/* 创建 Skill 弹窗（M12-3 B-4 向导：创建 + 首版本 + 绑定工具单次提交） */}
       <Modal

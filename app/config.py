@@ -152,6 +152,12 @@ class Settings(BaseSettings):
     mcp_timeout_seconds: float = 30
     mcp_max_response_bytes: int = 1_000_000
     mcp_allowed_hosts: list[str] = Field(default_factory=list)
+    # 平台内置联网搜索（只读 MCP）；密钥只从 .env / 环境变量读取，不写进源码。
+    builtin_mcp_search_enabled: bool = True
+    builtin_mcp_search_endpoint: str = 'http://8.130.167.4:8765/mcp'
+    builtin_mcp_search_token: SecretStr | None = None
+    builtin_mcp_search_timeout_seconds: float = 30
+    builtin_mcp_search_allow_private_network: bool = True
     model_base_url: str | None = None
     model_api_key: SecretStr | None = None
     # 全局默认模型名。空字符串 = 未配置（阶段13 决策：未配置时对话显式报

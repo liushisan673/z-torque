@@ -8,6 +8,8 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from app.config import get_settings
+
 from app.models import (
     Agent,
     AgentVersion,
@@ -219,6 +221,73 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
                     "description": route_description[:8000],
                     "parameters": schema,
                 },
+            })
+    # 平台内置联网搜索（只读 MCP）：默认暴露给所有 Agent，子执行链不暴露。
+    # 工具定义在此，真实调用由 execution_loop 的 builtin_kind 分派到 SkillGateway。
+    settings = get_settings()
+    if settings.builtin_mcp_search_enabled and not exclude_requires_confirmation:
+        search_tools = [
+            (
+                "web_search",
+                "平台内置联网搜索：用国内搜索引擎检索网页并返回结构化结果。"
+                "涉及时效、最新事实、外部网页内容或需要核验的信息时优先调用；"
+                "需要正文摘录时传 need_content=true，不要连续调用多次 scrape。",
+                {
+                    "type": "object",
+                    "properties": {
+                        "q": {"type": "string", "description": "搜索关键词（中文或英文）"},
+                        "engine": {"type": "string", "enum": ["auto", "baidu", "sogou", "so360", "toutiao"], "default": "auto", "description": "auto 表示多引擎聚合"},
+                        "num": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+                        "type": {"type": "string", "enum": ["web", "news"], "default": "web"},
+                        "time_range": {"type": "string", "enum": ["any", "day", "week", "month", "year"], "default": "any"},
+                        "after": {"type": "string", "description": "仅保留此日期之后的结果，YYYY-MM-DD"},
+                        "before": {"type": "string", "description": "仅保留此日期之前的结果，YYYY-MM-DD"},
+                        "need_content": {"type": "boolean", "default": False, "description": "是否同时读取前几条结果正文摘录"},
+                        "content_chars": {"type": "integer", "minimum": 200, "maximum": 4000, "default": 800},
+                        "include_domains": {"type": "array", "items": {"type": "string"}},
+                        "exclude_domains": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["q"],
+                    "additionalProperties": False,
+                },
+            ),
+            (
+                "web_search_and_read",
+                "平台内置联网搜索并读取正文：一次调用同时拿到搜索结果与前几条网页正文摘录。"
+                "需要基于网页内容回答问题时优先用它，避免先 search 再逐条 scrape。",
+                {
+                    "type": "object",
+                    "properties": {
+                        "q": {"type": "string", "description": "搜索关键词（中文或英文）"},
+                        "engine": {"type": "string", "enum": ["auto", "baidu", "sogou", "so360", "toutiao"], "default": "auto"},
+                        "num": {"type": "integer", "minimum": 1, "maximum": 20, "default": 10},
+                        "read": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3, "description": "抓取正文的条数"},
+                        "max_chars": {"type": "integer", "minimum": 200, "maximum": 8000, "default": 2000, "description": "每篇正文最多保留的字符数"},
+                        "type": {"type": "string", "enum": ["web", "news"], "default": "web"},
+                        "time_range": {"type": "string", "enum": ["any", "day", "week", "month", "year"], "default": "any"},
+                        "after": {"type": "string", "description": "仅保留此日期之后的结果，YYYY-MM-DD"},
+                        "before": {"type": "string", "description": "仅保留此日期之前的结果，YYYY-MM-DD"},
+                        "include_domains": {"type": "array", "items": {"type": "string"}},
+                        "exclude_domains": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["q"],
+                    "additionalProperties": False,
+                },
+            ),
+        ]
+        for original_name, description, schema in search_tools:
+            alias = original_name
+            suffix = 2
+            while alias in mappings:
+                alias = f"{original_name}_{suffix}"
+                suffix += 1
+            mappings[alias] = ToolMapping(
+                alias, None, None, schema,
+                original_name=original_name, builtin_kind="mcp_search",
+            )
+            tools.append({
+                "type": "function",
+                "function": {"name": alias, "description": description, "parameters": schema},
             })
     # 平台内置默认技能：生成文件变更提案，只有用户 Keep 后才落地为会话附件。
     # 子执行链（exclude_requires_confirmation=True）不暴露，避免重复生成文件。

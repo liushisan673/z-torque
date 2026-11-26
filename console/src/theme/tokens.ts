@@ -130,10 +130,11 @@ export const lightTokens: SemanticTokens = {
   borderL4: "rgba(0,0,0,0.16)",
   elevationStroke: "rgba(0,0,0,0.06)",
 
-  brand: palette.brand,
-  brandHover: "#3663d0",
-  brandActive: "#2a53b8",
-  brandSoft: palette.blue[50],
+  // 动作色改为中性墨色：主按钮/链接不再使用蓝色，界面只保留语义色
+  brand: palette.neutral[900],
+  brandHover: palette.neutral[1000],
+  brandActive: palette.neutral[1000],
+  brandSoft: palette.neutral[100],
 
   success: palette.green[500],
   successSoft: palette.green[100],
@@ -166,7 +167,7 @@ export const darkTokens: SemanticTokens = {
   textSecondary: palette.neutral[400],
   textTertiary: palette.neutral[600],
   textQuaternary: palette.neutral[500],
-  textOnPrimary: palette.neutral[0],
+  textOnPrimary: palette.neutral[950],
 
   borderL1: "rgba(255,255,255,0.06)",
   borderL2: "rgba(255,255,255,0.12)",
@@ -174,10 +175,10 @@ export const darkTokens: SemanticTokens = {
   borderL4: "rgba(255,255,255,0.20)",
   elevationStroke: "rgba(255,255,255,0.08)",
 
-  brand: palette.brandDark,
-  brandHover: "#6b85ff",
-  brandActive: "#3d5cf0",
-  brandSoft: "#232e4d",
+  brand: palette.neutral[50],
+  brandHover: palette.neutral[0],
+  brandActive: palette.neutral[100],
+  brandSoft: palette.neutral[800],
 
   success: palette.green[400],
   successSoft: "#1c3226",

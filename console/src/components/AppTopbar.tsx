@@ -1,9 +1,9 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   AppstoreOutlined, AuditOutlined, CloudServerOutlined, DatabaseOutlined,
-  MoonOutlined, RobotOutlined, SettingOutlined, SunOutlined, TeamOutlined,
-  ToolOutlined, ApiOutlined,
+  MenuFoldOutlined, MenuUnfoldOutlined, MoonOutlined, RobotOutlined,
+  SettingOutlined, SunOutlined, TeamOutlined, ToolOutlined, ApiOutlined, LogoutOutlined,
 } from "@ant-design/icons";
 import { useAuth } from "../stores/auth";
 import { useThemeMode } from "../theme/ThemeProvider";
@@ -67,6 +67,25 @@ const NAV_ICONS: Record<string, ReactNode> = {
   "/settings": <SettingOutlined />,
 };
 
+/** 导航展开态：默认展开，用户选择持久化，刷新后保持 */
+const NAV_EXPANDED_KEY = "z_torque_nav_expanded";
+
+function readNavExpanded(): boolean {
+  try {
+    return localStorage.getItem(NAV_EXPANDED_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function writeNavExpanded(expanded: boolean): void {
+  try {
+    localStorage.setItem(NAV_EXPANDED_KEY, expanded ? "1" : "0");
+  } catch {
+    /* 隐私模式下仅当前页生效 */
+  }
+}
+
 /** 全站统一的左侧主导航；Chat 与管理页面共用同一权限过滤和导航数据源。 */
 export function AppTopbar({ nav }: { nav: NavItem[] }) {
   const { user, logout } = useAuth();
@@ -75,27 +94,56 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
   const moreItems = items.filter((item) => item.section === "more");
   const { mode: theme, toggle, locale, setLocale, t } = useThemeMode();
   const location = useLocation();
-  const collapsed = true;
-  const label = (item: NavItem) => item.labelKey ? t(item.labelKey) : item.label;
+  const [expanded, setExpanded] = useState(readNavExpanded);
+  const collapsed = !expanded;
+  const label = (item: NavItem) => (item.labelKey ? t(item.labelKey) : item.label);
   const groups = [
     { key: "operations", title: t("nav.group.operations"), items: moreItems.filter((item) => item.group === "operations") },
     { key: "configuration", title: t("nav.group.configuration"), items: moreItems.filter((item) => item.group === "configuration") },
     { key: "account", title: t("nav.group.account"), items: moreItems.filter((item) => item.group === "account") },
   ];
 
+  useEffect(() => {
+    writeNavExpanded(expanded);
+  }, [expanded]);
+
   return (
-    <aside className={`app-nav-sidebar${collapsed ? " is-collapsed" : ""}`} aria-label="主导航">
+    <aside
+      className={`app-nav-sidebar${collapsed ? " is-collapsed" : ""}`}
+      aria-label="主导航"
+    >
       <div className="app-nav-brand">
-        <span className="chat-logo">苍擎</span>
-        {!collapsed && <span className="app-nav-brand-copy"><small>苍擎 · AI 工作空间</small></span>}
+        <button
+          type="button"
+          className="app-nav-logo"
+          onClick={() => setExpanded((value) => !value)}
+          title={collapsed ? "展开导航" : "收起导航"}
+          aria-label={collapsed ? "展开导航" : "收起导航"}
+          aria-expanded={!collapsed}
+        >
+          <span className="chat-logo">苍擎</span>
+          <span className="app-nav-logo-toggle" aria-hidden>
+            {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+          </span>
+        </button>
+        {!collapsed && (
+          <span className="app-nav-brand-copy">
+            <strong>苍擎 AI</strong>
+            <small>企业数字员工平台</small>
+          </span>
+        )}
       </div>
       <nav className="app-nav-list">
         <div className="app-nav-group">
           {!collapsed && <div className="app-nav-group-title">工作空间</div>}
           {primaryItems.map((item) => (
-            <NavLink key={item.to} to={item.to}
+            <NavLink
+              key={item.to}
+              to={item.to}
               className={({ isActive }) => "app-nav-link" + (isActive ? " active" : "")}
-              title={collapsed ? label(item) : undefined} aria-label={label(item)}>
+              title={collapsed ? label(item) : undefined}
+              aria-label={label(item)}
+            >
               <span className="app-nav-icon">{NAV_ICONS[item.to]}</span>
               {!collapsed && <span className="app-nav-label">{label(item)}</span>}
             </NavLink>
@@ -105,9 +153,15 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
           <div className="app-nav-group" key={group.key}>
             {!collapsed && <div className="app-nav-group-title">{group.title}</div>}
             {group.items.map((item) => (
-              <NavLink key={item.to} to={item.to}
-                className={({ isActive }) => "app-nav-link" + (isActive || location.pathname.startsWith(item.to + "/") ? " active" : "")}
-                title={collapsed ? label(item) : undefined} aria-label={label(item)}>
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  "app-nav-link" + (isActive || location.pathname.startsWith(item.to + "/") ? " active" : "")
+                }
+                title={collapsed ? label(item) : undefined}
+                aria-label={label(item)}
+              >
                 <span className="app-nav-icon">{NAV_ICONS[item.to]}</span>
                 {!collapsed && <span className="app-nav-label">{label(item)}</span>}
               </NavLink>
@@ -118,18 +172,41 @@ export function AppTopbar({ nav }: { nav: NavItem[] }) {
       <div className="app-nav-footer">
         <div className="app-nav-user">
           <span className="chat-user-avatar">{user?.username.slice(0, 1).toUpperCase() ?? "U"}</span>
-          {!collapsed && <span className="app-nav-username" title={user?.username}>{user?.username ?? t("top.notLoggedIn")}</span>}
+          {!collapsed && (
+            <span className="app-nav-username" title={user?.username}>
+              {user?.username ?? t("top.notLoggedIn")}
+            </span>
+          )}
         </div>
         <div className="app-nav-tools">
-          <button type="button" className="app-nav-tool" onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
-            title={t("top.language")} aria-label={t("top.language")}>{locale === "zh" ? "中" : "EN"}</button>
-          <button type="button" className="app-nav-tool" onClick={toggle}
+          <button
+            type="button"
+            className="app-nav-tool"
+            onClick={() => setLocale(locale === "zh" ? "en" : "zh")}
+            title={t("top.language")}
+            aria-label={t("top.language")}
+          >
+            {locale === "zh" ? "中" : "EN"}
+          </button>
+          <button
+            type="button"
+            className="app-nav-tool"
+            onClick={toggle}
             title={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
-            aria-label={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}>
+            aria-label={theme === "dark" ? t("top.theme.light") : t("top.theme.dark")}
+          >
             {theme === "dark" ? <SunOutlined /> : <MoonOutlined />}
           </button>
-          <button type="button" className="app-nav-tool app-nav-logout" onClick={() => void logout()}
-            title={t("top.logout")} aria-label={t("top.logout")}>{collapsed ? "↪" : t("top.logout")}</button>
+          <button
+            type="button"
+            className="app-nav-tool app-nav-logout"
+            onClick={() => void logout()}
+            title={t("top.logout")}
+            aria-label={t("top.logout")}
+          >
+            <LogoutOutlined />
+            <span className="app-nav-logout-label">{t("top.logout")}</span>
+          </button>
         </div>
       </div>
     </aside>

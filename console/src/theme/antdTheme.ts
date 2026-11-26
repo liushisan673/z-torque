@@ -20,6 +20,7 @@ function buildToken(t: SemanticTokens): ThemeConfig["token"] {
     colorPrimaryHover: t.brandHover,
     colorPrimaryActive: t.brandActive,
     colorPrimaryBg: t.brandSoft,
+    colorTextLightSolid: t.textOnPrimary,
     colorLink: t.brand,
     colorLinkHover: t.brandHover,
 
@@ -119,8 +120,9 @@ function buildComponents(t: SemanticTokens): ThemeConfig["components"] {
       itemColor: t.textSecondary,
       itemHoverColor: t.textPrimary,
       itemHoverBg: t.bgHover,
-      itemSelectedBg: t.brandSoft,
-      itemSelectedColor: t.brand,
+      // 导航选中态用中性叠加，不用主色填充
+      itemSelectedBg: t.bgHover,
+      itemSelectedColor: t.textPrimary,
       itemBorderRadius: geometry.radiusSM,
       itemHeight: 34,
     },
@@ -128,7 +130,7 @@ function buildComponents(t: SemanticTokens): ThemeConfig["components"] {
       itemColor: t.textSecondary,
       itemSelectedColor: t.textPrimary,
       itemHoverColor: t.textPrimary,
-      inkBarColor: t.brand,
+      inkBarColor: t.textPrimary,
       horizontalItemGutter: 24,
     },
     Segmented: {

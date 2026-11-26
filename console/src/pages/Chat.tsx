@@ -234,7 +234,15 @@ export function ChatPage() {
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null);
   // 窄屏抽屉：原实现在 <768px 直接隐藏侧栏，手机上无法切换会话与智能体
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  // 宽屏会话列表折叠：点击可隐藏/展开左侧会话列表，让对话区更宽
+  // 会话抽屉：Esc 关闭，给键盘用户一条与遮罩/关闭按钮并列的退出路径
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sidebarOpen]);
 
   const navigate = useNavigate();
   const { push: toast } = useToast();
@@ -1468,6 +1476,20 @@ export function ChatPage() {
 
         {/* 左侧栏：系统智能体（只读） + 会话列表。会话不再手动选择执行智能体 */}
         <aside className={`chat-sidebar${sidebarOpen ? " open" : ""}`}>
+          <div className="chat-drawer-head">
+            <span className="chat-drawer-title">会话</span>
+            <button
+              type="button"
+              className="chat-drawer-close"
+              onClick={() => setSidebarOpen(false)}
+              aria-label="关闭会话列表"
+              title="关闭会话列表"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
           <div className="chat-agent-picker">
             <div className="chat-agent-label">系统智能体</div>
             <div className="chat-agent-select" title="系统智能体会自动把需求派发给合适的智能体；也可以用 @ 指定智能体">
@@ -1503,7 +1525,7 @@ export function ChatPage() {
           </div>
 
           <div className="chat-session-toolbar">
-            <h3>会话</h3>
+            <span className="chat-session-count">{filteredConvs.length} 个会话</span>
             <Tooltip title="查看任务历史">
               <Button size="small" icon={<HistoryOutlined />} onClick={() => void openTaskHistory()}>
                 任务
@@ -1572,8 +1594,9 @@ export function ChatPage() {
               <button
                 className="chat-sidebar-toggle"
                 type="button"
-                onClick={() => setSidebarOpen(true)}
-                aria-label="打开会话列表"
+                onClick={() => setSidebarOpen((open) => !open)}
+                aria-expanded={sidebarOpen}
+                aria-label="会话列表"
                 title="会话列表"
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
@@ -1585,10 +1608,10 @@ export function ChatPage() {
             </div>
             <div className="chat-header-actions">
               <FileCompareDrawer conversationId={conversationId} />
-              <Button size="small" type="text" onClick={() => setSplitOpen((v) => !v)} title="多会话分栏">{splitOpen ? "收起分栏" : "分栏"}</Button>
+              <Button size="small" type="text" className="chat-header-action-secondary" onClick={() => setSplitOpen((v) => !v)} title="多会话分栏">{splitOpen ? "收起分栏" : "分栏"}</Button>
               {busy && <Button size="small" type="text" onClick={() => void stopActive()} title="停止当前回答">停止</Button>}
               {sendQueue.length > 0 && <span className="chat-queue-badge" title="刷新页面后队列不会保留">排队中：{sendQueue.length}</span>}
-              <Button size="small" type="text" onClick={() => void loadConfirmations()} title="查看确认记录">确认记录</Button>
+              <Button size="small" type="text" className="chat-header-action-secondary" onClick={() => void loadConfirmations()} title="查看确认记录">确认记录</Button>
               {task && (
                 <button
                   className={`chat-task-badge ${taskBadgeInfo.cls}`}
@@ -1743,7 +1766,7 @@ export function ChatPage() {
                 <div className="chat-mention-title">输入 @ 选择智能体（一次仅可指定一个）</div>
                 {agents
                   .filter((agent) => agent.current_published_version_id && agent.name.toLowerCase().includes(mentionQuery.toLowerCase()))
-                  .slice(0, 8)
+                  .slice(0, 6)
                   .map((agent) => (
                     <button key={agent.id} type="button" onClick={() => selectMention(agent)}>
                       @{agent.name}

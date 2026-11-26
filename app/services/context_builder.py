@@ -175,6 +175,15 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
         "等待用户 Keep/Cancel；回退也先生成反向提案。只说明目的与风险，不贴大段 diff。"
     )
     system_prompt = (system_prompt + "\n\n") + document_rule
+    # 平台内置联网搜索：只读工具，提示模型在时效性/外部事实场景使用，并统一引用格式。
+    if getattr(get_settings(), "builtin_mcp_search_enabled", False):
+        search_rule = (
+            "[联网搜索规则] 涉及今天/最新/刚刚等时效性内容、外部网页事实或需要核验的信息时，"
+            "调用 web_search 或 web_search_and_read；不要凭记忆断言时效性问题。"
+            "引用搜索结果必须用 [编号](URL) 标注来源，编号与结果列表 position 一致，"
+            "不要写成“来源：引擎名”之类的文字形式。"
+        )
+        system_prompt = (system_prompt + "\n\n") + search_rule
     # 站内 A2A：系统智能体（用户设为默认，或未设置时的默认父）必须知道可把需求派发给专业智能体。
     from app.models import Agent as _Agent
 

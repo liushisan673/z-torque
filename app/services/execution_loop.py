@@ -320,6 +320,40 @@ class AgentExecutionLoop:
                         },
                     )
                     continue
+                if mapping.builtin_kind == "mcp_search":
+                    search_settings = get_settings()
+                    if not search_settings.builtin_mcp_search_enabled:
+                        tool_content = json.dumps({
+                            "status": "FAILED",
+                            "error_code": "AI_BUILTIN_SEARCH_DISABLED",
+                            "error_message": "平台内置联网搜索未启用",
+                        }, ensure_ascii=False)
+                    else:
+                        remote_tool = "search_and_read" if mapping.original_name == "web_search_and_read" else "search"
+                        builtin_token = (
+                            search_settings.builtin_mcp_search_token.get_secret_value()
+                            if search_settings.builtin_mcp_search_token else None
+                        )
+                        search_result = await self.skill_gateway.execute_builtin_mcp(
+                            endpoint=search_settings.builtin_mcp_search_endpoint,
+                            tool_name=remote_tool,
+                            arguments=arguments,
+                            token=builtin_token,
+                            timeout_seconds=search_settings.builtin_mcp_search_timeout_seconds,
+                            allow_private_network=search_settings.builtin_mcp_search_allow_private_network,
+                            identity=self.skill_gateway._identity_meta(ctx, task_id),
+                        )
+                        tool_content = self._tool_result(search_result)
+                        _progress_event(
+                            db,
+                            task,
+                            "TASK_TOOL_RESULT",
+                            f"tool {call.name} returned",
+                            trace_id=request.trace_id,
+                            payload={"tool_name": call.name, "status": search_result.status},
+                        )
+                    messages.append(ModelMessage("tool", tool_content, tool_call_id=call.id))
+                    continue
                 if mapping.builtin_kind == "document_output":
                     conversation_id = getattr(task, "conversation_id", None) if task is not None else None
                     object_store = try_port("object.store")

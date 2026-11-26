@@ -9,11 +9,8 @@
   --page-body-size: 14px;
   --page-muted-size: 12px;
   --page-control-size: 13px;
-  --page-surface-radius: 14px;
-  --page-surface-shadow: 0 1px 3px color-mix(in srgb, var(--text) 4%, transparent);
-  --app-nav-width: 224px;
-  --app-nav-collapsed-width: 64px;
-  --chat-sidebar-w: 320px;
+  --page-surface-radius: var(--radius-panel);
+  --page-surface-shadow: var(--shadow-card);
 }
 body { font-size: var(--page-body-size); }
 .app-shell > .content {
@@ -124,8 +121,8 @@ body { font-size: var(--page-body-size); }
   background: var(--bg-elevated);
   border-right-color: var(--border);
 }
-.app-nav-link { font-size: 13px; font-weight: 520; min-height: 40px; }
-.app-nav-link.active { font-weight: 650; }
+.app-nav-link { font-size: var(--type-body-size); font-weight: 500; min-height: 40px; }
+.app-nav-link.active { font-weight: 600; }
 
 /* Chat now has one persistent global nav. Conversation history is an on-demand
    drawer, rather than a second permanent sidebar beside the main conversation. */
@@ -153,12 +150,12 @@ body { font-size: var(--page-body-size); }
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-left: 0;
-  border-radius: 0 14px 14px 0;
-  box-shadow: 0 18px 54px rgba(15, 23, 42, .16);
+  border-radius: 0 var(--radius-panel) var(--radius-panel) 0;
+  box-shadow: var(--shadow-card);
   visibility: hidden;
   opacity: 0;
   transform: translateX(calc(-100% - 12px));
-  transition: transform .2s ease, opacity .2s ease, visibility .2s;
+  transition: transform 0.2s ease, opacity 0.2s ease, visibility 0.2s;
 }
 .chat-shell .chat-sidebar.open {
   visibility: visible;
@@ -185,53 +182,42 @@ body { font-size: var(--page-body-size); }
   background: var(--bg-elevated);
 }
 .chat-sidebar-toggle:hover {
-  color: var(--primary);
-  background: var(--primary-soft);
-  border-color: color-mix(in srgb, var(--primary) 24%, var(--border));
+  color: var(--text);
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
 }
 .chat-sidebar-collapse-toggle { display: none !important; }
 .chat-header {
-  min-height: 58px;
-  height: 58px;
-  padding: 0 24px;
+  min-height: var(--chat-header-h);
+  height: var(--chat-header-h);
+  padding: 0 var(--space-6);
   border-bottom: 1px solid var(--border);
-  background: var(--bg-elevated);
+  background: var(--bg);
+  gap: var(--space-3);
 }
 .chat-messages,
 .chat-main { background: var(--bg); }
-.chat-header-title { font-size: 14px; font-weight: 650; }
+.chat-header-title { font-size: var(--type-body-size); font-weight: 600; }
 .chat-agent-chip {
   border-radius: 999px;
   padding: 3px 10px;
-  background: var(--primary-soft);
-  color: var(--primary);
+  background: var(--bg-layer-2);
+  color: var(--text-muted);
 }
 .chat-page > .app-nav-sidebar.is-collapsed ~ .chat-shell .chat-sidebar { left: var(--app-nav-collapsed-width); }
 .chat-page > .app-nav-sidebar.is-collapsed ~ .chat-shell .chat-sidebar-mask { left: var(--app-nav-collapsed-width); }
 
 @media (max-width: 900px) {
   :root { --page-pad-x: 18px; --page-pad-y: 18px; }
-  .app-nav-sidebar, .app-nav-sidebar.is-collapsed {
-    flex-basis: 60px; width: 60px; min-width: 60px; padding: 12px 7px;
-  }
-  .app-nav-brand { justify-content: center; padding: 0; }
-  .app-nav-brand-copy,.app-nav-collapse span,.app-nav-group-title,.app-nav-label,.app-nav-username { display:none; }
-  .app-nav-collapse,.app-nav-link { justify-content:center; padding:0; }
-  .app-nav-footer { align-items:center; }
-  .app-nav-user { justify-content:center; padding:0; }
-  .app-nav-tools { flex-direction:column; }
-  .chat-shell .chat-sidebar { left: 60px; width: min(320px, calc(100vw - 72px)); }
-  .chat-sidebar-mask { left: 60px; }
+  .chat-shell .chat-sidebar { left: var(--app-nav-collapsed-width); width: min(var(--chat-sidebar-w), calc(100vw - var(--app-nav-collapsed-width) - 12px)); }
+  .chat-sidebar-mask { left: var(--app-nav-collapsed-width); }
 }
 @media (max-width: 560px) {
   :root { --page-pad-x: 12px; --page-pad-y: 12px; }
-  .app-nav-sidebar, .app-nav-sidebar.is-collapsed {
-    flex-basis: 54px; width: 54px; min-width: 54px; padding-inline: 5px;
-  }
-  .chat-shell .chat-sidebar { left: 54px; width: calc(100vw - 62px); min-width: 0; }
-  .chat-sidebar-mask { left: 54px; }
-  .chat-header { padding-inline: 12px; gap: 8px; }
-  .chat-header-actions { gap: 4px; }
+  .chat-shell .chat-sidebar { left: var(--app-nav-collapsed-width); width: calc(100vw - var(--app-nav-collapsed-width) - 8px); min-width: 0; }
+  .chat-sidebar-mask { left: var(--app-nav-collapsed-width); }
+  .chat-header { padding-inline: var(--space-3); gap: var(--space-2); }
+  .chat-header-actions { gap: var(--space-1); }
   .chat-agent-chip { display: none; }
   .audit-page-header { align-items: flex-start; flex-direction: column; gap: 12px; }
   .knowledge-header { align-items: flex-start; flex-direction: column; }
@@ -638,4 +624,1507 @@ body { font-size: var(--page-body-size); }
 @media (max-width: 640px) {
   .file-compare-workbench { grid-template-columns: 1fr; }
   .file-compare-swap { width: 100%; min-height: 40px; border-radius: 10px; flex-direction: row; }
+}
+
+/* ============================================================
+ * 阶段14 · 管理页统一视觉层（智能体 / 技能 / 模型 / 用户 / 审计 / 连接器 / 知识库 / 设置）
+ * 原则：中性画布 + 发丝线分层；蓝色只用于主按钮/链接；选中态用中性底 + 左侧指示条。
+ * ============================================================ */
+
+/* ---- 页面头 ---- */
+.agent-list-header h1,
+.skill-list-header h1,
+.connector-list-header h1,
+.model-list-header h1,
+.audit-page-header h1,
+.knowledge-title-row .ant-typography:not(.ant-typography-secondary),
+.settings-head .ant-typography:not(.ant-typography-secondary) {
+  font-size: var(--type-title-size);
+  line-height: var(--type-title-line);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.agent-list-header p,
+.skill-list-header p,
+.connector-list-header p,
+.model-list-header p,
+.audit-page-header p,
+.knowledge-header .ant-typography-paragraph,
+.knowledge-header .ant-typography-secondary,
+.settings-head .ant-typography-paragraph,
+.settings-head .ant-typography-secondary,
+.settings-head p {
+  margin-top: var(--space-2);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.agent-list-header,
+.skill-list-header,
+.connector-list-header,
+.model-list-header {
+  padding: var(--space-5) var(--space-5) var(--space-4);
+}
+
+/* 模型页头：标题独占一行，动作按钮在下方自左排列且宽度自适应（与其它管理页一致） */
+.model-list-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.model-list-header h1 {
+  margin: 0;
+}
+
+.model-list-header .btn {
+  width: auto;
+  justify-content: center;
+}
+
+/* ---- 左右分栏：列表更安静，选中行中性化 ---- */
+.agent-list-pane,
+.skill-list-pane,
+.connector-list-pane,
+.model-list-pane {
+  background: color-mix(in srgb, var(--bg) 55%, var(--bg-elevated));
+}
+
+.agent-card,
+.skill-card,
+.connector-card,
+.model-item {
+  border-radius: 10px;
+  transition: background-color 0.15s ease;
+}
+
+.agent-card:hover,
+.skill-card:hover,
+.connector-card:hover,
+.model-item:hover {
+  background: var(--bg-hover);
+}
+
+.agent-card.active,
+.skill-card.active,
+.connector-card.active,
+.model-item.active {
+  background: var(--nav-active-bg);
+  border-left: 2px solid var(--nav-active-bar);
+  box-shadow: none;
+}
+
+.agent-card.active,
+.skill-card.active,
+.connector-card.active {
+  padding-left: 12px;
+}
+
+.model-item.active {
+  padding-left: 10px;
+}
+
+/* ---- 详情分区：用发丝线分隔，不再叠卡片 ---- */
+.agent-section h3,
+.skill-section h3 {
+  font-size: var(--type-section-size);
+  line-height: var(--type-section-line);
+  font-weight: 600;
+}
+
+.agent-detail-pane h2,
+.skill-detail-pane h2,
+.connector-detail-pane h2,
+.model-detail-pane h2 {
+  font-size: var(--type-title-size);
+  line-height: var(--type-title-line);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+/* ---- 工具条 / 筛选条 ---- */
+.audit-filter-bar,
+.users-toolbar {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: none;
+  background: var(--bg-elevated);
+}
+
+/* ---- 按钮：统一 36 高；ghost 去蓝，保留主按钮的蓝色 ---- */
+.btn {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius);
+  font-size: var(--type-body-size);
+  font-weight: 500;
+  line-height: 1;
+}
+
+.btn-sm {
+  height: 32px;
+  padding: 0 var(--space-3);
+  font-size: var(--type-meta-size);
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: var(--on-primary);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.btn-secondary {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 40%, transparent);
+  outline-offset: 2px;
+}
+
+/* 详情区不再单独放大按钮，保持与全站同高 */
+.skill-detail-pane .btn,
+.agent-detail-pane .btn,
+.model-detail-pane .btn,
+.connector-detail-pane .btn,
+.audit-detail-pane .btn,
+.users-side .btn {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  font-size: var(--type-body-size);
+}
+
+.agent-detail-pane .agent-btn-danger-outline,
+.skill-detail-pane .skill-btn-danger-outline,
+.connector-detail-pane .skill-btn-danger-outline,
+.model-detail-pane .skill-btn-danger-outline,
+.audit-detail-pane .skill-btn-danger-outline,
+.users-side .skill-btn-danger-outline,
+.skill-detail-pane .skill-btn-success {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  font-size: var(--type-body-size);
+  border-radius: var(--radius);
+}
+
+/* ---- 表单：中性描边 + 中性焦点，去掉蓝色聚焦 ---- */
+.form-field {
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.form-field label {
+  font-size: var(--type-meta-size);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.form-field .hint {
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--text-muted);
+}
+
+.input,
+.textarea,
+.select {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0 var(--space-3);
+  height: var(--control-h-sm);
+  font-size: var(--type-body-size);
+  background: var(--bg);
+  color: var(--text);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.textarea {
+  height: auto;
+  min-height: 88px;
+  padding: var(--space-2) var(--space-3);
+  line-height: var(--type-body-line);
+}
+
+.input:hover,
+.textarea:hover,
+.select:hover {
+  border-color: var(--border-strong);
+}
+
+.input:focus,
+.textarea:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--text);
+  background: var(--bg-elevated);
+  box-shadow: var(--focus-ring);
+}
+
+/* ---- 表格：表头弱化，行为中性 ---- */
+.table {
+  font-size: var(--type-body-size);
+}
+
+.table th {
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--type-meta-size);
+  font-weight: 600;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg) 70%, var(--bg-elevated));
+  border-bottom: 1px solid var(--border);
+}
+
+.table td {
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--type-body-size);
+}
+
+.table tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+.table .mono {
+  font-size: var(--type-meta-size);
+}
+
+/* ---- 状态标签：只保留语义色，运行态与主色标签回到中性 ---- */
+.tag {
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--type-meta-size);
+  font-weight: 600;
+}
+
+.tag-running,
+.tag-primary {
+  background: var(--bg-layer-2);
+  color: var(--text);
+}
+
+.tag-muted {
+  background: var(--bg-layer-2);
+  color: var(--text-muted);
+}
+
+/* ---- 提示条：信息提示不再整块蓝 ---- */
+.alert {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  font-size: var(--type-body-size);
+}
+
+.alert-info {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+/* ---- 空态：统一留白与层级 ---- */
+.empty-state {
+  padding: var(--space-8) var(--space-5);
+  color: var(--text-muted);
+}
+
+.empty-state-title {
+  font-size: var(--type-section-size);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.empty-state-hint {
+  margin-top: var(--space-1);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--text-muted);
+}
+
+/* ---- 详情空态：降为分区标题 + 说明，不再用大号灰标题 ---- */
+.agent-list-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-list-summary b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.agent-search-box,
+.skill-search-box,
+.connector-search-box {
+  height: var(--control-h-sm);
+  border-color: var(--border);
+}
+
+.agent-search-box:focus,
+.skill-search-box:focus,
+.connector-search-box:focus {
+  border-color: var(--text);
+  box-shadow: var(--focus-ring);
+}
+
+.agent-detail-empty,
+.skill-detail-empty,
+.model-detail-empty,
+.connector-detail-empty {
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-6);
+}
+
+.agent-detail-empty h2,
+.skill-detail-empty h2,
+.model-detail-empty h2,
+.connector-detail-empty h2 {
+  font-size: var(--type-section-size);
+  line-height: var(--type-section-line);
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0;
+}
+
+.agent-detail-empty p,
+.skill-detail-empty p,
+.model-detail-empty p,
+.connector-detail-empty p {
+  margin: 0;
+  max-width: 42ch;
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--text-muted);
+}
+
+/* ---- AntD 桥接：控件圆角/高度/焦点与手写组件一致 ---- */
+.app-shell > .content .ant-btn {
+  border-radius: var(--radius);
+  font-size: var(--type-body-size);
+  font-weight: 500;
+  min-height: var(--control-h-sm);
+}
+
+.app-shell > .content .ant-btn-sm {
+  min-height: 32px;
+  font-size: var(--type-meta-size);
+}
+
+.app-shell > .content .ant-input,
+.app-shell > .content .ant-input-affix-wrapper,
+.app-shell > .content .ant-select-selector,
+.app-shell > .content select,
+.app-shell > .content input,
+.app-shell > .content textarea {
+  border-radius: var(--radius);
+}
+
+.app-shell > .content .ant-input:hover,
+.app-shell > .content .ant-input-affix-wrapper:hover,
+.app-shell > .content .ant-select-selector:hover {
+  border-color: var(--border-strong);
+}
+
+.app-shell > .content .ant-input:focus,
+.app-shell > .content .ant-input-focused,
+.app-shell > .content .ant-input-affix-wrapper-focused,
+.app-shell > .content .ant-select-focused .ant-select-selector {
+  border-color: var(--text) !important;
+  box-shadow: var(--focus-ring) !important;
+}
+
+.app-shell > .content .ant-card {
+  border-radius: var(--radius-panel);
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.app-shell > .content .ant-card-head {
+  min-height: 52px;
+  padding-inline: var(--space-5);
+}
+
+.app-shell > .content .ant-card-body {
+  padding: var(--space-5);
+}
+
+/* 标签页与分页属于导航，不使用主色填充 */
+.app-shell > .content .ant-tabs-ink-bar {
+  background: var(--nav-active-bar);
+}
+
+.app-shell > .content .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--text);
+}
+
+.app-shell > .content .ant-pagination-item-active {
+  border-color: var(--border-strong);
+  background: var(--nav-active-bg);
+}
+
+.app-shell > .content .ant-pagination-item-active a {
+  color: var(--text);
+}
+
+.app-shell > .content .ant-segmented {
+  background: var(--bg-layer-2);
+}
+
+.app-shell > .content .ant-segmented-item-selected {
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: none;
+}
+
+/* 表格：表头弱化 + 选中行中性 */
+.app-shell > .content .ant-table {
+  font-size: var(--type-body-size);
+}
+
+.app-shell > .content .ant-table-thead > tr > th {
+  font-size: var(--type-meta-size);
+  font-weight: 600;
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--bg) 70%, var(--bg-elevated));
+}
+
+.app-shell > .content .ant-table-tbody > tr > td {
+  padding-block: var(--space-3);
+  border-bottom-color: var(--border);
+}
+
+.app-shell > .content .ant-table-tbody > tr:hover > td,
+.app-shell > .content .ant-table-tbody > tr.ant-table-row-hover > td {
+  background: var(--bg-hover) !important;
+}
+
+.app-shell > .content .ant-table-tbody > tr.ant-table-row-selected > td {
+  background: var(--nav-active-bg) !important;
+}
+
+/* 弹窗：统一圆角与分区 */
+.ant-modal .ant-modal-content {
+  border-radius: var(--radius-panel);
+  padding: var(--space-5) var(--space-6);
+}
+
+.ant-modal .ant-modal-title {
+  font-size: var(--type-title-size);
+  line-height: var(--type-title-line);
+  font-weight: 650;
+}
+
+/* 全局空白页（路由加载）不再显示蓝色转圈 */
+.ant-spin-dot-item {
+  background-color: var(--text) !important;
+}
+
+/* 登录页输入框保持 44 高（管理页控件为 36），仅此一处例外 */
+.login-shell .input {
+  height: var(--control-h);
+  padding: 0 var(--space-4);
+}
+
+/* ============================================================
+ * 阶段14 · 列表页改版：参考审计页（页头 + 筛选 + 表格 + 详情弹窗）
+ * 列表独占整页，点击行在弹窗中查看详情。
+ * ============================================================ */
+.agent-shell.single {
+  display: block;
+}
+
+.agent-shell.single .agent-list-pane {
+  width: 100%;
+  max-width: none;
+  border-right: 0;
+}
+
+.agent-shell.single .agent-list {
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.agent-list-columns {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.1fr) minmax(0, 2fr) minmax(170px, auto);
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.agent-shell.single .agent-card {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.1fr) minmax(0, 2fr) minmax(170px, auto);
+  align-items: center;
+  gap: var(--space-4);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.agent-shell.single .agent-card:last-of-type {
+  border-bottom: 0;
+}
+
+.agent-shell.single .agent-card .row1 {
+  margin: 0;
+  min-width: 0;
+}
+
+.agent-shell.single .agent-card .desc {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-shell.single .agent-card .meta {
+  margin: 0;
+  justify-content: flex-end;
+}
+
+.agent-shell.single .agent-card.active {
+  border-left: 0;
+  background: var(--nav-active-bg);
+}
+
+/* 详情弹窗：内容随弹窗整体滚动，不出现内层双滚动条 */
+.agent-detail-pane.in-modal {
+  display: block;
+  height: auto;
+  overflow: visible;
+  background: transparent;
+}
+
+.agent-detail-pane.in-modal .agent-detail-header {
+  padding: 0 0 var(--space-4);
+}
+
+.agent-detail-pane.in-modal .agent-detail-body {
+  overflow: visible;
+}
+
+@media (max-width: 768px) {
+  .agent-list-columns {
+    display: none;
+  }
+
+  .agent-shell.single .agent-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-3) var(--space-2);
+  }
+
+  .agent-shell.single .agent-card .desc {
+    grid-column: 1 / -1;
+  }
+
+  .agent-shell.single .agent-card .meta {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .agent-detail-pane.in-modal .agent-detail-header .title-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+}
+
+/* 技能页沿用同一列表/弹窗结构 */
+.skill-shell.single {
+  display: block;
+}
+
+.skill-shell.single .skill-list-pane {
+  width: 100%;
+  max-width: none;
+  border-right: 0;
+}
+
+.skill-shell.single .skill-list {
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.skill-shell.single .skill-card {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.1fr) minmax(0, 2fr) minmax(220px, auto);
+  align-items: center;
+  gap: var(--space-4);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.skill-shell.single .skill-card:last-of-type {
+  border-bottom: 0;
+}
+
+.skill-shell.single .skill-card .row1 {
+  margin: 0;
+  min-width: 0;
+}
+
+.skill-shell.single .skill-card .desc {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-shell.single .skill-card .meta {
+  margin: 0;
+  justify-content: flex-end;
+}
+
+.skill-shell.single .skill-card.active {
+  border-left: 0;
+  background: var(--nav-active-bg);
+}
+
+.skill-detail-pane.in-modal {
+  display: block;
+  height: auto;
+  overflow: visible;
+  background: transparent;
+}
+
+.skill-detail-pane.in-modal .skill-detail-header {
+  padding: 0 0 var(--space-4);
+}
+
+.skill-detail-pane.in-modal .skill-detail-body {
+  overflow: visible;
+}
+
+/* 分页属于导航，当前页使用中性底 */
+.zt-pager-btn {
+  border-radius: var(--radius-sm);
+}
+
+.zt-pager-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.zt-pager-btn.active {
+  border-color: var(--border-strong);
+  background: var(--nav-active-bg);
+  color: var(--text);
+}
+
+@media (max-width: 768px) {
+  .skill-shell.single .skill-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-3) var(--space-2);
+  }
+
+  .skill-shell.single .skill-card .desc,
+  .skill-shell.single .skill-card .meta {
+    grid-column: 1 / -1;
+  }
+
+  .skill-shell.single .skill-card .meta {
+    justify-content: flex-start;
+  }
+
+  .skill-detail-pane.in-modal .skill-detail-header .title-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+}
+
+/* 模型页：供应商分组列表 + 详情弹窗 */
+.model-shell.single {
+  display: block;
+}
+
+.model-shell.single .model-list-pane {
+  width: 100%;
+  max-width: none;
+  border-right: 0;
+}
+
+.model-shell.single .model-provider-tree {
+  padding: var(--space-2) var(--space-5) var(--space-4);
+}
+
+.model-detail-pane.in-modal {
+  display: block;
+  height: auto;
+  overflow: visible;
+  background: transparent;
+}
+
+.model-detail-pane.in-modal .model-detail-body {
+  overflow: visible;
+}
+
+/* 连接器页：表格化行 + 详情弹窗 */
+.connector-shell.single {
+  display: block;
+}
+
+.connector-shell.single .connector-list-pane {
+  width: 100%;
+  max-width: none;
+  border-right: 0;
+}
+
+.connector-shell.single .connector-list {
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.connector-shell.single .connector-card {
+  display: grid;
+  grid-template-columns: minmax(200px, 1.1fr) minmax(0, 2fr) minmax(220px, auto);
+  align-items: center;
+  gap: var(--space-4);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+
+.connector-shell.single .connector-card:last-of-type {
+  border-bottom: 0;
+}
+
+.connector-shell.single .connector-card .row1 {
+  margin: 0;
+  min-width: 0;
+}
+
+.connector-shell.single .connector-card .desc {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connector-shell.single .connector-card .meta {
+  margin: 0;
+  justify-content: flex-end;
+}
+
+.connector-shell.single .connector-card.active {
+  border-left: 0;
+  background: var(--nav-active-bg);
+}
+
+.connector-detail-pane.in-modal {
+  display: block;
+  height: auto;
+  overflow: visible;
+  background: transparent;
+}
+
+.connector-detail-pane.in-modal .connector-detail-body {
+  overflow: visible;
+}
+
+/* 空列表：左对齐到表头下方，避免在整页中央悬浮 */
+.agent-shell.single .agent-list > .agent-detail-empty,
+.skill-shell.single .skill-list > .skill-detail-empty,
+.connector-shell.single .connector-list > .connector-detail-empty,
+.model-shell.single .model-provider-tree > .model-detail-empty {
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: var(--space-6) var(--space-4);
+  text-align: left;
+}
+
+.agent-shell.single .agent-list > .agent-detail-empty .guide-callout,
+.skill-shell.single .skill-list > .skill-detail-empty .guide-callout,
+.connector-shell.single .connector-list > .connector-detail-empty .guide-callout,
+.model-shell.single .model-provider-tree > .model-detail-empty .guide-callout {
+  max-width: 560px;
+}
+
+/* 连接器筛选：与其它列表一致，选中态不再使用主色 */
+.connector-filter-tab {
+  border-radius: 999px;
+}
+
+.connector-filter-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.connector-filter-tab.active {
+  background: var(--nav-active-bg);
+  color: var(--text);
+}
+
+/* ============================================================
+ * 阶段14 · 按钮 / 标签 / 弹窗与会话页对齐
+ * 统一 36 高控件、12 圆角、无投影；蓝色只用于主按钮。
+ * ============================================================ */
+.btn {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border-radius: var(--radius);
+  font-size: var(--type-body-size);
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.btn-sm {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius);
+  font-size: 13px;
+}
+
+.btn-primary,
+.agent-page .btn-primary,
+.skill-page .btn-primary,
+.audit-page .btn-primary,
+.users-page .btn-primary {
+  background: var(--primary);
+  color: var(--on-primary);
+  box-shadow: none;
+}
+
+.btn-primary:hover:not(:disabled),
+.agent-page .btn-primary:hover:not(:disabled),
+.skill-page .btn-primary:hover:not(:disabled),
+.audit-page .btn-primary:hover:not(:disabled),
+.users-page .btn-primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+  box-shadow: none;
+}
+
+.btn-primary:active:not(:disabled),
+.agent-page .btn-primary:active,
+.skill-page .btn-primary:active,
+.audit-page .btn-primary:active,
+.users-page .btn-primary:active {
+  background: var(--primary-hover);
+}
+
+.btn-secondary {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.btn-ghost,
+.agent-page .btn-ghost,
+.skill-page .btn-ghost,
+.audit-page .btn-ghost,
+.users-page .btn-ghost {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.btn-ghost:hover:not(:disabled),
+.agent-page .btn-ghost:hover:not(:disabled),
+.skill-page .btn-ghost:hover:not(:disabled),
+.audit-page .btn-ghost:hover:not(:disabled),
+.users-page .btn-ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 页面头部动作与会话页头同高，避免主按钮 36、次按钮 32 的错位 */
+.agent-list-actions .btn,
+.skill-list-actions .btn,
+.connector-list-actions .btn,
+.model-list-header .btn {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  font-size: var(--type-body-size);
+}
+
+/* 危险操作：中性底 + 语义描边，和会话页“停止”同一克制度 */
+.agent-btn-danger-outline,
+.skill-btn-danger-outline,
+.connector-btn-danger-outline,
+.model-btn-danger-outline {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+  border-radius: var(--radius);
+  background: transparent;
+  font-size: 13px;
+}
+
+.agent-btn-danger-outline:hover:not(:disabled),
+.skill-btn-danger-outline:hover:not(:disabled),
+.connector-btn-danger-outline:hover:not(:disabled),
+.model-btn-danger-outline:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+/* 标签：与会话页任务标签同为小号胶囊 */
+.agent-tag,
+.skill-tag,
+.connector-tag,
+.model-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--space-2);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.agent-tag-lg,
+.skill-tag-lg,
+.connector-tag-lg,
+.model-tag-lg {
+  height: 24px;
+  padding: 0 10px;
+  line-height: 24px;
+  font-size: var(--type-meta-size);
+}
+
+/* 弹窗头/脚与会话抽屉头对齐 */
+.modal-head {
+  padding: var(--space-4) var(--space-5);
+  font-size: var(--type-section-size);
+  font-weight: 600;
+}
+
+.modal-foot {
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--border);
+}
+
+/* ============================================================
+ * 阶段14 · @ 智能体选择器：贴住输入区上方居中，限高滚动
+ * ============================================================ */
+.chat-mention-popover {
+  left: max(var(--space-4), calc(50% - var(--chat-max-w) / 2 + var(--space-3)));
+  right: auto;
+  bottom: calc(100% + var(--space-2));
+  width: min(320px, calc(100% - var(--space-6)));
+  max-height: min(240px, 38vh);
+  padding: var(--space-1);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-card);
+  transform: none;
+}
+
+.chat-mention-title {
+  position: sticky;
+  top: calc(-1 * var(--space-1));
+  z-index: 1;
+  margin-bottom: var(--space-1);
+  padding: 6px var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.chat-mention-popover button {
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 28px;
+}
+
+.chat-mention-popover button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.chat-mention-empty {
+  padding: var(--space-2);
+  font-size: var(--type-meta-size);
+}
+
+@media (max-width: 768px) {
+  .chat-mention-popover {
+    left: var(--space-3);
+    width: min(300px, calc(100% - var(--space-4)));
+    max-height: min(216px, 34vh);
+  }
+}
+
+@media (max-width: 768px) {
+  .connector-shell.single .connector-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: var(--space-1) var(--space-3);
+    padding: var(--space-3) var(--space-2);
+  }
+
+  .connector-shell.single .connector-card .desc,
+  .connector-shell.single .connector-card .meta {
+    grid-column: 1 / -1;
+  }
+
+  .connector-shell.single .connector-card .meta {
+    justify-content: flex-start;
+  }
+
+  .connector-detail-pane.in-modal .connector-detail-header .title-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+}
+
+/* ============================================================
+ * 阶段14 · 知识库页重构：中性引导 + 状态条 + 检索工作区
+ * ============================================================ */
+.app-shell > .content > .knowledge-page {
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+  gap: var(--space-5);
+}
+
+.knowledge-header {
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.knowledge-title-row {
+  gap: var(--space-3);
+}
+
+.knowledge-header .ant-typography-paragraph {
+  margin-top: var(--space-2);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--text-muted);
+}
+
+.knowledge-header > .ant-space {
+  justify-content: flex-end;
+}
+
+/* 状态标签：中性底 + 语义点，不再整块着色 */
+.knowledge-status-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  background: var(--bg-layer-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.knowledge-status-tag::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.knowledge-status-tag.is-success { color: var(--success); }
+.knowledge-status-tag.is-warning { color: var(--warning); }
+.knowledge-status-tag.is-danger { color: var(--danger); }
+
+/* 空知识库引导：中性卡片 + 主按钮 */
+.knowledge-setup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--bg-elevated);
+}
+
+.knowledge-setup-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--bg-layer-2);
+  color: var(--text-muted);
+}
+
+.knowledge-setup-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.knowledge-setup-copy strong {
+  display: block;
+  font-size: var(--type-body-size);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.knowledge-setup-copy p {
+  margin: 2px 0 0;
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--text-muted);
+}
+
+/* 四步流程：中性序号 + 发丝线，不做蓝色底 */
+.knowledge-workflow {
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-panel);
+  background: var(--bg-elevated);
+}
+
+.knowledge-workflow b {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.knowledge-workflow strong {
+  font-size: var(--type-body-size);
+  font-weight: 600;
+}
+
+.knowledge-workflow span {
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.knowledge-workflow i {
+  opacity: 0.35;
+}
+
+.knowledge-workflow .ant-btn {
+  color: var(--text-muted);
+}
+
+.knowledge-workflow .ant-btn:hover {
+  color: var(--text);
+}
+
+/* 检索状态：中性条 + 左侧语义线 */
+.knowledge-status-strip {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius-panel);
+  background: var(--bg-elevated);
+}
+
+.knowledge-status-strip.is-success { border-left-color: var(--success); }
+.knowledge-status-strip.is-warning { border-left-color: var(--warning); }
+.knowledge-status-strip.is-danger { border-left-color: var(--danger); }
+
+.knowledge-status-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.knowledge-status-strip.is-success .knowledge-status-dot { background: var(--success); }
+.knowledge-status-strip.is-warning .knowledge-status-dot { background: var(--warning); }
+.knowledge-status-strip.is-danger .knowledge-status-dot { background: var(--danger); }
+
+.knowledge-status-copy {
+  min-width: 0;
+}
+
+.knowledge-status-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.knowledge-status-title strong {
+  font-size: var(--type-body-size);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.knowledge-status-copy p {
+  margin: var(--space-1) 0 0;
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--text-muted);
+}
+
+.knowledge-status-copy p.knowledge-status-meta {
+  margin-top: 2px;
+  opacity: 0.82;
+}
+
+/* 卡片：统一圆角与内边距，去掉主色悬停 */
+.knowledge-page .ant-card {
+  border-radius: var(--radius-panel);
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.knowledge-page .ant-card:hover {
+  border-color: var(--border);
+}
+
+.knowledge-page .ant-card-body {
+  padding: var(--space-5);
+}
+
+.knowledge-card-heading {
+  margin-bottom: var(--space-4);
+  gap: var(--space-3);
+}
+
+.knowledge-card-icon,
+.knowledge-file-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-layer-2);
+  color: var(--text-muted);
+}
+
+.knowledge-card-heading .ant-typography-title {
+  font-size: var(--type-section-size);
+  line-height: var(--type-section-line);
+  font-weight: 600;
+}
+
+.knowledge-card-heading .ant-typography + .ant-typography {
+  margin-top: 2px;
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  color: var(--text-muted);
+}
+
+/* 检索区：输入与结果留白更稳定 */
+.knowledge-search-card .ant-input-search {
+  max-width: 100%;
+}
+
+.knowledge-search-card .ant-input-search .ant-input-affix-wrapper,
+.knowledge-search-card .ant-input-search .ant-input {
+  min-height: var(--control-h);
+}
+
+.knowledge-search-hint {
+  margin: var(--space-5) 0 0;
+  padding: var(--space-6) var(--space-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+  text-align: center;
+}
+
+.knowledge-results {
+  margin-top: var(--space-4);
+  max-height: 420px;
+}
+
+.knowledge-result-content {
+  font-size: var(--type-body-size);
+  line-height: 1.7;
+}
+
+/* 资料概况：数字收敛、分隔线统一 */
+.knowledge-stat,
+.knowledge-summary-foot {
+  padding: var(--space-2) 0;
+  font-size: var(--type-meta-size);
+  border-bottom-color: var(--border);
+}
+
+.knowledge-stat strong {
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.knowledge-summary-foot {
+  margin-bottom: var(--space-3);
+}
+
+.knowledge-summary-card .ant-btn {
+  height: var(--control-h-sm);
+}
+
+/* 资料表：头部与工具条对齐 */
+.knowledge-files-heading {
+  margin-bottom: var(--space-4);
+}
+
+.knowledge-files-heading .ant-typography-title {
+  font-size: var(--type-section-size);
+  line-height: var(--type-section-line);
+  font-weight: 600;
+}
+
+.knowledge-files-heading .ant-typography + .ant-typography {
+  font-size: var(--type-meta-size);
+  color: var(--text-muted);
+}
+
+.knowledge-files-tools .ant-input-affix-wrapper {
+  height: 32px;
+  border-radius: var(--radius);
+}
+
+.knowledge-files-tools .ant-select-selector {
+  height: 32px !important;
+}
+
+.knowledge-page .ant-table-wrapper {
+  border-radius: var(--radius);
+}
+
+@media (max-width: 1024px) {
+  .knowledge-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .knowledge-header > .ant-space {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .knowledge-setup {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .knowledge-setup .ant-btn {
+    width: 100%;
+  }
+}
+
+/* ---- AntD 提示条 / 标签：整块着色改为中性底 + 语义边 ---- */
+.app-shell > .content .ant-alert {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.app-shell > .content .ant-alert-success { border-left-color: var(--success); }
+.app-shell > .content .ant-alert-warning { border-left-color: var(--warning); }
+.app-shell > .content .ant-alert-error { border-left-color: var(--danger); }
+
+.app-shell > .content .ant-alert .ant-alert-icon {
+  color: var(--text-muted);
+}
+
+.app-shell > .content .ant-alert-success .ant-alert-icon { color: var(--success); }
+.app-shell > .content .ant-alert-warning .ant-alert-icon { color: var(--warning); }
+.app-shell > .content .ant-alert-error .ant-alert-icon { color: var(--danger); }
+
+.app-shell > .content .ant-alert-message {
+  color: var(--text);
+  font-size: var(--type-body-size);
+  font-weight: 600;
+}
+
+.app-shell > .content .ant-alert-description {
+  color: var(--text-muted);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-line);
+}
+
+.app-shell > .content .ant-tag {
+  border-radius: 999px;
+  padding-inline: var(--space-2);
+  font-size: var(--type-meta-size);
+  line-height: 20px;
+}
+
+/* 蓝色/处理中标签属于状态展示，不占用动作色 */
+.app-shell > .content .ant-tag-blue,
+.app-shell > .content .ant-tag-processing,
+.app-shell > .content .ant-tag-geekblue {
+  background: var(--bg-layer-2);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.app-shell > .content .ant-empty-description {
+  color: var(--text-muted);
+  font-size: var(--type-meta-size);
 }

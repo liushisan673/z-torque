@@ -535,7 +535,7 @@ class SkillGateway:
         for key in list(self._mcp_sessions):
             await self._evict_mcp_session(key)
 
-    async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float, *, secret_ref: str | None = None, identity: dict[str, str] | None = None) -> ExecutionResult:
+    async def _execute_mcp(self, config: dict[str, Any], arguments: dict[str, Any], timeout_seconds: float, *, secret_ref: str | None = None, identity: dict[str, str] | None = None, auth_token_override: str | None = None, allowed_hosts_override: list[str] | None = None) -> ExecutionResult:
         from app.config import get_settings
 
         transport = str(config.get("transport", "http")).lower()
@@ -548,13 +548,15 @@ class SkillGateway:
             if self.http_connector_factory is None:
                 return ExecutionResult(status="FAILED", error_code="AI_CONNECTOR_UNAVAILABLE", error_message="MCP HTTP connector is unavailable")
             settings = get_settings()
-            auth_token = self._resolve_secret_token(secret_ref)
+            auth_token = self._resolve_secret_token(secret_ref) if secret_ref else auth_token_override
             if isinstance(auth_token, ExecutionResult):
                 return auth_token
             # 主机白名单经 policy.source Port 提供（P2-14），缺失时退回配置；
             # 连接器 target_policy.allow_private_network 时放行白名单内目标的 http 明文形式
             policy = try_port("policy.source")
             allowed_hosts = policy.mcp_allowed_hosts() if policy is not None else settings.mcp_allowed_hosts
+            if allowed_hosts_override:
+                allowed_hosts = list(dict.fromkeys([*allowed_hosts, *allowed_hosts_override]))
             target_policy = config.get("target_policy") if isinstance(config.get("target_policy"), dict) else {}
             allow_private = bool(config.get("allow_private_network") or target_policy.get("allow_private_network"))
             # 出站代理（连接器级三态）：缺省走全局，""=直连，URL=指定代理
@@ -604,6 +606,36 @@ class SkillGateway:
         except (OSError, ValueError, RuntimeError):
             await self._evict_mcp_session(session_key)
             return ExecutionResult(status="FAILED", error_code="AI_SKILL_FAILED", error_message="MCP tool execution failed")
+
+    async def execute_builtin_mcp(self, *, endpoint: str, tool_name: str, arguments: dict[str, Any], token: str | None, timeout_seconds: float, allow_private_network: bool, identity: dict[str, str] | None = None) -> ExecutionResult:
+        """平台内置只读 MCP 工具的统一执行入口：复用 MCP 白名单/会话/熔断链路。
+
+        凭据来自部署配置（.env / 环境变量），不落库、不经模型参数传递。
+        """
+        gated = self._guard_gate("MCP")
+        if gated is not None:
+            return gated
+        config = {
+            "transport": "http",
+            "endpoint": endpoint,
+            "tool_name": tool_name,
+            "target_policy": {"allow_private_network": bool(allow_private_network)},
+            # 内置搜索端点在国内公网直连可达；强制直连避免环境 HTTP 代理误判。
+            "proxy": "",
+        }
+        from urllib.parse import urlparse
+
+        host = urlparse(endpoint).hostname
+        result = await self._execute_mcp(
+            config,
+            arguments,
+            timeout_seconds,
+            identity=identity,
+            auth_token_override=token,
+            allowed_hosts_override=[host] if host else None,
+        )
+        self._guard_record("MCP", result)
+        return result
 
     async def _execute_with_retry(self, executor: ToolExecutor, config: dict[str, Any], arguments: dict[str, Any], *, timeout_seconds: float, max_retries: int, backoff_seconds: float, guard_key: str | None = None) -> ExecutionResult:
         if guard_key is not None:

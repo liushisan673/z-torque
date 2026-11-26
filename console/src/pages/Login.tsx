@@ -52,25 +52,35 @@ export function LoginPage() {
               <span className="login-left-name">苍擎 AI</span>
               <span className="login-left-brand-sub">企业数字员工平台</span>
             </div>
-            <div className="login-left-title">让 AI 真正上岗。</div>
-            <div className="login-left-subtitle">
-                  AI 不缺⼤脑，缺的是⼀份⼯作
+            <div className="login-left-body">
+              <p className="login-left-eyebrow">企业数字员工平台</p>
+              <h1 className="login-left-title">让 AI 真正上岗。</h1>
+              <p className="login-left-subtitle">AI 不缺大脑，缺的是一份工作。</p>
             </div>
-
-            <div className="login-left-features">
-              <div className="login-left-feature">
-                <div className="login-left-feature-title">干得成</div>
-                <div className="login-left-feature-desc">一件事管到底，从会议室到产线</div>
-              </div>
-              <div className="login-left-feature">
-                <div className="login-left-feature-title">管得住</div>
-                <div className="login-left-feature-desc">权限与全程留痕，越界即拦截</div>
-              </div>
-              <div className="login-left-feature">
-                <div className="login-left-feature-title">说得清</div>
-                <div className="login-left-feature-desc">结论带原始依据，可回溯可导出</div>
-              </div>
-            </div>
+            <ol className="login-points">
+              <li className="login-point">
+                <span className="login-point-index">01</span>
+                <span className="login-point-copy">
+                  <strong>干得成</strong>
+                  <span>一件事管到底，从会议室到产线</span>
+                </span>
+              </li>
+              <li className="login-point">
+                <span className="login-point-index">02</span>
+                <span className="login-point-copy">
+                  <strong>管得住</strong>
+                  <span>权限与全程留痕，越界即拦截</span>
+                </span>
+              </li>
+              <li className="login-point">
+                <span className="login-point-index">03</span>
+                <span className="login-point-copy">
+                  <strong>说得清</strong>
+                  <span>结论带原始依据，可回溯可导出</span>
+                </span>
+              </li>
+            </ol>
+            <p className="login-left-foot">西安栈上明月软件科技有限公司</p>
           </div>
         </div>
 

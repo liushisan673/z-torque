@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
-import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
+import { writeSelectedId } from "../services/selectionMemory";
 import type {
   AuditEvent,
   AuditListResponse,
@@ -22,7 +22,6 @@ import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { TruncatedDesc } from "../components/TruncatedDesc";
-import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { useAuth } from "../stores/auth";
 import { Pagination, usePager } from "../components/Pagination";
 
@@ -210,6 +209,8 @@ export function ConnectorsPage() {
   const [busy, setBusy] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 详情改为列表行点击后的弹窗
+  const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<Connector | null>(null);
   const [tools, setTools] = useState<ConnectorToolLink[]>([]);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -219,8 +220,6 @@ export function ConnectorsPage() {
 
   const [filter, setFilter] = useState<Filter>("all");
   const [keyword, setKeyword] = useState("");
-  // 左右分栏宽度：拖拽把手调整，会话内保持，退出登录恢复默认
-  const listPane = usePaneWidth("connector", "--connector-list-w");
   // 顶部锚点导航：当前高亮区块；详情内容纵向滚动一次展示全部（无页签）
   const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
   const detailBodyRef = useRef<HTMLDivElement | null>(null);
@@ -360,15 +359,7 @@ export function ConnectorsPage() {
     void load();
   }, [load]);
 
-  // 默认展示列表第一项，避免主区空白；跳转回来时优先恢复上次选中（记忆 id 已不存在则回退第一项）
-  useEffect(() => {
-    if (loading || selectedId) return;
-    if (items.length === 0) return;
-    const remembered = readSelectedId(SELECTED_KEY);
-    const target = (remembered && items.find((c) => c.id === remembered)) || items[0];
-    void openDetail(target);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, items, selectedId]);
+  // 列表页不再预选第一项：详情由点击行打开弹窗
 
   const loadTools = useCallback(async (id: string) => {
     try {
@@ -426,6 +417,7 @@ export function ConnectorsPage() {
   }
 
   async function openDetail(c: Connector) {
+    setDetailOpen(true);
     setSelectedId(c.id);
     writeSelectedId(SELECTED_KEY, c.id);
     setDetail(c);
@@ -1296,7 +1288,7 @@ export function ConnectorsPage() {
         </div>
       )}
 
-      <div className="connector-shell" style={listPane.style}>
+      <div className="connector-shell single">
         {/* 左侧列表 */}
         <aside className="connector-list-pane">
           <div className="connector-list-header">
@@ -1329,6 +1321,11 @@ export function ConnectorsPage() {
           </div>
 
           <div className="connector-list">
+            <div className="agent-list-columns" aria-hidden>
+              <span>名称</span>
+              <span>描述</span>
+              <span>类型 / 凭证</span>
+            </div>
             {loading ? (
               <Loading />
             ) : filtered.length === 0 ? (
@@ -1381,11 +1378,17 @@ export function ConnectorsPage() {
           <Pagination total={listPager.total} page={listPager.page} pageSize={listPager.pageSize} onChange={listPager.onChange} />
         </aside>
 
-        {/* 左右分栏拖拽把手 */}
-        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+        {/* 详情改为弹窗，列表独占整页 */}
+      </div>
 
-        {/* 右侧详情 */}
-        <section className="connector-detail-pane">
+      {/* 详情弹窗：点击连接后打开 */}
+      <Modal
+        open={detailOpen && !!selected}
+        title="连接器详情"
+        onClose={() => setDetailOpen(false)}
+        width={1000}
+      >
+        <section className="connector-detail-pane in-modal">
           {!selected ? (
             <div className="connector-detail-empty">
               <h2>选择左侧连接查看详情</h2>
@@ -2234,7 +2237,7 @@ export function ConnectorsPage() {
             </>
           )}
         </section>
-      </div>
+      </Modal>
 
       {/* 新建连接弹窗 */}
       <Modal

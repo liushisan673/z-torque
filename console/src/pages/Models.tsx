@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { request, ApiRequestError } from "../services/api";
 import { errorText } from "../services/errorText";
-import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
+import { writeSelectedId } from "../services/selectionMemory";
 import type { ModelProvider, ModelResource, ModelEndpoint, ModelTestResult } from "../types";
 import { Loading } from "../components/Loading";
 import { Modal } from "../components/Modal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { SecretRefInput } from "../components/SecretRefInput";
-import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { GuideCallout } from "../components/GuideCallout";
 import { useToast } from "../components/Toast";
 import { useAuth } from "../stores/auth";
@@ -79,12 +78,11 @@ const PROBE_MODE_OPTIONS: { value: string; label: string }[] = [
   { value: "minimal_chat", label: "最小 Chat 请求" },
 ];
 
-// 列表统一分页：供应商分组内的模型列表（前端切片 + 公共分页条，每页 10）
+// 供应商分组内的模型列表：全量渲染，不设分页
 function ProviderModelList({ models, selectedId, onOpen }: { models: ModelResource[]; selectedId: string | null; onOpen: (m: ModelResource) => void }) {
-  const pager = usePager(models, 10);
   return (
     <>
-      {pager.paged.map((m) => {
+      {models.map((m) => {
         const tag = modelTag(m);
         return (
           <div
@@ -97,8 +95,6 @@ function ProviderModelList({ models, selectedId, onOpen }: { models: ModelResour
           </div>
         );
       })}
-      {/* 列表统一分页：前端切片 + 公共分页条 */}
-      <Pagination total={pager.total} page={pager.page} pageSize={pager.pageSize} onChange={pager.onChange} />
     </>
   );
 }
@@ -119,10 +115,10 @@ export function ModelsPage() {
   const [busy, setBusy] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 详情改为点击列表后的弹窗
+  const [detailOpen, setDetailOpen] = useState(false);
   const [detail, setDetail] = useState<ModelResource | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
-  // 左右分栏宽度：拖拽把手调整，会话内保持，退出登录恢复默认
-  const listPane = usePaneWidth("model", "--model-list-w");
   // 顶部锚点导航：当前高亮区块；详情内容纵向滚动一次展示全部（无页签）
   const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
   const detailBodyRef = useRef<HTMLDivElement | null>(null);
@@ -190,15 +186,7 @@ export function ModelsPage() {
     void load();
   }, [load]);
 
-  // 默认展示列表第一项，避免主区空白；跳转回来时优先恢复上次选中（记忆 id 已不存在则回退第一项）
-  useEffect(() => {
-    if (loading || selectedId) return;
-    if (models.length === 0) return;
-    const remembered = readSelectedId(SELECTED_KEY);
-    const target = (remembered && models.find((m) => m.id === remembered)) || models[0];
-    void openModel(target);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, models, selectedId]);
+  // 列表页不再预选第一项：详情由点击行打开弹窗
 
   // 详情打开时同步编辑表单
   function fillForm(d: ModelResource) {
@@ -239,6 +227,7 @@ export function ModelsPage() {
   }
 
   async function openModel(m: ModelResource) {
+    setDetailOpen(true);
     setSelectedId(m.id);
     writeSelectedId(SELECTED_KEY, m.id);
     setDetail(null);
@@ -508,8 +497,6 @@ export function ModelsPage() {
 
   const selected = useMemo(() => models.find((m) => m.id === selectedId) ?? null, [models, selectedId]);
   const detailEndpoints = detail?.endpoints ?? [];
-  // 列表统一分页：左侧供应商列表前端切片（每页 10）；分组内模型列表由 ProviderModelList 内部分页
-  const providerPager = usePager(providers, 10);
   // 列表统一分页：接入点表前端切片（每页 10）
   const epPager = usePager(detailEndpoints, 10);
 
@@ -522,7 +509,7 @@ export function ModelsPage() {
         </div>
       )}
 
-      <div className="model-shell" style={listPane.style}>
+      <div className="model-shell single">
         {/* 左侧 Provider 树 */}
         <aside className="model-list-pane">
           <div className="model-list-header">
@@ -543,8 +530,8 @@ export function ModelsPage() {
                 />
               </div>
             ) : (
-              // 列表统一分页：仅渲染当前页切片
-              providerPager.paged.map((p) => {
+              // 列表全量渲染，不设分页
+              providers.map((p) => {
                 const dot = providerDot(p, models);
                 const mine = models.filter((m) => m.provider_id === p.id);
                 return (
@@ -597,15 +584,19 @@ export function ModelsPage() {
               })
             )}
           </div>
-          {/* 列表统一分页：前端切片 + 公共分页条（滚动容器外底部） */}
-          <Pagination total={providerPager.total} page={providerPager.page} pageSize={providerPager.pageSize} onChange={providerPager.onChange} />
         </aside>
 
-        {/* 左右分栏拖拽把手 */}
-        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+        {/* 详情改为弹窗，列表独占整页 */}
+      </div>
 
-        {/* 右侧详情 */}
-        <section className="model-detail-pane">
+      {/* 详情弹窗：点击模型后打开 */}
+      <Modal
+        open={detailOpen && !!selected}
+        title="模型详情"
+        onClose={() => setDetailOpen(false)}
+        width={1000}
+      >
+        <section className="model-detail-pane in-modal">
           {!selected ? (
             <div className="model-detail-empty">
               <h2>选择左侧模型查看详情</h2>
@@ -970,7 +961,7 @@ export function ModelsPage() {
             </>
           )}
         </section>
-      </div>
+      </Modal>
 
       {/* 添加 Provider */}
       <Modal

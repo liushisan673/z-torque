@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { request } from "../services/api";
 import { errorText } from "../services/errorText";
-import { readSelectedId, writeSelectedId } from "../services/selectionMemory";
+import { writeSelectedId } from "../services/selectionMemory";
 import type { Agent, AgentVersion, AgentVersionArchiveCheck, BoundSkill } from "../types";
 import type { ModelResource } from "../types";
 import type { Task } from "../types";
@@ -12,7 +12,6 @@ import { Modal } from "../components/Modal";
 import { useToast } from "../components/Toast";
 import { GuideCallout } from "../components/GuideCallout";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { PaneResizer, usePaneWidth } from "../components/PaneResizer";
 import { Pagination, usePager } from "../components/Pagination";
 import { VersionContentModal, type VersionContentSection } from "../components/VersionContentModal";
 import { useAuth } from "../stores/auth";
@@ -87,6 +86,8 @@ export function AgentsPage() {
   const [busy, setBusy] = useState(false);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // 详情改为列表点击后的弹窗，选中仅用于加载数据，不占据页面右栏
+  const [detailOpen, setDetailOpen] = useState(false);
   const [versions, setVersions] = useState<AgentVersion[]>([]);
   const [loadingVersions, setLoadingVersions] = useState(false);
   const [boundSkills, setBoundSkills] = useState<BoundSkill[]>([]);
@@ -101,8 +102,6 @@ export function AgentsPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [keyword, setKeyword] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  // 左右分栏宽度：拖拽把手调整，会话内保持，退出登录恢复默认
-  const listPane = usePaneWidth("agent", "--agent-list-w");
   // 顶部锚点导航：当前高亮区块；详情内容纵向滚动一次展示全部（无页签）
   const [activeAnchor, setActiveAnchor] = useState<string | null>("overview");
   const detailBodyRef = useRef<HTMLDivElement | null>(null);
@@ -156,15 +155,7 @@ export function AgentsPage() {
     void load();
   }, [load]);
 
-  // 默认展示列表第一项，避免主区空白；跳转回来时优先恢复上次选中（记忆 id 已不存在则回退第一项）
-  useEffect(() => {
-    if (loading || selectedId) return;
-    if (agents.length === 0) return;
-    const remembered = readSelectedId(SELECTED_KEY);
-    const target = (remembered && agents.find((a) => a.id === remembered)) || agents[0];
-    void openDetail(target);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, agents, selectedId]);
+  // 列表页不再预选第一项：详情由点击行打开弹窗，避免进入页面就弹窗
 
   // 加载模型列表（用于配置 Tab 模型绑定下拉）
   useEffect(() => {
@@ -269,6 +260,7 @@ export function AgentsPage() {
   }
 
   async function openDetail(a: Agent) {
+    setDetailOpen(true);
     setSelectedId(a.id);
     writeSelectedId(SELECTED_KEY, a.id);
     setVersions([]);
@@ -794,7 +786,7 @@ export function AgentsPage() {
         </div>
       )}
 
-      <div className="agent-shell" style={listPane.style}>
+      <div className="agent-shell single">
         {/* 左侧列表 */}
         <aside className="agent-list-pane">
           <div className="agent-list-header">
@@ -834,9 +826,19 @@ export function AgentsPage() {
                 <span>显示已归档</span>
               </label>
             </div>
+            <div className="agent-list-summary">
+              <span><b>{agents.length}</b> 个智能体</span>
+              <span><b>{agents.filter((a) => a.status === "PUBLISHED").length}</b> 已发布</span>
+              <span><b>{agents.filter((a) => a.status === "DRAFT").length}</b> 草稿</span>
+            </div>
           </div>
 
           <div className="agent-list">
+            <div className="agent-list-columns" aria-hidden>
+              <span>名称</span>
+              <span>描述</span>
+              <span>来源 / 版本</span>
+            </div>
             {loading ? (
               <Loading />
             ) : filteredAgents.length === 0 ? (
@@ -896,11 +898,18 @@ export function AgentsPage() {
           />
         </aside>
 
-        {/* 左右分栏拖拽把手 */}
-        <PaneResizer onPreview={listPane.previewWidth} onCommit={listPane.commitWidth} />
+        {/* 详情改为弹窗，列表独占整页 */}
 
-        {/* 右侧详情 */}
-        <section className="agent-detail-pane">
+      </div>
+
+      {/* 详情弹窗：列表行点击后打开，保留原有详情与全部操作 */}
+      <Modal
+        open={detailOpen && !!selected}
+        title="智能体详情"
+        onClose={() => setDetailOpen(false)}
+        width={1000}
+      >
+        <section className="agent-detail-pane in-modal">
           {!selected ? (
             <div className="agent-detail-empty">
               <h2>选择左侧智能体查看详情</h2>
@@ -1013,10 +1022,6 @@ export function AgentsPage() {
                       <div className="agent-alert agent-alert-info">
                         <span>正在编辑草稿版本 v{editing.version.version_number}，保存后可发布为新版本。</span>
                       </div>
-                    ) : sourceOf(selected, meId) === "official" ? (
-                      <div className="agent-alert agent-alert-warn">
-                        <span>当前查看的是平台智能体的只读快照。修改前须先「复制到我的」生成个人副本。</span>
-                      </div>
                     ) : (
                       <div>
                       </div>
@@ -1105,16 +1110,6 @@ export function AgentsPage() {
                           disabled={!editing || busy}
                           placeholder="描述该智能体的角色、规则与行为约束"
                         />
-                      </div>
-                    </div>
-
-                    <div className="agent-section">
-                      <h3>A2A 智能体协作</h3>
-                      <div className="agent-alert agent-alert-info">
-                        <span>
-                          智能体通过统一 A2A 发现与委派机制动态协作，无需在创建或发布版本时预先配置父子关系或子智能体白名单。
-                          每次调用都会重新校验当前用户对目标智能体及其资源、操作的访问权限。
-                        </span>
                       </div>
                     </div>
 
@@ -1255,10 +1250,6 @@ export function AgentsPage() {
                         </>
                       )}
                     </div>
-                    <div className="agent-alert agent-alert-info">
-                      <span>ℹ</span>
-                      <span>已发布版本不可原地修改。变更请基于最新版本创建草稿并重新发布。</span>
-                    </div>
                   </div>
                     </section>
                   </>
@@ -1267,7 +1258,7 @@ export function AgentsPage() {
             </>
           )}
         </section>
-      </div>
+      </Modal>
 
       {/* 新建 Agent 弹窗：一步创建并发布（创建 + 首版本 + 绑定技能 + 发布） */}
       <Modal
