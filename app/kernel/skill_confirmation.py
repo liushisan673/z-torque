@@ -15,7 +15,6 @@ from app.kernel.task.checkpoints import latest_checkpoint
 from app.kernel.task.service import transition_task
 from app.kernel.task.states import TaskStatus
 from app.models import Confirmation, Conversation, Message, Outbox, Task, TaskCheckpoint
-from app.security.permissions import is_admin_user
 
 
 class BuiltinApprovalProvider(ApprovalProvider):
