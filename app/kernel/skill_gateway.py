@@ -911,7 +911,12 @@ class SkillGateway:
                 if checkpoint is not None:
                     self._check_approved_scope(checkpoint, scope)
                     self._check_approved_script(checkpoint, skill_version_id=skill.id, manifest=manifest, arguments=arguments)
-                data = await self._md_runtime.execute(manifest, arguments, scope=scope)
+                data = await self._md_runtime.execute(
+                    manifest,
+                    arguments,
+                    scope=scope,
+                    approval_granted=checkpoint is not None and checkpoint.status in {"APPROVED", "RESUMED"},
+                )
                 result = ExecutionResult(status="SUCCEEDED", data=data)
             except ApiError as exc:
                 result = ExecutionResult(status="FAILED", error_code=exc.code, error_message=exc.message)
