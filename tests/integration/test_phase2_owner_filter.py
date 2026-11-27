@@ -177,8 +177,9 @@ def test_build_tool_mappings_filters_foreign_private_tools():
         version = db.get(AgentVersion, version_id)
         own_mappings, _ = build_tool_mappings(db, version, tenant_id, user_id=a_id)
         foreign_mappings, _ = build_tool_mappings(db, version, tenant_id, user_id=b_id)
-        assert own_mappings, "属主应看到自己发布的私有工具"
-        assert not foreign_mappings, "非属主不得看到他人私有工具"
+        assert "private_tool" in own_mappings, "属主应看到自己发布的私有工具"
+        assert "private_tool" not in foreign_mappings, "非属主不得看到他人私有工具"
+        # 平台内置工具（如文档生成）不属于任何用户的私有资源，应继续对用户可见。
 
 
 def test_stream_resources_reject_foreign_conversation():
