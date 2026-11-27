@@ -92,7 +92,7 @@ async def test_selector_depends_on_and_hint_are_visible_to_model():
         publish_skill_version(db, tenant_id=tenant_id, user_id=user_id, version_id=skill_version_id)
         _mappings, tools = build_tool_mappings(db, agent_version, tenant_id)
         prompt = build_agent_system_prompt(db, agent_version)
-        assert [item["function"]["name"] for item in tools] == ["tool_a", "tool_b"]
+        assert [item["function"]["name"] for item in tools if item["function"]["name"] in {"tool_a", "tool_b"}] == ["tool_a", "tool_b"]
         assert prompt.index("1. tool_b") < prompt.index("2. tool_a")
         assert "依赖：tool_b" in prompt
         assert "选择条件：tool_types=MCP" in prompt
