@@ -268,11 +268,19 @@ def _self_check(data_dir: Path) -> int:
         embedding.close()
 
     from app.config import get_settings
-    if not get_settings().builtin_mcp_search_token:
-        print("Z-Torque package is missing the built-in web search configuration: BUILTIN_MCP_SEARCH_TOKEN")
+    settings = get_settings()
+    if settings.builtin_mcp_search_enabled and not settings.builtin_mcp_search_token:
+        print(
+            "Z-Torque package enables built-in web search but has no service credential. "
+            "Configure BUILTIN_MCP_SEARCH_TOKEN or disable BUILTIN_MCP_SEARCH_ENABLED."
+        )
         return 2
-
-    print(f"Z-Torque desktop package check passed (Chinese Embedding: 512 dimensions; built-in web search configured). Data directory: {data_dir}")
+    search_status = "configured" if settings.builtin_mcp_search_enabled else "disabled (no search credential)"
+    print(
+        "Z-Torque desktop package check passed "
+        f"(Chinese Embedding: 512 dimensions; built-in web search: {search_status}). "
+        f"Data directory: {data_dir}"
+    )
     return 0
 
 
