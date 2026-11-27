@@ -31,6 +31,7 @@ from app.models.file_version_change import (
 )
 from app.models.patch_artifact import PATCH_REVIEW_KEPT, PATCH_REVIEW_PENDING, PATCH_REVIEW_UNDONE
 from app.schemas.patch import PatchApplyRequest
+from app.services.document_export import build_document
 from app.services.file_change_review import (
     cancel_file_change as cancel_file_change_service,
 )
@@ -40,7 +41,6 @@ from app.services.file_change_review import (
 from app.services.file_change_review import (
     propose_rollback as propose_rollback_service,
 )
-from app.services.document_export import build_document
 from app.services.text_diff import line_changes
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
