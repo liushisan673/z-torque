@@ -198,6 +198,15 @@ async def test_paged_discovery_owns_connect_and_close(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_whitelist_registration_is_visible_to_model_and_hot_updatable(monkeypatch):
+    from types import SimpleNamespace
+
+    import app.services.tool_mapping_builder as mapping_builder
+
+    monkeypatch.setattr(
+        mapping_builder,
+        "get_settings",
+        lambda: SimpleNamespace(builtin_mcp_search_enabled=True, builtin_mcp_search_token="test-token"),
+    )
     tenant_id, user_id, username, connector_id = _bootstrap()
     monkeypatch.setattr(app.state.skill_gateway, "http_connector_factory", _fake_factory)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -221,7 +230,8 @@ async def test_whitelist_registration_is_visible_to_model_and_hot_updatable(monk
             agent_version = _bind_agent_tool(db, tenant_id, user_id, version_id)
             mappings, tools = build_tool_mappings(db, agent_version, tenant_id)
             assert "search" in mappings
-            assert tools[0]["function"]["parameters"]["properties"]["q"]["description"] == "original"
+            search_definition = next(item["function"] for item in tools if item["function"]["name"] == "search")
+            assert search_definition["parameters"]["properties"]["q"]["description"] == "original"
             db.commit()
 
         _PagedConnector.updated = True
@@ -237,7 +247,10 @@ async def test_whitelist_registration_is_visible_to_model_and_hot_updatable(monk
             assert tool.current_published_version_id == versions[1].id
             agent_version = _bind_agent_tool(db, tenant_id, user_id, tool.current_published_version_id)
             _mappings, tools = build_tool_mappings(db, agent_version, tenant_id)
-            assert tools[0]["function"]["parameters"]["properties"]["q"]["description"] == "changed"
+            search_definition = next(
+                item["function"] for item in tools if item["function"]["name"] == "search"
+            )
+            assert search_definition["parameters"]["properties"]["q"]["description"] == "changed"
             db.commit()
 
 

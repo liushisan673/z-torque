@@ -3,6 +3,30 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $RepoRoot
 try {
+    # Stop before touching package output if an instance is still using its files.
+    $Running = Get-Process -Name ZTorque -ErrorAction SilentlyContinue
+    if ($Running) {
+        throw "ZTorque is running (PID: $($Running.Id -join ', ')). Close the app before packaging."
+    }
+
+    Write-Host "[0/6] Clean previous generated packaging artifacts..."
+    $GeneratedPaths = @(
+        (Join-Path $RepoRoot "dist/ZTorque"),
+        (Join-Path $RepoRoot "seed-data"),
+        (Join-Path $RepoRoot "build")
+    )
+    $GeneratedPaths += @(Get-ChildItem -Path $RepoRoot -Directory -Filter "build-*" -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    $GeneratedPaths += @(Get-ChildItem -Path $RepoRoot -Directory -Filter "dist-stage-*" -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    foreach ($GeneratedPath in $GeneratedPaths | Select-Object -Unique) {
+        if (Test-Path $GeneratedPath) {
+            $ResolvedPath = (Resolve-Path $GeneratedPath).Path
+            if (-not $ResolvedPath.StartsWith($RepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw "Refusing to remove path outside repository: $ResolvedPath"
+            }
+            Remove-Item -LiteralPath $ResolvedPath -Recurse -Force
+        }
+    }
+
     Write-Host "[1/6] Build Console assets..."
     Push-Location (Join-Path $RepoRoot "console")
     try {
@@ -48,12 +72,11 @@ try {
         throw "PyInstaller failed with exit code $LASTEXITCODE"
     }
     $PackageDir = Join-Path $RepoRoot "dist/ZTorque"
-    $Running = Get-Process -Name ZTorque -ErrorAction SilentlyContinue
-    if ($Running) {
-        throw "ZTorque is running (PID: $($Running.Id -join ', ')). Close the app before packaging so its DLLs are not locked."
+    if (Test-Path $PackageDir) {
+        Remove-Item -LiteralPath $PackageDir -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $PackageDir -Force | Out-Null
-    Copy-Item -Path (Join-Path $StageDir "ZTorque/*") -Destination $PackageDir -Recurse -Force
+    New-Item -ItemType Directory -Path (Split-Path -Parent $PackageDir) -Force | Out-Null
+    Move-Item -LiteralPath (Join-Path $StageDir "ZTorque") -Destination $PackageDir
 
     Write-Host "[6/6] Verify packaged resources..."
     $ExePath = Join-Path $PackageDir "ZTorque.exe"

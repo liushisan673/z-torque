@@ -228,7 +228,7 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
     # 平台内置联网搜索（只读 MCP）：默认暴露给所有 Agent，子执行链不暴露。
     # 工具定义在此，真实调用由 execution_loop 的 builtin_kind 分派到 SkillGateway。
     settings = get_settings()
-    if settings.builtin_mcp_search_enabled and not exclude_requires_confirmation:
+    if settings.builtin_mcp_search_enabled and settings.builtin_mcp_search_token and not exclude_requires_confirmation:
         search_tools = [
             (
                 "web_search",

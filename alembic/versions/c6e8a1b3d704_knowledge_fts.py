@@ -12,7 +12,7 @@ from typing import Sequence
 
 import sqlalchemy as sa
 
-from alembic import op
+from alembic import context, op
 
 revision: str = "c6e8a1b3d704"
 down_revision: str | None = "b4d8f0a2c913"
@@ -25,6 +25,11 @@ _FTS = "zr_knowledge_fts"
 
 
 def _table_exists(name: str) -> bool:
+    # Offline SQL generation uses Alembic's MockConnection, which cannot be inspected.
+    # In that mode migrations are rendered for a clean target database, so emit the
+    # CREATE statements deterministically instead of attempting runtime introspection.
+    if context.is_offline_mode():
+        return False
     connection = op.get_bind()
     if connection.dialect.name == "sqlite":
         return bool(connection.exec_driver_sql("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).scalar())
@@ -32,6 +37,8 @@ def _table_exists(name: str) -> bool:
 
 
 def _index_exists(table: str, index: str) -> bool:
+    if context.is_offline_mode():
+        return False
     connection = op.get_bind()
     if connection.dialect.name == "sqlite":
         return bool(

@@ -112,9 +112,10 @@ def test_child_agent_delegation_uses_mapping_builder(monkeypatch):
 
     calls: dict = {}
 
-    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False, user_id=None):
+    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False, allow_delegation=True, user_id=None):
         calls["version"] = version
         calls["exclude_requires_confirmation"] = exclude_requires_confirmation
+        calls["allow_delegation"] = allow_delegation
         calls["user_id"] = user_id
         return {}, []  # 无工具 → 走 generate 分支
 
@@ -148,6 +149,7 @@ def test_child_agent_delegation_uses_mapping_builder(monkeypatch):
     assert out["content"] == "child ok"
     assert calls["version"] is child_version
     assert calls["exclude_requires_confirmation"] is True
+    assert calls["allow_delegation"] is False
 
 
 def test_child_delegation_request_carries_snapshot_model_params(monkeypatch):
@@ -160,8 +162,9 @@ def test_child_delegation_request_carries_snapshot_model_params(monkeypatch):
 
     captured: dict = {}
 
-    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False, user_id=None):
+    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False, allow_delegation=True, user_id=None):
         captured["exclude_requires_confirmation"] = exclude_requires_confirmation
+        captured["allow_delegation"] = allow_delegation
         captured["user_id"] = user_id
         return {}, []  # 无工具 → 走 generate 分支
 
