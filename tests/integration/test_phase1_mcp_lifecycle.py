@@ -247,7 +247,10 @@ async def test_whitelist_registration_is_visible_to_model_and_hot_updatable(monk
             assert tool.current_published_version_id == versions[1].id
             agent_version = _bind_agent_tool(db, tenant_id, user_id, tool.current_published_version_id)
             _mappings, tools = build_tool_mappings(db, agent_version, tenant_id)
-            assert tools[0]["function"]["parameters"]["properties"]["q"]["description"] == "changed"
+            search_definition = next(
+                item["function"] for item in tools if item["function"]["name"] == "search"
+            )
+            assert search_definition["parameters"]["properties"]["q"]["description"] == "changed"
             db.commit()
 
 
