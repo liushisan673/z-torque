@@ -198,6 +198,14 @@ async def test_paged_discovery_owns_connect_and_close(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_whitelist_registration_is_visible_to_model_and_hot_updatable(monkeypatch):
+    from types import SimpleNamespace
+    import app.services.tool_mapping_builder as mapping_builder
+
+    monkeypatch.setattr(
+        mapping_builder,
+        "get_settings",
+        lambda: SimpleNamespace(builtin_mcp_search_enabled=True, builtin_mcp_search_token="test-token"),
+    )
     tenant_id, user_id, username, connector_id = _bootstrap()
     monkeypatch.setattr(app.state.skill_gateway, "http_connector_factory", _fake_factory)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
