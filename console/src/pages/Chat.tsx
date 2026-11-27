@@ -160,6 +160,9 @@ export function ChatPage() {
   const [childTasks, setChildTasks] = useState<Task[]>([]);
   // Task 面板：降级为详情入口（默认收起，通过 badge / 消息「查看执行过程」打开）
   const [taskPanelOpen, setTaskPanelOpen] = useState(false);
+  // 文件变更抽屉：气泡点击提案时打开并定位到对应条目
+  const [fileDrawerOpen, setFileDrawerOpen] = useState(false);
+  const [focusChangeId, setFocusChangeId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const streamRef = useRef<{ abort: () => void } | null>(null);
   const lastEventIdRef = useRef<string>("");
@@ -1604,10 +1607,19 @@ export function ChatPage() {
               <span className="chat-header-title">{currentConversation?.title ?? "新会话"}</span>
               {currentAgent && <span className="chat-agent-chip">{currentAgent.name}</span>}
               {/* 执行中实时指示（对齐 chat.html 的 live-pill） */}
-              {runLive && <span className="chat-live-pill" role="status" aria-live="polite"><span className="dot" />{waitingConfirm ? "等待人工确认" : "执行中"}</span>}
+              {runLive && <span className="chat-live-pill" role="status" aria-live="polite"><span className="dot" />{waitingConfirm ? "等待人工确认" : task?.status === "WAITING_CHILD" ? "等待子任务" : "执行中"}</span>}
             </div>
             <div className="chat-header-actions">
-              <FileCompareDrawer conversationId={conversationId} />
+              <FileCompareDrawer
+                conversationId={conversationId}
+                open={fileDrawerOpen}
+                onOpenChange={setFileDrawerOpen}
+                focusChangeId={focusChangeId}
+                onChanged={() => {
+                  const conv = conversationIdRef.current ?? conversationId;
+                  if (conv) void loadMessages(conv, { quiet: true });
+                }}
+              />
               <Button size="small" type="text" className="chat-header-action-secondary" onClick={() => setSplitOpen((v) => !v)} title="多会话分栏">{splitOpen ? "收起分栏" : "分栏"}</Button>
               {busy && <Button size="small" type="text" onClick={() => void stopActive()} title="停止当前回答">停止</Button>}
               {sendQueue.length > 0 && <span className="chat-queue-badge" title="刷新页面后队列不会保留">排队中：{sendQueue.length}</span>}
@@ -1681,7 +1693,8 @@ export function ChatPage() {
                     onRegenerate={regenerateAnswer}
                     onEdit={editUserMessage}
                     onRetry={retryFailedMessage}
-                    onDownload={(fileId, name) => void downloadFile(`/api/z-torque/files/${fileId}/raw`, name)}
+                    onDownload={(fileId, name) => void downloadFile(`/api/z-torque/files/${fileId}/raw`, name).catch((err) => setError(errorText(err, "下载失败")))}
+                    onOpenChange={(changeId) => { setFocusChangeId(changeId); setFileDrawerOpen(true); }}
                   />
                 ))}
                 {/* 一轮助手回复：同一个气泡内，过程（header）在上实时追加、结论（content）在下流式输出 */}
@@ -2023,6 +2036,10 @@ export function ChatPage() {
                 </div>
               )}
             </div>
+
+            {task?.status === "WAITING_CHILD" && (
+              <p className="chat-panel-status-meta">正在等待子智能体执行完成，完成后会自动继续；无需人工操作。</p>
+            )}
 
             <div className="chat-panel-actions">
               {taskRunning && (

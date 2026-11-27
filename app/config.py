@@ -141,13 +141,15 @@ class Settings(BaseSettings):
     default_parent_agent_id: str | None = None
     admin_initial_username: str = 'admin'
     admin_initial_password: SecretStr | str = 'admin123'
+    # 单用户桌面包内置固定 admin/admin123，仅该交付形态豁免生产强口令校验。
+    allow_default_admin_password: bool = False
     delegation_enabled_global: bool = True
     delegation_max_children_per_root: int = 5
     delegation_max_concurrency: int = 3
     delegation_max_total_timeout_seconds: int = 600
     delegation_max_rounds_per_child: int = 20
     delegation_max_depth: int = 3
-    delegation_default_child_timeout_seconds: int = 120
+    delegation_default_child_timeout_seconds: int = 300
     mcp_protocol_version: str = '2025-06-18'
     mcp_timeout_seconds: float = 30
     mcp_max_response_bytes: int = 1_000_000
@@ -344,13 +346,14 @@ class Settings(BaseSettings):
         if self.app_env == 'production':
             if self.app_debug:
                 raise ValueError('APP_DEBUG must be false in production')
-            password = _plain_secret(self.admin_initial_password)
-            if (
-                len(password) < _MIN_ADMIN_PASSWORD_LENGTH
-                or password.lower() in _WEAK_ADMIN_PASSWORDS
-                or password.lower() == self.admin_initial_username.lower()
-            ):
-                raise ValueError('ADMIN_INITIAL_PASSWORD must be a strong non-default password in production')
+            if not self.allow_default_admin_password:
+                password = _plain_secret(self.admin_initial_password)
+                if (
+                    len(password) < _MIN_ADMIN_PASSWORD_LENGTH
+                    or password.lower() in _WEAK_ADMIN_PASSWORDS
+                    or password.lower() == self.admin_initial_username.lower()
+                ):
+                    raise ValueError('ADMIN_INITIAL_PASSWORD must be a strong non-default password in production')
             jwt_secret = _plain_secret(self.jwt_secret_key)
             if len(jwt_secret) < _MIN_JWT_SECRET_LENGTH or len(set(jwt_secret)) < 8:
                 raise ValueError('JWT_SECRET_KEY must be at least 32 high-entropy characters in production')

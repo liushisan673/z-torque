@@ -26,3 +26,16 @@ dist
 
 # 本地 Embedding 模型缓存由构建脚本下载，不提交约 90 MB 的权重文件
 /models/embedding-cache/
+
+# 桌面构建中间产物与脱敏种子快照，均由 build_exe.ps1 重新生成
+/build/
+/dist-stage/
+/seed-data/
+
+# 桌面自检打包产物（可由 build_exe.ps1 重新生成，不入库）
+/z-torque-selfcheck/
+
+# 图书业务全量数据随仓库分发（业务库与教材/课件等原始资料）
+!data/z_torque.db
+!data/files/*
+!data/files/.gitkeep

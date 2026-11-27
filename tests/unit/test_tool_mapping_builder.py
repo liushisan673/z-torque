@@ -80,8 +80,8 @@ def test_dangling_ref_is_stripped_from_model_tools_and_mapping():
     with SessionLocal() as db:
         tenant, version = _fixture(db, broken)
         mappings, tools = build_tool_mappings(db, version, tenant.id)
-        assert len(tools) == 1
-        parameters = tools[0]["function"]["parameters"]
+        cordys = next(tool for tool in tools if tool["function"]["name"] == "cordys_list")
+        parameters = cordys["function"]["parameters"]
         dumped = repr(parameters)
         assert "$ref" not in dumped and "components" not in dumped
         body_prop = parameters["properties"]["__body__"]
@@ -119,4 +119,6 @@ def test_delegation_mapping_excludes_confirmation_tools():
         assert mappings2 == {} and tools2 == []
         # 主链路（父智能体）默认不受影响：确认工具仍然暴露，走人工审批
         mappings3, tools3 = build_tool_mappings(db, version, tenant.id)
-        assert "cordys_list" in mappings3 and len(tools3) == 1
+        assert "cordys_list" in mappings3 and any(
+            tool["function"]["name"] == "cordys_list" for tool in tools3
+        )

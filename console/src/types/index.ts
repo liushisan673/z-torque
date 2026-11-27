@@ -690,6 +690,10 @@ export interface PatchArtifactSummary {
   source: FileChangeSource;
   task_id: string | null;
   path: string;
+  /** 已采纳时的落盘文件 id；待评审为 null */
+  file_id?: string | null;
+  /** 下载地址：已采纳指向 /files/{id}/raw，待评审指向草稿下载端点 */
+  download_url?: string | null;
   content_hash: string;
   review_state: PatchReviewState;
   kind?: FileChangeKind;

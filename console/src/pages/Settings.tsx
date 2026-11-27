@@ -1,11 +1,11 @@
 /**
- * 偏好设置页（Phase 2 §四 i18n / 主题 / 背景 / 字号进阶）。
- *
- * 全部偏好只存本机 localStorage，经 ThemeProvider 落到 <html data-*>，
- * 不写后端、不影响其他用户；通用组件文案走轻量字典，缺失回退中文。
+ * 偏好设置页：外观偏好存本机 localStorage；文件直出等运行时开关存本机数据目录并即时生效。
+ * 通用组件文案走轻量字典，缺失回退中文。
  */
-import { Card, Segmented, Typography } from "antd";
+import { useEffect, useState } from "react";
+import { Card, Segmented, Switch, Typography } from "antd";
 import type { Locale } from "../i18n/messages";
+import { request } from "../services/api";
 import { usePreferences } from "../theme/ThemeProvider";
 import type { BackgroundChoice, FontScale } from "../theme/ThemeProvider";
 
@@ -23,6 +23,39 @@ export function SettingsPage() {
     setFontScale,
     t,
   } = usePreferences();
+  const [fileAutoKeep, setFileAutoKeep] = useState(false);
+  const [fileSettingReady, setFileSettingReady] = useState(false);
+  const [fileSettingBusy, setFileSettingBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void request<{ file_change_auto_keep: boolean }>("/api/z-torque/settings/runtime")
+      .then((data) => {
+        if (!cancelled) {
+          setFileAutoKeep(Boolean(data.file_change_auto_keep));
+          setFileSettingReady(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setFileSettingReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function toggleFileAutoKeep(value: boolean) {
+    setFileSettingBusy(true);
+    try {
+      const data = await request<{ file_change_auto_keep: boolean }>(
+        "/api/z-torque/settings/runtime/file-change-auto-keep",
+        { method: "PUT", body: { auto_keep: value } },
+      );
+      setFileAutoKeep(Boolean(data.file_change_auto_keep));
+    } finally {
+      setFileSettingBusy(false);
+    }
+  }
 
   return (
     <div className="settings-page">
@@ -30,6 +63,23 @@ export function SettingsPage() {
         <Title level={3}>{t("settings.title")}</Title>
         <Paragraph type="secondary">{t("settings.subtitle")}</Paragraph>
       </div>
+
+      <Card className="settings-card" title="文件输出">
+        <div className="settings-row">
+          <div>
+            <div>文件直出</div>
+            <Paragraph type="secondary" className="settings-hint">
+              开启后，生成文档将直接保存为会话附件；关闭时先生成变更提案，需在评审面板采纳后才会保存。
+            </Paragraph>
+          </div>
+          <Switch
+            checked={fileAutoKeep}
+            disabled={!fileSettingReady || fileSettingBusy}
+            loading={fileSettingBusy}
+            onChange={(value) => void toggleFileAutoKeep(value)}
+          />
+        </div>
+      </Card>
 
       <Card className="settings-card" title={t("settings.section.language")}>
         <Segmented

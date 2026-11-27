@@ -41,6 +41,7 @@ from app.services.media_ingest import (
     MEDIA_KIND_VIDEO,
     media_kind_of,
 )
+from app.services.runtime_settings import get_file_change_auto_keep
 
 logger = logging.getLogger("z_torque.context_builder")
 
@@ -170,10 +171,17 @@ def build_agent_system_prompt(db: Session, agent_version: AgentVersion | None, s
     # 校验侧见 services/citation_guard.py；不在提示词里靠"请不要编造"软约束。
     citation_rule = "[引用约束] 使用知识库或会话附件检索资料回答时，在相关段落末尾标注 [资料:文件名]；文件名必须来自检索上下文的来源清单。严禁向用户输出 chunk_id、UUID、内部文件路径或检索分数。内部引用 ID 仅供系统审计和追踪使用。"
     system_prompt = (system_prompt + "\n\n" if system_prompt else "") + citation_rule
-    document_rule = (
-        "[文件变更 ChangeSet] 禁止直接写/改/删文件。输出或改文档时调用 output_document 提交提案并填 purpose/risk，"
-        "等待用户 Keep/Cancel；回退也先生成反向提案。只说明目的与风险，不贴大段 diff。"
-    )
+    if get_file_change_auto_keep():
+        document_rule = (
+            "[文件变更 ChangeSet] 禁止直接写/改/删文件。输出或改文档时调用 output_document 并填 purpose/risk；"
+            "当前已开启「文件直出」，工具返回后文件会直接保存为会话附件，请在回复中说明生成的文件名。"
+            "只说明目的与结果，不贴大段 diff。"
+        )
+    else:
+        document_rule = (
+            "[文件变更 ChangeSet] 禁止直接写/改/删文件。输出或改文档时调用 output_document 提交提案并填 purpose/risk，"
+            "等待用户 Keep/Cancel；回退也先生成反向提案。只说明目的与风险，不贴大段 diff。"
+        )
     system_prompt = (system_prompt + "\n\n") + document_rule
     # 平台内置联网搜索：只读工具，提示模型在时效性/外部事实场景使用，并统一引用格式。
     if getattr(get_settings(), "builtin_mcp_search_enabled", False):

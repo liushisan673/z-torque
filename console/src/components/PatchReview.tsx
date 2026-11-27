@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, Empty, Spin, Tag } from "antd";
-import { CheckOutlined, CloseOutlined, ReloadOutlined, RollbackOutlined } from "@ant-design/icons";
-import { request } from "../services/api";
+import { CheckOutlined, CloseOutlined, DownloadOutlined, ReloadOutlined, RollbackOutlined } from "@ant-design/icons";
+import { downloadFile, request } from "../services/api";
 import type { FileChangeSource, PatchReviewState, ReviewDetail, ReviewItem } from "../types";
 
 type DiffKind = "same" | "add" | "del" | "hunk";
@@ -187,7 +187,19 @@ function SplitCell({ row, showNumbers }: { row: DiffRow | null; showNumbers: boo
   );
 }
 
-export function PatchReviewPanel({ conversationId, active }: { conversationId: string | null; active: boolean }) {
+export function PatchReviewPanel({
+  conversationId,
+  active,
+  focusChangeId,
+  onChanged,
+}: {
+  conversationId: string | null;
+  active: boolean;
+  /** 从会话气泡跳转过来时要定位的提案 id */
+  focusChangeId?: string | null;
+  /** 采纳/放弃/回退成功后通知外层刷新消息（否则气泡停留在旧状态） */
+  onChanged?: () => void;
+}) {
   const [items, setItems] = useState<ReviewItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReviewDetail | null>(null);
@@ -223,9 +235,11 @@ export function PatchReviewPanel({ conversationId, active }: { conversationId: s
       });
       setItems(normalized);
       setSelectedId((previous) => (
-        previous && normalized.some((item) => item.id === previous)
-          ? previous
-          : normalized[0]?.id ?? null
+        focusChangeId && normalized.some((item) => item.id === focusChangeId)
+          ? focusChangeId
+          : previous && normalized.some((item) => item.id === previous)
+            ? previous
+            : normalized[0]?.id ?? null
       ));
     } catch (err) {
       setError(err instanceof Error ? err.message : "文件变更加载失败");
@@ -234,7 +248,12 @@ export function PatchReviewPanel({ conversationId, active }: { conversationId: s
     } finally {
       setLoading(false);
     }
-  }, [conversationId]);
+  }, [conversationId, focusChangeId]);
+
+  useEffect(() => {
+    if (!active || !focusChangeId) return;
+    setSelectedId(focusChangeId);
+  }, [active, focusChangeId]);
 
   useEffect(() => {
     if (!active || !conversationId) {
@@ -270,6 +289,19 @@ export function PatchReviewPanel({ conversationId, active }: { conversationId: s
   );
   const splitRows = useMemo(() => buildSplitRows(diffRows), [diffRows]);
 
+  async function downloadSelected() {
+    if (!detail || busy) return;
+    const url = detail.download_url
+      ?? (detail.file_id ? `/api/z-torque/files/${detail.file_id}/raw` : null);
+    if (!url) return;
+    setError(null);
+    try {
+      await downloadFile(url, itemName(detail));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "下载失败");
+    }
+  }
+
   async function runAction(kind: "keep" | "cancel" | "undo" | "rollback") {
     if (!selectedId || busy) return;
     const selected = items.find((item) => item.id === selectedId);
@@ -284,6 +316,7 @@ export function PatchReviewPanel({ conversationId, active }: { conversationId: s
       await request(`/api/z-torque/workspace/${base}/${selectedId}/${endpoint}`, { method: "POST" });
       await loadList();
       await refreshDetail(selectedId, source);
+      onChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : "操作失败");
     } finally {
@@ -361,6 +394,15 @@ export function PatchReviewPanel({ conversationId, active }: { conversationId: s
                     <button type="button" className={viewMode === "split" ? "active" : ""} onClick={() => setViewMode("split")}>并排视图</button>
                     <button type="button" className={showLineNumbers ? "active" : ""} title="显示行号" onClick={() => setShowLineNumbers((value) => !value)}>行号</button>
                   </div>
+                  <Button
+                    size="small"
+                    icon={<DownloadOutlined />}
+                    disabled={busy || !(detail.download_url || detail.file_id)}
+                    title="待评审下载草稿，已采纳下载正式文件"
+                    onClick={() => void downloadSelected()}
+                  >
+                    下载
+                  </Button>
                   <Button size="small" icon={<CheckOutlined />} disabled={busy || !canKeep} onClick={() => void runAction("keep")}>采纳</Button>
                   {isFileChange && (
                     <Button size="small" icon={<CloseOutlined />} disabled={busy || !canCancel} onClick={() => void runAction("cancel")}>放弃</Button>

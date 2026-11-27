@@ -3,7 +3,7 @@ import { Avatar, Button, Select } from "antd";
 import { Bubble } from "@ant-design/x";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { request, uploadFile } from "../services/api";
+import { downloadFile, request, uploadFile } from "../services/api";
 import { openGetStream, openPostStream, type SseHandle } from "../services/sse";
 import { ActiveRun, eventLabel, localStep, payloadOf, RunBlock, TERMINAL, type TaskStep } from "../pages/chatRun";
 import type { Conversation, FileMetadata, Message, Task } from "../types";
@@ -241,7 +241,11 @@ export function ConversationPane({ conversations, currentId, onClose, generation
       <div className="chat-split-pane-messages" ref={scrollRef}>
         {messages.length === 0 && <div className="chat-split-pane-empty">选择会话后，可在这里独立发送和查看消息。</div>}
         {messages.map((message) => (
-          <MessageBubble key={message.id} m={message} />
+          <MessageBubble
+            key={message.id}
+            m={message}
+            onDownload={(fileId, name) => void downloadFile(`/api/z-torque/files/${fileId}/raw`, name).catch((err) => setError(err instanceof Error ? err.message : "下载失败"))}
+          />
         ))}
         {(activeRun || liveText !== null) && (
           <Bubble className="chat-bubble chat-bubble-live" placement="start" variant="borderless" shape="corner"

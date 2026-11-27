@@ -18,6 +18,11 @@ datas = [
 datas += collect_data_files("app")
 datas += collect_data_files("fastembed")
 
+seed_root = ROOT / "seed-data"
+if not (seed_root / "z_torque.db").is_file() or not (seed_root / "files").is_dir():
+    raise RuntimeError("Bundled seed data is missing. Run scripts/prepare_seed_data.py before packaging.")
+datas.append((str(seed_root), "seed-data"))
+
 embedding_assets = ROOT / "models" / "embedding-cache"
 if not embedding_assets.is_dir() or not any(embedding_assets.rglob("*.onnx")):
     raise RuntimeError("Bundled Chinese Embedding model is missing. Run scripts/download_embedding_model.py before packaging.")

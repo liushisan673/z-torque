@@ -135,6 +135,8 @@ export function LoginPage() {
                 </div>
               </div>
 
+              <div className="field-help">桌面版内置账号：admin / admin123；首次登录后请按提示配置模型密钥。</div>
+
               <button className="btn btn-primary login-submit" type="submit" disabled={submitting}>
                 {submitting ? "登录中…" : "登录"}
               </button>

@@ -150,7 +150,7 @@ def resolve_agent_mentions(db: Session, *, tenant_id: UUID, mentions: list[dict]
     return (cleaned or content).strip(), version.id, agent.id
 
 
-async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None, commit_before_generate: bool = False, source: str = "console", external_sender: str | None = None, mentions: list[dict] | None = None, generation_preset: str | None = None) -> ChatResult:
+async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | None, conversation_id: UUID | None, content: str, content_parts: list[dict] | None, idempotency_key: str | None, trace_id: str | None, model_gateway: ModelGateway | None = None, skill_gateway: SkillGateway | None = None, short_memory: ShortTermMemoryProvider | None = None, commit_before_generate: bool = True, source: str = "console", external_sender: str | None = None, mentions: list[dict] | None = None, generation_preset: str | None = None) -> ChatResult:
     # 外部链路（webhook/external）的消息以 EXTERNAL 角色落库，不再冒充 owner 用户；
     # owner 仅作为会话归属人（权限隔离），消息身份与真人（console）区分。
     sender_type = "USER" if source == "console" else "EXTERNAL"
@@ -261,11 +261,13 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
                 response = await model_gateway.generate(request)
             except ModelGatewayError as exc:
                 user_message.status = "FAILED"
+                db.commit()
                 raise ApiError(exc.code, exc.message, 502) from exc
 
             if response.tool_calls:
                 if not can_execute_tools:
                     user_message.status = "FAILED"
+                    db.commit()
                     raise ApiError("AI_TOOL_MAPPING_INVALID", "model requested tools but no executable tool mapping is available", 502)
                 # 非流式链路也复用流式链路的首轮推理种子：worker 直接执行工具，
                 # 不重复调用模型；普通文本回复则仍然是 Message，不创建 Task。
@@ -287,6 +289,7 @@ async def handle_chat(db: Session, *, ctx: SecurityContext, agent_id: UUID | Non
                 reply = knowledge_service.ensure_answer_citations(reply, knowledge_chunks)
             if not reply:
                 user_message.status = "FAILED"
+                db.commit()
                 raise ApiError("AI_MODEL_RESPONSE_INVALID", "model returned an empty response", 502)
             assistant = Message(
                 tenant_id=tenant_id,

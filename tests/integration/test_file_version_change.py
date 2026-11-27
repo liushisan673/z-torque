@@ -147,3 +147,45 @@ async def test_file_change_proposal_keep_cancel_and_rollback():
             assert db.get(File, first_file_id).status == "PARSED"
             assert db.scalar(select(AuditLog).where(AuditLog.action == "FILE_CHANGE_PROPOSED")) is not None
             assert db.scalar(select(AuditLog).where(AuditLog.action == "FILE_CHANGE_CANCELLED")) is not None
+
+
+@pytest.mark.asyncio
+async def test_file_change_download_pending_draft_and_kept_file():
+    _, user_id, conversation_id = _bootstrap()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login = await client.post("/api/z-torque/auth/login", json={"username": _username(user_id), "password": "pass"})
+        assert login.status_code == 200
+        headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+
+        exported = await _export(client, headers, conversation_id, "我的妈妈\n")
+        change_id = exported["version_change_id"]
+
+        listed = await client.get(
+            "/api/z-torque/workspace/file-changes", headers=headers,
+            params={"conversation_id": str(conversation_id)},
+        )
+        pending = listed.json()["data"][0]
+        assert pending["file_id"] is None
+        assert pending["download_url"] == f"/api/z-torque/workspace/file-changes/{change_id}/download"
+
+        draft = await client.get(pending["download_url"], headers=headers)
+        assert draft.status_code == 200, draft.text
+        assert draft.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        assert draft.content[:2] == b"PK"
+        assert "attachment" in draft.headers["content-disposition"]
+        with SessionLocal() as db:
+            assert db.get(FileVersionChange, UUID(change_id)).review_state == "PENDING"
+
+        await client.post(f"/api/z-torque/workspace/file-changes/{change_id}/keep", headers=headers)
+        kept_list = await client.get(
+            "/api/z-torque/workspace/file-changes", headers=headers,
+            params={"conversation_id": str(conversation_id)},
+        )
+        kept = kept_list.json()["data"][0]
+        assert kept["file_id"] is not None
+        assert kept["download_url"] == f"/api/z-torque/files/{kept['file_id']}/raw"
+        downloaded = await client.get(kept["download_url"], headers=headers)
+        assert downloaded.status_code == 200, downloaded.text
+        assert downloaded.content[:2] == b"PK"

@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -38,6 +40,7 @@ from app.services.file_change_review import (
 from app.services.file_change_review import (
     propose_rollback as propose_rollback_service,
 )
+from app.services.document_export import build_document
 from app.services.text_diff import line_changes
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
@@ -299,6 +302,13 @@ def _file_change_payload(
     include_text: bool = False,
 ) -> dict:
     state = change.review_state
+    kept_file_id = str(change.current_file_id) if state == FILE_REVIEW_KEPT and change.current_file_id else None
+    download_url = None
+    if kept_file_id:
+        download_url = f"/api/z-torque/files/{kept_file_id}/raw"
+    elif state == FILE_REVIEW_PENDING:
+        # 待评审文档尚未落盘：下载端点按提案正文动态生成，不改变审查状态
+        download_url = f"/api/z-torque/workspace/file-changes/{change.id}/download"
     payload = {
         "id": str(change.id),
         "source": "file",
@@ -306,6 +316,8 @@ def _file_change_payload(
         "path": change.name,
         "name": change.name,
         "media_type": change.media_type,
+        "file_id": kept_file_id,
+        "download_url": download_url,
         "content_hash": change.content_hash,
         "review_state": state,
         "kind": change.kind,
@@ -397,6 +409,66 @@ def get_file_change(
     latest_ids = _latest_file_ids(db, user, change.conversation_id)
     rollback_targets = _pending_rollback_targets(db, user, change.conversation_id)
     return success_response(request, _file_change_payload(change, latest_ids, rollback_targets, include_text=True))
+
+
+@router.get("/file-changes/{change_id}/download", summary="下载文件变更（已采纳下载原文件，待评审下载草稿）")
+def download_file_change(
+    change_id: UUID,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """已采纳：返回落盘原文件（docx/pdf 等二进制）；待评审：按提案正文即时生成草稿字节。
+
+    草稿下载不写对象存储、不改变 review_state，语义仍是「Keep 后才真正保存」。
+    """
+    change = _owned_file_change(db, user, change_id)
+    if change.review_state == FILE_REVIEW_KEPT and change.current_file_id:
+        item = db.get(File, change.current_file_id)
+        registry = getattr(request.app.state, "port_registry", None)
+        store = registry.get("object.store") if registry is not None else None
+        if item is not None and item.status != "DELETED" and store is not None:
+            target = store.local_path(item.storage_key)
+            if target.is_file():
+                record_audit(
+                    db,
+                    tenant_id=user.tenant_id,
+                    actor_user_id=user.id,
+                    action="FILE_READ",
+                    resource_type="FILE",
+                    resource_id=item.id,
+                    summary="kept file change downloaded",
+                    detail={"change_id": str(change.id), "name": item.original_name},
+                    trace_id=None,
+                )
+                db.commit()
+                return FileResponse(
+                    target,
+                    media_type=item.media_type or "application/octet-stream",
+                    filename=item.original_name,
+                    content_disposition_type="attachment",
+                )
+    try:
+        data, name, media_type = build_document(change.fmt or "md", change.name, change.after_text or "")
+    except ValueError as exc:
+        raise ApiError("AI_FILE_TYPE_UNSUPPORTED", "unsupported document format", 415) from exc
+    record_audit(
+        db,
+        tenant_id=user.tenant_id,
+        actor_user_id=user.id,
+        action="FILE_READ",
+        resource_type="FILE_CHANGE",
+        resource_id=change.id,
+        summary="file change draft downloaded",
+        detail={"change_id": str(change.id), "name": name, "review_state": change.review_state},
+        trace_id=None,
+    )
+    db.commit()
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
+    )
 
 
 @router.post("/file-changes/{change_id}/keep", summary="采纳文件变更提案（Keep 后才落地）")

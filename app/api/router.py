@@ -22,6 +22,7 @@ from app.api.routes.models import router as models_router
 from app.api.routes.onboarding import router as onboarding_router
 from app.api.routes.scheduler import router as scheduler_router
 from app.api.routes.secrets import router as secrets_router
+from app.api.routes.settings import router as settings_router
 from app.api.routes.skills_tools import router as skills_tools_router
 from app.api.routes.tasks import router as tasks_router
 from app.api.routes.usage import router as usage_router
@@ -54,6 +55,7 @@ router.include_router(audit_exports_router)
 router.include_router(audit_archive_router)
 router.include_router(a2a_router)
 router.include_router(secrets_router)
+router.include_router(settings_router)
 router.include_router(webhooks_router)
 router.include_router(usage_router)
 router.include_router(workspace_router)

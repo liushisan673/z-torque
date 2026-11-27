@@ -366,7 +366,16 @@ class TaskRuntime:
             if task.conversation_id is not None and (conversation is None or trigger is None):
                 return self._fail_model_task(db, task, "AI_TASK_CONTEXT_INVALID", "task context is invalid")
             agent_version = db.get(AgentVersion, task.agent_version_id)
-            mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id, user_id=task.owner_user_id)
+            # 委派子任务没有会话，确认卡片只按父任务 ID 渲染，用户永远无法批准；
+            # 与 execution_loop._run_child_agent 保持一致，fail-closed 屏蔽需确认工具。
+            exclude_confirmation = task.parent_task_id is not None
+            mappings, tools = build_tool_mappings(
+                db, agent_version, task.tenant_id,
+                exclude_requires_confirmation=exclude_confirmation,
+                # 子任务不再委派：递归委派会撞 depth 上限，整条链缺块且不产出结论
+                allow_delegation=task.parent_task_id is None,
+                user_id=task.owner_user_id,
+            )
             # 与 chat 页面流式链路一致：系统提示 + 绑定 skill 执行指令
             system_prompt = build_agent_system_prompt(db, agent_version, [m.skill_version_id for m in mappings.values() if m.skill_version_id])
             knowledge_chunks = knowledge_service.retrieve_agent_knowledge(
@@ -413,6 +422,14 @@ class TaskRuntime:
                 if result.pending_delegation is not None:
                     return self._pause_for_child_task(db, task, result.pending_delegation)
                 if result.pending_confirmation is not None:
+                    if task.parent_task_id is not None:
+                        # 子任务无会话，确认卡片无处渲染；挂起只会空转到 deadline
+                        return self._fail_model_task(
+                            db, task,
+                            "AI_CONFIRMATION_UNAVAILABLE_IN_CHILD",
+                            "child task cannot request confirmation",
+                            public_message="委派子任务需要人工确认，但子任务无法展示确认卡片，已中止",
+                        )
                     # 写入类工具挂起等待审批：确认机制已把任务置为 WAITING_HUMAN，worker 直接让出，不判失败。
                     # 必须显式提交：checkpoint/confirmation/WAITING_HUMAN 状态与事件都在本事务里，
                     # 不提交则 with 退出即回滚——任务回到 RUNNING、前端永远等不到确认信号（历史 bug 根因）
@@ -478,7 +495,10 @@ class TaskRuntime:
             if target_version is None:
                 raise ApiError("AI_AGENT_NOT_FOUND", "delegated Agent version is not current, published, or visible", 404)
             now = datetime.now(UTC)
-            child_deadline = now + timedelta(seconds=settings.delegation_default_child_timeout_seconds)
+            child_deadline = min(
+                now + timedelta(seconds=settings.delegation_default_child_timeout_seconds),
+                now + timedelta(seconds=settings.delegation_max_total_timeout_seconds),
+            )
             if task.deadline_at is not None:
                 child_deadline = min(child_deadline, ensure_utc(task.deadline_at))
             ctx = SecurityContext(tenant_id=task.tenant_id, user_id=task.owner_user_id, trace_id=str(task.id))
@@ -552,17 +572,29 @@ class TaskRuntime:
         if task.conversation_id is not None and (conversation is None or trigger is None):
             return self._fail_model_task(db, task, "AI_TASK_CONTEXT_INVALID", "task context is invalid")
         agent_version = db.get(AgentVersion, task.agent_version_id)
-        mappings, tools = build_tool_mappings(db, agent_version, task.tenant_id, user_id=task.owner_user_id)
+        mappings, tools = build_tool_mappings(
+            db, agent_version, task.tenant_id,
+            exclude_requires_confirmation=task.parent_task_id is not None,
+            allow_delegation=task.parent_task_id is None,
+            user_id=task.owner_user_id,
+        )
         if checkpoint.status == "CHILD_COMPLETED":
             child_id = chat_context.get("child_task_id")
             child = db.get(Task, UUID(str(child_id))) if child_id else None
             if child is None or child.parent_task_id != task.id or child.status not in TERMINAL_STATES:
                 return self._fail_model_task(db, task, "AI_CHECKPOINT_INVALID", "delegated child task is not terminal")
+            child_content = (child.result or {}).get("content")
+            if not child_content:
+                # 子任务失败/超时时给出可读结论，避免父任务只拿到 None 后表现为「完全没有内容」。
+                if child.status == TaskStatus.TIMEOUT:
+                    child_content = "委派子任务在截止时间前未能完成，没有返回分析结论；请重试或拆分更小的任务。"
+                elif child.status == TaskStatus.WAITING_HUMAN:
+                    child_content = "委派子任务等待人工确认，但确认卡片无法在会话中显示；已中止该子任务。"
             child_payload = {
                 "status": str(child.status),
                 "agent_version_id": str(child.agent_version_id),
                 "task_id": str(child.id),
-                "content": (child.result or {}).get("content"),
+                "content": child_content,
                 "error_code": child.error_code,
                 "error_message": child.error_message,
             }
@@ -594,6 +626,13 @@ class TaskRuntime:
                 )
                 if result.status != "SUCCEEDED":
                     if result.status == "WAITING_HUMAN":
+                        if task.parent_task_id is not None:
+                            return self._fail_model_task(
+                                db, task,
+                                "AI_CONFIRMATION_UNAVAILABLE_IN_CHILD",
+                                "child task replay requested confirmation",
+                                public_message="委派子任务需要人工确认，但子任务无法展示确认卡片，已中止",
+                            )
                         # 重放仍要求确认（防御分支）：持久化当前状态后让出
                         db.commit()
                         return {"task_id": str(task_id), "status": "WAITING_HUMAN"}
@@ -623,6 +662,13 @@ class TaskRuntime:
             if loop_result.pending_delegation is not None:
                 return self._pause_for_child_task(db, task, loop_result.pending_delegation, checkpoint=checkpoint)
             if loop_result.pending_confirmation is not None:
+                if task.parent_task_id is not None:
+                    return self._fail_model_task(
+                        db, task,
+                        "AI_CONFIRMATION_UNAVAILABLE_IN_CHILD",
+                        "child task resume requested confirmation",
+                        public_message="委派子任务需要人工确认，但子任务无法展示确认卡片，已中止",
+                    )
                 # 续跑循环命中新的待确认工具：同主执行路径，先提交挂起状态再让出
                 db.commit()
                 return {"task_id": str(task_id), "status": "WAITING_HUMAN"}
@@ -962,6 +1008,14 @@ class TaskRuntime:
                     if confirmation and confirmation.status == "APPROVED" and checkpoint.status == "APPROVED":
                         transition_task(db, task, TaskStatus.QUEUED, "TASK_APPROVAL_RECOVERED", "approved task resumed after restart")
                         db.add(Outbox(id=new_uuid7(), tenant_id=task.tenant_id, aggregate_type="TASK", aggregate_id=task.id, event_type="TASK_READY", payload={"task_id": str(task.id), "resume_checkpoint_id": str(checkpoint.id), "recovered": True}))
+                    elif task.parent_task_id is not None:
+                        # 升级前遗留的挂起子任务：无会话、无确认 UI，永远不可能被批准，启动时收敛为失败
+                        self._fail_model_task(
+                            db, task,
+                            "AI_CONFIRMATION_UNAVAILABLE_IN_CHILD",
+                            "legacy child task stuck on confirmation",
+                            public_message="委派子任务需要人工确认，但子任务无法展示确认卡片，已中止",
+                        )
             # Two-pass recovery: a child that was RUNNING may have been marked FAILED
             # earlier in this same recovery pass. Re-scan WAITING_CHILD parents after all
             # task states have been reconciled so no parent remains stranded.

@@ -221,8 +221,22 @@ function compareText(before: string[], after: string[]): TextChange[] {
   return rows;
 }
 
-export function FileCompareDrawer({ conversationId }: { conversationId: string | null }) {
-  const [open, setOpen] = useState(false);
+export function FileCompareDrawer({
+  conversationId,
+  open: controlledOpen,
+  onOpenChange,
+  focusChangeId,
+  onChanged,
+}: {
+  conversationId: string | null;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  focusChangeId?: string | null;
+  onChanged?: () => void;
+}) {
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = onOpenChange ?? setInternalOpen;
   const [activeTab, setActiveTab] = useState<"changes" | "custom">("changes");
   const [files, setFiles] = useState<FileMetadata[]>([]);
   const [baseId, setBaseId] = useState<string | null>(null);
@@ -329,7 +343,12 @@ export function FileCompareDrawer({ conversationId }: { conversationId: string |
           <button type="button" className={activeTab === "custom" ? "active" : ""} onClick={() => setActiveTab("custom")}>自定义对比</button>
         </div>
         {activeTab === "changes" ? (
-          <PatchReviewPanel conversationId={conversationId} active={open} />
+          <PatchReviewPanel
+            conversationId={conversationId}
+            active={open}
+            focusChangeId={focusChangeId}
+            onChanged={onChanged}
+          />
         ) : (
           <>
         <div className="file-compare-hint">

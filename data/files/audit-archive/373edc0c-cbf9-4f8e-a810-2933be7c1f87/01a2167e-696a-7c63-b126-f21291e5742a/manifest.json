@@ -1,0 +1,25 @@
+{
+  "schema": "z-torque.audit-export.v1",
+  "job_id": "01a2167e-696a-7c63-b126-f21291e5742a",
+  "tenant_id": "373edc0c-cbf9-4f8e-a810-2933be7c1f87",
+  "format": "jsonl",
+  "filters": {
+    "window_start": "2026-04-30T06:15:12.998171",
+    "window_end": "2026-08-28T06:15:12.998171"
+  },
+  "row_count": 2,
+  "truncated": false,
+  "recursive": false,
+  "shards": [
+    {
+      "seq": 1,
+      "object_key": "audit-archive/373edc0c-cbf9-4f8e-a810-2933be7c1f87/01a2167e-696a-7c63-b126-f21291e5742a/part-00001.jsonl",
+      "rows": 2,
+      "size_bytes": 602,
+      "sha256": "02d2ee24be55b308193607d7ac9ba938eaaa4f7bec403e0238bef77f0b8262db",
+      "key_id": null
+    }
+  ],
+  "sha256_total": "9eed57607eba9ca595c8aaa8a780105d77a7d2e27caf868007389c752b88fb2b",
+  "generated_at": "2026-11-26T06:15:13.009217+00:00"
+}

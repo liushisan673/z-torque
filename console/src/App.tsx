@@ -7,6 +7,7 @@ import { LoginPage } from "./pages/Login";
 import { AppTopbar, APP_NAV, visibleNav, homePath } from "./components/AppTopbar";
 import type { NavItem } from "./components/AppTopbar";
 import { LoadingScreen } from "./components/Loading";
+import { FirstRunSetup } from "./components/FirstRunSetup";
 
 // 路由级代码分割：首屏只加载登录页，其余页面按需加载（主 chunk 从 ~528KB 显著下降）
 const ChatPage = lazy(() => import("./pages/Chat").then((m) => ({ default: m.ChatPage })));
@@ -69,6 +70,7 @@ function ConsoleShell({ children }: { children: ReactElement }) {
 export function App() {
   return (
     <ToastProvider>
+      <FirstRunSetup />
       <Suspense fallback={<LoadingScreen />}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />

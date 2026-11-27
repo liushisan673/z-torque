@@ -2057,6 +2057,16 @@ body {
 .chat-run-confirm { padding: 10px 12px; border-top: 1px solid var(--border); background: var(--warning-soft); }
 .chat-run-confirm p { margin: 0 0 8px; font-size: 13px; color: var(--text); }
 .chat-run-confirm .chat-confirm-args { max-height: 160px; overflow: auto; }
+/* 等待子智能体：中性提示，不暗示需要用户操作 */
+.chat-run-child-wait {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-subtle, transparent);
+}
+.chat-run-child-wait p { margin: 0; font-size: 13px; color: var(--text-secondary, var(--text)); }
 
 /* 一轮助手回复容器：过程在上、结论在下，共用一个头像 */
 .chat-turn {
@@ -6031,7 +6041,10 @@ body.pane-resizing {
   border-radius: 999px;
   padding: 3px 10px;
   font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
 }
+.chat-msg-file-proposal:hover { background: var(--bg-hover, rgba(22, 119, 255, 0.08)); }
 
 /* 媒体气泡：图片预览 / 音频 / 视频，全部使用 CSS 变量 */
 .chat-msg-media-image {

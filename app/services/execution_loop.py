@@ -33,6 +33,7 @@ from app.services.chat_document import create_chat_document
 from app.services.context_governance import heal_context, sanitize_untrusted
 from app.services.function_calling import ToolMapping, repair_tool_message, validate_tool_calls
 from app.services.model_limits import effective_max_tokens
+from app.services.runtime_settings import get_file_change_auto_keep
 from app.services.tool_mapping_builder import build_tool_mappings
 
 # 单次执行循环的最大「模型思考 + 工具调用」轮次。8 轮对多工具 MCP 链路偏紧，
@@ -391,7 +392,7 @@ class AgentExecutionLoop:
                                 task_id=getattr(task, "id", None),
                                 purpose=str(arguments.get("purpose", "")) or None,
                                 risk=str(arguments.get("risk", "")) or None,
-                                auto_keep=get_settings().file_change_auto_keep,
+                                auto_keep=get_file_change_auto_keep(),
                                 trace_id=request.trace_id,
                             )
                             tool_content = json.dumps({"status": "SUCCEEDED", **created}, ensure_ascii=False)
@@ -430,6 +431,20 @@ class AgentExecutionLoop:
                     deadline_at=deadline_at,
                 )
                 if result.status == "WAITING_HUMAN":
+                    if task is not None and getattr(task, "parent_task_id", None) is not None:
+                        # 委派子任务没有会话，确认卡片不会渲染给用户；挂起只会等到 120s deadline。
+                        # fail-closed：把该工具调用记为失败并让模型基于其余工具继续回答。
+                        tool_content = json.dumps({
+                            "status": "FAILED",
+                            "error_code": "AI_CONFIRMATION_UNAVAILABLE_IN_CHILD",
+                            "error_message": "该工具需要人工确认，但委派子任务无法展示确认卡片，已跳过；请基于现有信息给出结论。",
+                        }, ensure_ascii=False)
+                        _progress_event(
+                            db, task, "TASK_TOOL_RESULT", f"tool {call.name} skipped: confirmation unavailable in child task",
+                            trace_id=request.trace_id, payload={"tool_name": call.name, "status": "SKIPPED"},
+                        )
+                        messages.append(ModelMessage("tool", tool_content, tool_call_id=call.id))
+                        continue
                     # 写入类工具触发人工审批：任务已暂停（checkpoint 挂起），循环立即结束；
                     # 审批通过后由任务队列重放该次工具调用，调用方据此返回等待审批状态。
                     # 持久化执行循环上下文（消息快照 + 挂起工具调用 id），恢复时回填结果续跑至最终回复。
@@ -525,7 +540,7 @@ class AgentExecutionLoop:
         child_agent = db.get(Agent, child.agent_id)
         if child_agent is None or child_agent.status != "ACTIVE":
             return _error("child agent is not available", "AI_AGENT_NOT_FOUND")
-        mappings, tools = build_tool_mappings(db, child, tenant_id, exclude_requires_confirmation=True, user_id=ctx.user_id)
+        mappings, tools = build_tool_mappings(db, child, tenant_id, exclude_requires_confirmation=True, allow_delegation=False, user_id=ctx.user_id)
         # 与 chat 主路径一致：注入子智能体绑定 skill 的执行指令
         system_prompt = (child.config_snapshot or {}).get("system_prompt")
         if mappings:

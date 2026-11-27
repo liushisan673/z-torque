@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_optional_user
@@ -21,14 +22,14 @@ from app.config import get_settings
 from app.core.errors import ApiError
 from app.core.responses import error_response, success_response
 from app.db.session import SessionLocal, check_database, engine
-from app.kernel.agent.service import ensure_system_agent
+from app.kernel.agent.service import bind_bundled_model_to_agents, ensure_system_agent
 from app.kernel.audit.service import set_request_trace_id
 from app.kernel.capabilities import derive_stage
 from app.kernel.local_scheduler import LocalScheduler
 from app.kernel.md_skill_watcher import MdSkillWatcher
 from app.kernel.registry.port_registry import PortState
 from app.kernel.task.runtime import TaskRuntime
-from app.models import Tenant, User
+from app.models import ModelProvider, ModelResource, Tenant, User
 from app.security.permissions import is_admin_user
 from app.services.capability_presentation import build_capability_cards
 
@@ -65,6 +66,8 @@ async def lifespan(app: FastAPI):
         for tenant in tenants:
             # 系统自带智能体：首次启动即为每个租户创建并发布，用户只需配置模型即可使用
             ensure_system_agent(bootstrap_db, tenant_id=tenant.id)
+            # 修复旧快照：把内置模型标识绑定到所有已发布智能体，避免对话报 AI_MODEL_NOT_CONFIGURED
+            bind_bundled_model_to_agents(bootstrap_db, tenant_id=tenant.id)
             bootstrap_db.commit()
             watcher = MdSkillWatcher(settings.md_skills_dir, tenant.id, interval_seconds=settings.md_skill_scan_interval, enabled=settings.md_skill_watch_enabled, session_factory=SessionLocal, scheduler=scheduler)
             app.state.md_skill_watchers[str(tenant.id)] = watcher
@@ -326,7 +329,38 @@ async def capabilities(request: Request, user: User | None = Depends(get_optiona
             "citation_enforcement": True,
             "message_search": "AVAILABLE" if settings.knowledge_message_search_enabled else "UNAVAILABLE",
         }
-    model_capability = {"configured": bool(settings.model_base_url and settings.model_api_key), "name": settings.model_name, "implementation": model_implementation}
+    model_provider = None
+    if user is not None:
+        model_provider = db.scalar(
+            select(ModelProvider)
+            .where(
+                ModelProvider.tenant_id == user.tenant_id,
+                ModelProvider.status == "ENABLED",
+                ModelProvider.secret_ref.is_not(None),
+                ModelProvider.secret_ref != "",
+            )
+            .order_by(ModelProvider.created_at)
+            .limit(1)
+        )
+    model_name = settings.model_name or ""
+    if model_provider is not None:
+        resource = db.scalar(
+            select(ModelResource)
+            .where(
+                ModelResource.tenant_id == user.tenant_id,
+                ModelResource.provider_id == model_provider.id,
+                ModelResource.status == "ENABLED",
+            )
+            .order_by(ModelResource.created_at)
+            .limit(1)
+        )
+        if resource is not None:
+            model_name = resource.model_identifier
+    model_capability = {
+        "configured": model_provider is not None,
+        "name": model_name,
+        "implementation": model_implementation,
+    }
     mcp_capability = _mcp_capability(assembled_plugins, skill_gateway, getattr(request.app.state, "mcp_lifecycle", None))
     capability_cards = build_capability_cards(mcp=mcp_capability, knowledge=knowledge, model=model_capability)
     if is_admin:

@@ -29,6 +29,7 @@ from app.services.chat_document import create_chat_document
 from app.services.context_builder import build_agent_system_prompt, build_context
 from app.services.generation_presets import apply_generation_preset
 from app.services.model_limits import effective_max_tokens
+from app.services.runtime_settings import get_file_change_auto_keep
 from app.services.stream_service import sse_event
 from app.services.stream_service import stream_chat as stream_chat_events
 from app.services.tool_mapping_builder import build_tool_mappings
@@ -163,7 +164,7 @@ async def export_document(payload: DocumentExportRequest, request: Request, ctx=
         content=payload.content,
         purpose=payload.purpose,
         risk=payload.risk,
-        auto_keep=settings.file_change_auto_keep,
+        auto_keep=get_file_change_auto_keep(),
         trace_id=request.state.trace_id,
     )
     db.commit()

@@ -21,6 +21,7 @@ from app.models import (
 )
 from app.repositories import visible_owner_clause
 from app.services.function_calling import ToolMapping, safe_function_name
+from app.services.runtime_settings import get_file_change_auto_keep
 
 
 def _sanitize_schema(node):
@@ -66,7 +67,7 @@ def _dependency_ordered_links(links: list) -> list:
     return ordered
 
 
-def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID, *, exclude_requires_confirmation: bool = False, user_id: UUID | None = None) -> tuple[dict[str, ToolMapping], list[dict]]:
+def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID, *, exclude_requires_confirmation: bool = False, allow_delegation: bool = True, user_id: UUID | None = None) -> tuple[dict[str, ToolMapping], list[dict]]:
     if agent_version is None:
         return {}, []
     # Phase 2 属主收口：预取当前用户可见的 Skill / Tool id 集合，避免循环内逐条查询。
@@ -123,7 +124,10 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
     # 站内 A2A：所有 Agent 使用同一动态发现与派发入口；递归深度由运行时策略限制。
     # 只暴露 Agent 当前发布版本，历史 PUBLISHED 版本继续保留给旧任务快照，
     # 但不得作为新请求的路由候选，避免同一 Agent 重复出现在工具目录。
-    system_agent = db.get(Agent, agent_version.agent_id)
+    # allow_delegation=False 时完全不暴露 route_specialist：子任务再委派会形成
+    # 主→子→孙的递归链，最终撞上 delegation depth 上限整条链缺块，且用户看到的是
+    # "route_specialist 等待"这种既没有产出的中间态。委派只允许从根任务发起一层。
+    system_agent = db.get(Agent, agent_version.agent_id) if allow_delegation else None
     if system_agent is not None:
         candidate_query = (
             select(AgentVersion)
@@ -309,11 +313,24 @@ def build_tool_mappings(db, agent_version: AgentVersion | None, tenant_id: UUID,
             "additionalProperties": False,
         }
         mappings[alias] = ToolMapping(alias, None, None, schema, original_name="output_document", builtin_kind="document_output")
+        if get_file_change_auto_keep():
+            output_description = (
+                "系统内置文档技能：当用户需要新建或修改 Markdown/PDF/Word 文件时调用。"
+                "传入修改后的完整正文，系统会按当前「文件直出」偏好直接保存为会话附件并在回复中返回文件名。"
+                "不要直接写文件，不要在回复里输出大段 diff。"
+            )
+        else:
+            output_description = (
+                "系统内置文档技能：当用户需要新建或修改 Markdown/PDF/Word 文件时调用。"
+                "传入修改后的完整正文，系统会自动生成文件变更提案并展示给用户评审；"
+                "此时磁盘上的原文件不变，只有用户 Keep 后才会真正保存。"
+                "不要直接写文件，不要在回复里输出大段 diff。"
+            )
         tools.append({
             "type": "function",
             "function": {
                 "name": alias,
-                "description": "系统内置文档技能：当用户需要新建或修改 Markdown/PDF/Word 文件时调用。传入修改后的完整正文，系统会自动生成文件变更提案并展示给用户评审；此时磁盘上的原文件不变，只有用户 Keep 后才会真正保存。不要直接写文件，不要在回复里输出大段 diff。",
+                "description": output_description,
                 "parameters": schema,
             },
         })

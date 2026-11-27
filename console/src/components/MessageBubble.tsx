@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Avatar } from "antd";
+import { DownloadOutlined } from "@ant-design/icons";
 import { Bubble } from "@ant-design/x";
 import { downloadFile, fetchBlob } from "../services/api";
 import { HistoricalRun } from "../pages/chatRun";
@@ -96,6 +97,8 @@ export interface MessageBubbleProps {
   onEdit?: (m: Message) => void;
   onRetry?: (m: Message) => void;
   onDownload?: (fileId: string, name: string) => void;
+  /** 点击「变更提案」气泡：打开文件变更面板并定位到该提案 */
+  onOpenChange?: (changeId: string) => void;
 }
 
 /** 一条消息气泡：Bubble 承担头像/气泡/头脚槽位，Markdown 与附件仍在内容槽内 */
@@ -109,6 +112,7 @@ export function MessageBubble({
   onEdit,
   onRetry,
   onDownload,
+  onOpenChange,
 }: MessageBubbleProps) {
   const isUser = m.sender_type === "USER";
   // 外部来源（通用 Webhook 等）消息：用户侧内容 + 独立虚线气泡与来源徽标
@@ -140,9 +144,15 @@ export function MessageBubble({
       {hasAttachment && (
         <div className="chat-msg-files">
           {proposalParts.map((p, i) => (
-            <span key={`proposal-${i}`} className="chat-msg-file-proposal" title="文件变更提案，待确认">
+            <button
+              key={`proposal-${i}`}
+              className="chat-msg-file-proposal"
+              type="button"
+              title="文件变更提案：点击查看并下载草稿"
+              onClick={() => onOpenChange?.(String(p.change_id))}
+            >
               变更提案 · {String(p.file_name ?? "文件")}
-            </span>
+            </button>
           ))}
           {parts.map((p, i) => {
             if (partKind(p) !== "file") return <MessageMedia key={i} part={p} />;
@@ -155,7 +165,7 @@ export function MessageBubble({
                 onClick={() => (onDownload ?? ((id, n) => void downloadFile(`/api/z-torque/files/${id}/raw`, n)))(String(p.file_id), name)}
                 title="下载附件"
               >
-                {name}
+                <DownloadOutlined /> {name}
               </button>
             );
           })}

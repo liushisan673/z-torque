@@ -8,16 +8,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import socket
 import os
 import runpy
 import secrets
 import shutil
 import socket
 import sys
+import tempfile
 import webbrowser
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+SEED_DIRNAME = "seed-data"
+SEED_MARKER = ".seed-imported"
+BUILTIN_ADMIN_USERNAME = "admin"
+BUILTIN_ADMIN_PASSWORD = "admin123"
+# 桌面包只内置一个模型，首次配置只填密钥，模型标识固定不变。
+BUNDLED_MODEL_IDENTIFIER = "deepseek-flash"
 
 
 def resource_path(relative: str) -> Path:
@@ -34,6 +41,36 @@ def _data_dir() -> Path:
     else:
         base = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
     return (base / "ZTorque").expanduser().resolve()
+
+
+def _prepare_dir(path: Path) -> bool:
+    """Try to create a directory and leave a marker so later launches reuse it."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        (path / ".zt-data-root").write_text("Z-Torque data root\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def _resolve_data_dir() -> Path:
+    """Pick the first writable data location instead of dying on a locked AppData folder."""
+    candidates = [_data_dir()]
+    # 自检必须隔离：绝不复用安装包目录里已有的 .zt-data-root，
+    # 否则会把含密钥的用户数据写进分发包，让所有安装用户共用同一份密钥。
+    if "--self-check" in sys.argv:
+        candidates = [candidates[0]]
+    elif getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "data")
+    candidates.append(Path(tempfile.gettempdir()) / "ZTorque")
+
+    for candidate in candidates:
+        if (candidate / ".zt-data-root").is_file():
+            return candidate
+    for candidate in candidates:
+        if _prepare_dir(candidate):
+            return candidate
+    raise RuntimeError("找不到可写的 Z-Torque 数据目录")
 
 
 def _read_env(path: Path) -> dict[str, str]:
@@ -65,11 +102,32 @@ def _write_env(path: Path, values: dict[str, str]) -> None:
         pass
 
 
+def _import_seed_data(data_dir: Path, database_file: Path) -> bool:
+    """一次性地把随包分发的业务数据导入当前用户目录；密钥已在打包时清除。"""
+    marker = data_dir / SEED_MARKER
+    if database_file.exists() or marker.exists():
+        return False
+    seed_root = resource_path(SEED_DIRNAME)
+    seed_db = seed_root / "z_torque.db"
+    if not seed_db.is_file():
+        logging.getLogger("z_torque.desktop").warning("seed snapshot missing: %s", seed_db)
+        return False
+    shutil.copy2(seed_db, database_file)
+    seed_files = seed_root / "files"
+    if seed_files.is_dir():
+        shutil.copytree(seed_files, data_dir / "files", dirs_exist_ok=True)
+    marker.write_text("seed snapshot imported\n", encoding="utf-8")
+    return True
+
+
 def _prepare_environment() -> tuple[Path, bool]:
-    data_dir = _data_dir()
-    data_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("files", "secrets", "logs", "backups"):
+    data_dir = _resolve_data_dir()
+    for name in ("files", "secrets", "logs", "backups", "tmp"):
         (data_dir / name).mkdir(parents=True, exist_ok=True)
+    # 冻结应用在部分 Windows 环境里拿不到系统临时目录，SQLite 建临时文件会报
+    # "unable to open database file"；把临时目录固定到可写的数据目录内。
+    os.environ["TMP"] = str(data_dir / "tmp")
+    os.environ["TEMP"] = str(data_dir / "tmp")
 
     md_skills_dir = data_dir / "md-skills"
     if not md_skills_dir.exists():
@@ -83,15 +141,17 @@ def _prepare_environment() -> tuple[Path, bool]:
     from sqlalchemy.engine import URL
 
     database_file = data_dir / "z_torque.db"
+    seeded = _import_seed_data(data_dir, database_file)
     env_file = data_dir / "desktop.env"
     values = _read_env(env_file)
     if "JWT_SECRET_KEY" not in values:
         values["JWT_SECRET_KEY"] = secrets.token_urlsafe(48)
     if "SECRET_STORE_KEY" not in values:
         values["SECRET_STORE_KEY"] = Fernet.generate_key().decode("ascii")
-    if "ADMIN_INITIAL_PASSWORD" not in values:
-        values["ADMIN_INITIAL_PASSWORD"] = secrets.token_urlsafe(18)
-    values.setdefault("ADMIN_INITIAL_USERNAME", "admin")
+    # 单用户桌面版内置固定账号；首次配置模型密钥由前端弹窗完成。
+    values["ADMIN_INITIAL_USERNAME"] = BUILTIN_ADMIN_USERNAME
+    values["ADMIN_INITIAL_PASSWORD"] = BUILTIN_ADMIN_PASSWORD
+    values["ALLOW_DEFAULT_ADMIN_PASSWORD"] = "true"
     values.setdefault(
         "DATABASE_URL",
         URL.create("sqlite", database=str(database_file)).render_as_string(hide_password=False),
@@ -107,6 +167,9 @@ def _prepare_environment() -> tuple[Path, bool]:
     values.setdefault("MD_SKILL_SCRIPT_ENABLED", "true")
     values.setdefault("MD_SKILL_WINDOWS_PROCESS_ENABLED", "true")
     values.setdefault("SANDBOX_ISOLATION_MODE", "process")
+    # 内置联网搜索是平台能力：随包配置在首次启动时写入，之后用户可在 desktop.env 覆盖。
+    for key, value in _read_env(resource_path("seed-data/builtin-search.env")).items():
+        values.setdefault(key, value)
     _write_env(env_file, values)
 
     # The desktop distribution is intentionally local-only. Resource paths are installation-specific
@@ -120,7 +183,12 @@ def _prepare_environment() -> tuple[Path, bool]:
     os.environ["SERVE_CONSOLE"] = "true"
     os.environ["CONSOLE_DIST_DIR"] = str(resource_path("console/dist"))
     os.environ.setdefault("COOKIE_SECURE", "false")
-    return data_dir, not database_file.exists()
+    # 打包版不继承开发机上的模型密钥：所有模型接入统一由首次启动弹窗写入数据库。
+    os.environ["MODEL_BASE_URL"] = ""
+    os.environ["MODEL_API_KEY"] = ""
+    os.environ["MODEL_NAME"] = BUNDLED_MODEL_IDENTIFIER
+    os.environ["MODEL_ALLOWED_NAMES"] = "[]"
+    return data_dir, seeded
 
 
 def _run_migrations() -> None:
@@ -133,25 +201,20 @@ def _run_migrations() -> None:
     command.upgrade(config, "head")
 
 
-def _write_first_run_credentials(data_dir: Path, username: str, password: str) -> None:
-    path = data_dir / "first-run-admin.txt"
-    path.write_text(
-        "Z-Torque 首次启动管理员凭据\n"
-        "访问地址：首次启动后浏览器会自动打开本地控制台。\n"
-        f"用户名：{username}\n"
-        f"初始密码：{password}\n\n"
-        "请首次登录后立即修改密码，并妥善保管此文件。\n",
-        encoding="utf-8",
-    )
+def _ensure_builtin_admin() -> None:
+    """种子库自带 admin 用户，首次导入时把它的密码重置为内置密码。"""
+    from sqlalchemy import update
 
+    from app.db.session import SessionLocal
+    from app.models import User
+    from app.security.passwords import hash_password
 
-def _rotate_bootstrap_password(data_dir: Path) -> None:
-    """管理员账号已创建后，轮换仅用于 init_admin 的引导密码，避免长期保留真实初始密码。"""
-    env_file = data_dir / "desktop.env"
-    values = _read_env(env_file)
-    values["ADMIN_INITIAL_PASSWORD"] = secrets.token_urlsafe(18)
-    _write_env(env_file, values)
-    os.environ["ADMIN_INITIAL_PASSWORD"] = values["ADMIN_INITIAL_PASSWORD"]
+    with SessionLocal.begin() as db:
+        db.execute(
+            update(User)
+            .where(User.username == BUILTIN_ADMIN_USERNAME)
+            .values(password_hash=hash_password(BUILTIN_ADMIN_PASSWORD))
+        )
 
 
 def _worker_mode() -> bool:
@@ -173,6 +236,8 @@ def _self_check(data_dir: Path) -> int:
         resource_path("alembic/versions"),
         resource_path("app/builtin_plugins/audit_export_archive/migrations"),
         resource_path("console/dist/index.html"),
+        resource_path("seed-data/z_torque.db"),
+        resource_path("seed-data/files"),
     )
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -202,7 +267,12 @@ def _self_check(data_dir: Path) -> int:
     finally:
         embedding.close()
 
-    print(f"Z-Torque desktop package check passed (Chinese Embedding: 512 dimensions). Data directory: {data_dir}")
+    from app.config import get_settings
+    if not get_settings().builtin_mcp_search_token:
+        print("Z-Torque package is missing the built-in web search configuration: BUILTIN_MCP_SEARCH_TOKEN")
+        return 2
+
+    print(f"Z-Torque desktop package check passed (Chinese Embedding: 512 dimensions; built-in web search configured). Data directory: {data_dir}")
     return 0
 
 
@@ -274,7 +344,11 @@ def main() -> int:
     if _worker_mode():
         return 0
 
-    data_dir, _ = _prepare_environment()
+    if "--self-check" in sys.argv:
+        # 自检不应触碰真实用户数据目录；构建机上该目录也可能不可写。
+        os.environ["LOCALAPPDATA"] = str(Path(tempfile.gettempdir()) / "z-torque-selfcheck")
+
+    data_dir, seeded = _prepare_environment()
     instance_lock = _acquire_instance_lock(data_dir)
     log_dir = data_dir / "logs"
     handlers: list[logging.Handler] = [
@@ -290,23 +364,10 @@ def main() -> int:
 
         _run_migrations()
         from app.cli import init_admin
-        from app.config import get_settings
-        from app.db.session import SessionLocal
-        from app.models import User
-        from sqlalchemy import select
 
-        settings = get_settings()
-        with SessionLocal() as db:
-            admin_exists = db.scalar(
-                select(User.id).where(User.username == settings.admin_initial_username).limit(1)
-            ) is not None
         init_admin()
-        if not admin_exists:
-            password = settings.admin_initial_password
-            if hasattr(password, "get_secret_value"):
-                password = password.get_secret_value()
-            _write_first_run_credentials(data_dir, settings.admin_initial_username, str(password))
-        _rotate_bootstrap_password(data_dir)
+        if seeded:
+            _ensure_builtin_admin()
 
         asyncio.run(_serve(data_dir))
         return 0
@@ -320,5 +381,32 @@ def main() -> int:
         instance_lock.close()
 
 
+def _report_startup_failure(exc: BaseException) -> None:
+    import traceback
+
+    detail = "".join(traceback.format_exception(exc))
+    message = f"Z-Torque 启动失败：{exc}"
+    try:
+        log_path = Path(tempfile.gettempdir()) / "z-torque-startup-error.log"
+        log_path.write_text(detail, encoding="utf-8")
+        message += f"\n\n详细信息：{log_path}"
+    except OSError:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(0, message, "Z-Torque 启动失败", 0x10)
+        except Exception:
+            pass
+    print(message, file=sys.stderr)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:
+        _report_startup_failure(exc)
+        raise SystemExit(1)

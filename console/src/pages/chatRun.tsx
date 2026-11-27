@@ -302,6 +302,12 @@ function buildDigest(steps: TaskStep[], activeRun: ActiveRun | null): DigestStep
 }
 
 function headlineOf(digest: DigestStep[], activeRun: ActiveRun): string {
+  // 等待子任务与等待人工确认是两种完全不同的状态：前者不需要用户操作，
+  // 不能复用「等待确认」文案，否则用户会以为自己在等一个不存在的审批按钮。
+  if (activeRun.status === "WAITING_CHILD") {
+    const tool = waitingToolNameOf(activeRun);
+    return tool ? `等待子智能体 · ${tool}` : "等待子智能体";
+  }
   if (activeRun.waiting || activeRun.status === "WAITING_HUMAN") {
     const tool = waitingToolNameOf(activeRun);
     return tool ? `等待确认 · ${tool}` : "等待确认";
@@ -388,6 +394,10 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waiti
   const headline = useMemo(() => headlineOf(digest, activeRun), [digest, activeRun]);
 
   const live = runStatusInfo.cls === "run" || runStatusInfo.cls === "wait";
+  // WAITING_CHILD 也会把 activeRun.waiting 置真（父任务在等子任务），
+  // 但它不是审批：必须与 WAITING_HUMAN 分开，否则会渲染出一个没有按钮的「需要确认」提示。
+  const waitingChild = activeRun.status === "WAITING_CHILD";
+  const confirming = activeRun.waiting && !waitingChild;
   const autoOpen = activeRun.waiting || activeRun.status === "WAITING_HUMAN";
   const [open, setOpen] = useState(initiallyOpen ?? autoOpen);
   const [userToggled, setUserToggled] = useState(false);
@@ -468,8 +478,20 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waiti
             </ol>
           )}
 
+          {/* 委派子任务：父任务释放执行位等待子任务，不需要任何用户操作 */}
+          {waitingChild && (
+            <div className="chat-run-child-wait" role="status" aria-live="polite">
+              <span className="spinner" aria-hidden="true" />
+              <p>
+                {waitingToolName
+                  ? `已委派给子智能体（${waitingToolName}），正在等待其执行完成，完成后会自动继续。`
+                  : "正在等待子智能体执行完成，完成后会自动继续。"}
+              </p>
+            </div>
+          )}
+
           {/* 所有需要人工确认的操作统一在执行块中审批；等待时任务已释放执行位。 */}
-          {activeRun.waiting && (
+          {confirming && (
             <div className="chat-run-confirm" role="alert" aria-live="polite">
               <p>
                 {waitingSummary?.kind === "md_script"
@@ -491,7 +513,11 @@ export function RunBlock({ activeRun, taskError, onResolve, initiallyOpen, waiti
                   <button className="chat-btn-reject" type="button" onClick={() => onResolve(false)}>拒绝</button>
                 </div>
               ) : (
-                <p className="chat-run-desc">当前操作需要你确认。请核对执行范围后再决定是否继续。</p>
+                <p className="chat-run-desc">
+                  {waitingSummary
+                    ? "当前操作需要确认，但你没有处理该确认单的权限。请联系发起人或管理员处理。"
+                    : "未找到待处理的确认记录（可能已被处理或已过期），任务将自动继续，无需操作。"}
+                </p>
               )}
             </div>
           )}

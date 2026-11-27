@@ -6,7 +6,15 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
 from app.kernel.audit.service import record_audit
-from app.models import Agent, AgentVersion, AgentVersionSkill, Conversation, ShortTermMemory
+from app.models import (
+    Agent,
+    AgentVersion,
+    AgentVersionSkill,
+    Conversation,
+    ModelResource,
+    ShortTermMemory,
+    SkillVersionTool,
+)
 
 
 def _agent(db: Session, tenant_id: UUID, user_id: UUID, agent_id: UUID) -> Agent:
@@ -132,25 +140,85 @@ SYSTEM_AGENT_SNAPSHOT = {
 }
 
 
+def bundled_model_identifier(db: Session, tenant_id: UUID) -> str:
+    """读取随包内置的、已启用的模型标识（桌面版唯一可用模型）。"""
+    return str(db.scalar(
+        select(ModelResource.model_identifier)
+        .where(ModelResource.tenant_id == tenant_id, ModelResource.status == "ENABLED")
+        .order_by(ModelResource.created_at)
+        .limit(1)
+    ) or "")
+
+
+def system_agent_snapshot(db: Session, tenant_id: UUID) -> dict:
+    snapshot = dict(SYSTEM_AGENT_SNAPSHOT)
+    model = bundled_model_identifier(db, tenant_id)
+    if model:
+        snapshot["model"] = model
+    return snapshot
+
+
+def bind_bundled_model_to_agents(db: Session, tenant_id: UUID) -> int:
+    """给尚未绑定模型的已发布智能体补上内置模型，保留技能绑定并重算快照哈希。"""
+    model = bundled_model_identifier(db, tenant_id)
+    if not model:
+        return 0
+    from app.kernel.agent.version_service import _snapshot_hash
+
+    versions = db.scalars(
+        select(AgentVersion).where(
+            AgentVersion.tenant_id == tenant_id,
+            AgentVersion.status == "PUBLISHED",
+        )
+    ).all()
+    changed = 0
+    for version in versions:
+        snapshot = dict(version.config_snapshot or {})
+        if snapshot.get("model"):
+            continue
+        snapshot["model"] = model
+        skill_ids = [
+            link.skill_version_id
+            for link in db.scalars(
+                select(AgentVersionSkill).where(AgentVersionSkill.agent_version_id == version.id)
+            ).all()
+        ]
+        tool_ids: set[str] = set()
+        if skill_ids:
+            tool_ids = {
+                str(item)
+                for item in db.scalars(
+                    select(SkillVersionTool.tool_version_id).where(
+                        SkillVersionTool.skill_version_id.in_(skill_ids)
+                    )
+                ).all()
+            }
+        version.config_snapshot = snapshot
+        version.snapshot_hash = _snapshot_hash(snapshot, skill_version_ids=skill_ids, tool_version_ids=tool_ids)
+        changed += 1
+    return changed
+
+
 def ensure_system_agent(db: Session, *, tenant_id: UUID) -> Agent:
     """系统自带智能体：每个租户启动时确保存在且已发布，用户配置模型后即可用。
 
     旧安装的默认父可能是早期 bootstrap 的 `mode=mock` 空壳：这里就地升级其名称/描述，
     并为其已发布版本补上 router 系统提示快照（不新建版本，避免影响历史任务的版本引用）。
     """
+    snapshot = system_agent_snapshot(db, tenant_id)
     agent = bootstrap_default_parent(
         db, tenant_id=tenant_id, owner_user_id=None,
         name=SYSTEM_AGENT_NAME, description=SYSTEM_AGENT_DESCRIPTION,
-        snapshot=SYSTEM_AGENT_SNAPSHOT,
+        snapshot=snapshot,
     )
     agent.name = SYSTEM_AGENT_NAME
     agent.description = SYSTEM_AGENT_DESCRIPTION
     if agent.current_published_version_id is not None:
         version = db.get(AgentVersion, agent.current_published_version_id)
-        if version is not None and version.config_snapshot != SYSTEM_AGENT_SNAPSHOT:
+        if version is not None and version.config_snapshot != snapshot:
             from app.kernel.agent.version_service import _snapshot_hash
-            version.config_snapshot = dict(SYSTEM_AGENT_SNAPSHOT)
-            version.snapshot_hash = _snapshot_hash(version.config_snapshot)
+            version.config_snapshot = dict(snapshot)
+            version.snapshot_hash = _snapshot_hash(snapshot)
     return agent
 
 
