@@ -1,5 +1,6 @@
 import json
 import os
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -32,7 +33,11 @@ class _McpTransport(httpx.AsyncBaseTransport):
         return httpx.Response(200, json=body, headers={"Mcp-Session-Id": "session-1"}, request=request)
 
 
-def test_builtin_search_tools_in_tool_directory():
+def test_builtin_search_tools_in_tool_directory(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.tool_mapping_builder.get_settings",
+        lambda: SimpleNamespace(builtin_mcp_search_enabled=True, builtin_mcp_search_token="test-token"),
+    )
     tenant_id = uuid4()
     version = AgentVersion(
         id=uuid4(), tenant_id=tenant_id, agent_id=uuid4(), version_number=1,
