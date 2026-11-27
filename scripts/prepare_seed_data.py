@@ -308,6 +308,10 @@ def _write_builtin_search_env(target: Path) -> dict[str, str]:
             key = key.strip()
             if key.startswith("BUILTIN_MCP_SEARCH_") and value.strip():
                 defaults[key] = value.strip()
+    # 搜索服务凭据不是模型密钥，不能把“已启用但无凭据”的失效工具打进安装包。
+    # 未配置 token 时默认关闭联网搜索；用户仍可正常使用本地知识库与 Agent。
+    if not defaults.get("BUILTIN_MCP_SEARCH_TOKEN"):
+        defaults["BUILTIN_MCP_SEARCH_ENABLED"] = "false"
     payload = "".join(f"{key}={value}\n" for key, value in sorted(defaults.items()))
     (target / "builtin-search.env").write_text(payload, encoding="utf-8")
     return defaults
