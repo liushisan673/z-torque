@@ -161,64 +161,129 @@ def _normalize_knowledge_paths(conn: sqlite3.Connection) -> int:
     return cursor.rowcount
 
 
-def _bind_all_knowledge_bases(conn: sqlite3.Connection) -> tuple[list[str], int]:
-    """把种子库里的全部知识库绑定给每个已发布智能体，首次打开即可检索。"""
+
+def _validate_knowledge_bindings(conn: sqlite3.Connection) -> tuple[list[str], int]:
+    """校验已发布 Agent 的知识库绑定；绝不把全部知识库自动开放给所有 Agent。"""
     tables = _tables(conn)
-    if "zr_knowledge_base" not in tables or "zr_agent_version" not in tables:
-        return [], 0
-    kb_ids = [
-        str(row[0])
-        for row in conn.execute(
-            "select id from zr_knowledge_base where status = 'ACTIVE' order by created_at, id"
-        )
-    ]
-    if not kb_ids:
-        return [], 0
-    changed = 0
-    versions = conn.execute(
-        "select id, config_snapshot from zr_agent_version where status = 'PUBLISHED'"
+    required = {"zr_agent", "zr_agent_version", "zr_knowledge_base"}
+    if not required.issubset(tables):
+        raise RuntimeError(f"knowledge binding tables missing: {sorted(required - tables)}")
+
+    knowledge_bases = {
+        str(row[0]): (str(row[1]), str(row[2]) if row[2] is not None else None, str(row[3]))
+        for row in conn.execute("select id, tenant_id, owner_user_id, status from zr_knowledge_base")
+    }
+    referenced: set[str] = set()
+    bound_versions = 0
+    rows = conn.execute(
+        "select v.id, v.tenant_id, v.config_snapshot, a.owner_user_id "
+        "from zr_agent_version v join zr_agent a on a.id = v.agent_id "
+        "where v.status = 'PUBLISHED'"
     ).fetchall()
-    for version_id, raw in versions:
+    for version_id, tenant_id, raw_snapshot, owner_user_id in rows:
         try:
-            snapshot = json.loads(raw) if isinstance(raw, str) else None
-        except (TypeError, ValueError):
-            snapshot = None
+            snapshot = json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else {}
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"published Agent version {version_id} has invalid config_snapshot") from exc
         if not isinstance(snapshot, dict):
-            continue
-        if snapshot.get("knowledge_base_ids") == kb_ids:
-            continue
-        snapshot["knowledge_base_ids"] = kb_ids
-        skill_ids = [
-            str(item[0])
-            for item in conn.execute(
-                "select skill_version_id from zr_agent_version_skill where agent_version_id = ?",
-                (version_id,),
-            )
-        ]
-        tool_ids: list[str] = []
-        if skill_ids:
-            placeholders = ",".join("?" for _ in skill_ids)
-            tool_ids = [
-                str(item[0])
-                for item in conn.execute(
-                    f"select distinct tool_version_id from zr_skill_version_tool where skill_version_id in ({placeholders})",
-                    skill_ids,
+            raise RuntimeError(f"published Agent version {version_id} config_snapshot must be an object")
+        ids = snapshot.get("knowledge_base_ids", [])
+        if ids is None:
+            ids = []
+        if not isinstance(ids, list):
+            raise RuntimeError(f"published Agent version {version_id} knowledge_base_ids must be a list")
+        normalized = list(dict.fromkeys(str(item) for item in ids))
+        for kb_id in normalized:
+            kb = knowledge_bases.get(kb_id)
+            if kb is None:
+                raise RuntimeError(f"published Agent version {version_id} references missing knowledge base {kb_id}")
+            kb_tenant, kb_owner, kb_status = kb
+            expected_owner = str(owner_user_id) if owner_user_id is not None else None
+            if kb_tenant != str(tenant_id) or kb_owner != expected_owner or kb_status != "ACTIVE":
+                raise RuntimeError(
+                    f"published Agent version {version_id} references an inactive or foreign-owned knowledge base {kb_id}"
                 )
-            ]
-        payload = {
-            "config_snapshot": snapshot,
-            "skill_version_ids": sorted(skill_ids),
-            "tool_version_ids": sorted(tool_ids),
-        }
-        digest = hashlib.sha256(
-            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-        ).hexdigest()
-        conn.execute(
-            "update zr_agent_version set config_snapshot = ?, snapshot_hash = ? where id = ?",
-            (json.dumps(snapshot, ensure_ascii=False), digest, version_id),
+            referenced.add(kb_id)
+        if normalized:
+            bound_versions += 1
+    return sorted(referenced), bound_versions
+
+
+def _rebuild_knowledge_fts(conn: sqlite3.Connection) -> int:
+    """从权威 chunk 表重建全文索引，避免种子数据库携带过期/空 FTS 数据。"""
+    tables = _tables(conn)
+    if "zr_knowledge_chunk" not in tables:
+        raise RuntimeError("zr_knowledge_chunk table is missing; refusing to package an unsearchable knowledge base")
+    if "zr_knowledge_fts" not in tables:
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE zr_knowledge_fts USING fts5(tenant_id, chunk_id, text, tokenize='unicode61')"
+            )
+        except sqlite3.OperationalError:
+            conn.execute(
+                "CREATE TABLE zr_knowledge_fts (tenant_id VARCHAR(36), chunk_id VARCHAR(36), text TEXT)"
+            )
+    else:
+        conn.execute("DELETE FROM zr_knowledge_fts")
+    conn.execute(
+        "INSERT INTO zr_knowledge_fts(rowid, tenant_id, chunk_id, text) "
+        "SELECT rowid, tenant_id, id, text FROM zr_knowledge_chunk"
+    )
+    return int(conn.execute("SELECT COUNT(*) FROM zr_knowledge_chunk").fetchone()[0])
+
+
+def _validate_knowledge_integrity(conn: sqlite3.Connection, source_files: Path) -> dict[str, int]:
+    """打包前校验文件、文档、chunk 与知识库关联完整性。"""
+    tables = _tables(conn)
+    required = {"zr_file", "zr_knowledge_doc", "zr_knowledge_chunk", "zr_knowledge_base_document"}
+    if not required.issubset(tables):
+        raise RuntimeError(f"knowledge tables missing: {sorted(required - tables)}")
+
+    missing_files = []
+    for file_id, storage_key, status in conn.execute(
+        "select f.id, f.storage_key, f.status from zr_file f "
+        "join zr_knowledge_doc d on d.file_id = f.id where d.status = 'ACTIVE'"
+    ):
+        candidate = (source_files / str(storage_key)).resolve()
+        try:
+            candidate.relative_to(source_files.resolve())
+        except ValueError:
+            missing_files.append(str(file_id))
+            continue
+        if status != "PARSED" or not candidate.is_file():
+            missing_files.append(str(file_id))
+    if missing_files:
+        raise RuntimeError(
+            f"{len(missing_files)} indexed knowledge files are missing, unsafe, or not PARSED; "
+            f"examples={missing_files[:5]}"
         )
-        changed += 1
-    return kb_ids, changed
+
+    expected_chunks = int(conn.execute(
+        "select coalesce(sum(chunk_count), 0) from zr_knowledge_doc where status = 'ACTIVE'"
+    ).fetchone()[0])
+    actual_chunks = int(conn.execute(
+        "select count(*) from zr_knowledge_chunk c join zr_knowledge_doc d on d.id = c.doc_id "
+        "where d.status = 'ACTIVE'"
+    ).fetchone()[0])
+    if expected_chunks != actual_chunks:
+        raise RuntimeError(
+            f"knowledge chunk count mismatch: documents declare {expected_chunks}, actual rows {actual_chunks}"
+        )
+    linked_without_doc = int(conn.execute(
+        "select count(*) from zr_knowledge_base_document b "
+        "left join zr_knowledge_doc d on d.file_id = b.file_id and d.status = 'ACTIVE' "
+        "where d.id is null"
+    ).fetchone()[0])
+    if linked_without_doc:
+        raise RuntimeError(f"{linked_without_doc} knowledge-base file links have no active parsed document")
+    return {
+        "knowledge_documents": int(conn.execute("select count(*) from zr_knowledge_doc where status = 'ACTIVE'").fetchone()[0]),
+        "knowledge_chunks": actual_chunks,
+        "knowledge_files": int(conn.execute(
+            "select count(distinct d.file_id) from zr_knowledge_doc d where d.status = 'ACTIVE'"
+        ).fetchone()[0]),
+        "knowledge_base_file_links": int(conn.execute("select count(*) from zr_knowledge_base_document").fetchone()[0]),
+    }
 
 
 def _write_builtin_search_env(target: Path) -> dict[str, str]:
@@ -277,7 +342,9 @@ def prepare(source: Path, target: Path) -> Path:
         cleared = _scrub(writer)
         paths_normalized = _normalize_knowledge_paths(writer)
         bound_model, bound_versions = _bind_bundled_model(writer)
-        kb_ids, kb_versions_bound = _bind_all_knowledge_bases(writer)
+        kb_ids, kb_versions_bound = _validate_knowledge_bindings(writer)
+        knowledge_integrity = _validate_knowledge_integrity(writer, source_files)
+        fts_chunks = _rebuild_knowledge_fts(writer)
         counts = {
             table: writer.execute(f"select count(*) from {table}").fetchone()[0]
             for table in _COUNT_TABLES
@@ -306,6 +373,8 @@ def prepare(source: Path, target: Path) -> Path:
         "agent_versions_knowledge_bound": kb_versions_bound,
         "knowledge_paths_normalized": paths_normalized,
         "knowledge_files": copied_files,
+        "knowledge_integrity": knowledge_integrity,
+        "knowledge_fts_rows_rebuilt": fts_chunks,
         "builtin_search_configured": bool(search_env.get("BUILTIN_MCP_SEARCH_TOKEN")),
         "database_sha256": digest,
     }
@@ -316,6 +385,8 @@ def prepare(source: Path, target: Path) -> Path:
     print(f"  agents={counts.get('zr_agent', 0)} skills={counts.get('zr_skill', 0)} "
           f"knowledge_docs={counts.get('zr_knowledge_doc', 0)} files={copied_files}")
     print(f"  cleared credentials: {cleared}")
+    print(f"  knowledge integrity: {knowledge_integrity}; rebuilt FTS rows={fts_chunks}")
+    print(f"  explicitly bound knowledge bases={len(kb_ids)} across {kb_versions_bound} Agent versions")
     return target_db
 
 
