@@ -10,6 +10,16 @@ def test_prepare_environment_uses_user_data_dir_and_sqlite_by_default(tmp_path, 
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 
+    # 模拟 PyInstaller 随包资源，避免测试结果依赖开发机是否存在 seed-data。
+    package_root = tmp_path / "package"
+    (package_root / "seed-data" / "files").mkdir(parents=True)
+    (package_root / "seed-data" / "z_torque.db").write_bytes(b"seed snapshot")
+    (package_root / "seed-data" / "builtin-search.env").write_text(
+        "BUILTIN_MCP_SEARCH_ENABLED=false\\n", encoding="utf-8"
+    )
+    (package_root / "md-skills").mkdir()
+    monkeypatch.setattr(desktop_entry, "resource_path", lambda relative: package_root / relative)
+
     for key in (
         "DATABASE_URL",
         "JWT_SECRET_KEY",
