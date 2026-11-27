@@ -162,7 +162,7 @@ def test_child_delegation_request_carries_snapshot_model_params(monkeypatch):
 
     captured: dict = {}
 
-    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False, user_id=None):
+    def fake_builder(db, version, tenant_id, *, exclude_requires_confirmation=False, allow_delegation=True, user_id=None):
         captured["exclude_requires_confirmation"] = exclude_requires_confirmation
         captured["allow_delegation"] = allow_delegation
         captured["user_id"] = user_id
