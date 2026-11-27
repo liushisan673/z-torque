@@ -9,7 +9,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 
-from alembic import op
+from alembic import context, op
 
 revision: str = "e6f1a7b3c9d2"
 down_revision: str | None = "d7e9f2a4b6c8"
@@ -18,10 +18,16 @@ depends_on: str | Sequence[str] | None = None
 
 
 def _has_table(name: str) -> bool:
+    # Offline DDL is rendered against a clean target database; MockConnection
+    # cannot be inspected, so emit the table creation deterministically.
+    if context.is_offline_mode():
+        return False
     return sa.inspect(op.get_bind()).has_table(name)
 
 
 def _has_index(table: str, name: str) -> bool:
+    if context.is_offline_mode():
+        return False
     connection = op.get_bind()
     if connection.dialect.name == "sqlite":
         return bool(connection.exec_driver_sql("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?", (name,)).scalar())
